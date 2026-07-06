@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Photo Vault</title>
+  <meta name="theme-color" content="#0f172a" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon.svg" />
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="vendor/leaflet.css" />
+  <script src="vendor/leaflet.js"></script>
+  <!-- piexifjs (EXIF embedding) -->
+  <script src="vendor/piexif.min.js"></script>
+  <!-- JSZip (KMZ unzip) -->
+  <script src="vendor/jszip.min.js"></script>
+  <!-- togeojson (KML parsing) -->
+  <script src="vendor/togeojson.umd.min.js"></script>
+  <!-- docx (Word report generation) -->
+  <script src="vendor/docx.umd.js"></script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header>
+  <h1>📷 Photo Vault <span id="buildStamp" style="font-size:.55rem;font-weight:400;opacity:.7;vertical-align:middle;">build …</span></h1>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <a class="map-nav-link" href="map.html">🗺 Map summary</a>
+    <button id="installButton" class="secondary" hidden>⬇ Install App</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── Bridges overview ── -->
+  <section id="bridgesView" hidden>
+    <div class="bridges-head">
+      <h2>🌉 Bridges / Locations</h2>
+      <div class="bridges-head-actions">
+        <button id="importNbiButton" class="secondary">🔢 Import by NBI #</button>
+        <button id="newBridgeButton">➕ New bridge</button>
+      </div>
+    </div>
+    <p class="bridges-intro">Plan multiple inspection locations. Each bridge has its own KMZ overlay, title, description, photos, sketches, and reports. Click <strong>Open</strong> to work inside a bridge, or <strong>ZIP</strong> to download everything (images with embedded metadata, point clouds, overlay, and a Word report).</p>
+    <p id="bridgesEmpty" class="status-bar" hidden>No bridges yet. Create one to start planning and organizing inspections.</p>
+    <div id="bridgesList"></div>
+  </section>
+
+  <!-- ── Single-bridge workspace ── -->
+  <div id="appView" hidden>
+
+  <div class="bridge-banner">
+    <button id="backToBridges" class="secondary">← Bridges</button>
+    <div class="bridge-banner-info">
+      <span class="bridge-banner-title" id="bridgeBannerTitle"></span>
+      <span class="bridge-banner-desc" id="bridgeBannerDesc"></span>
+    </div>
+    <div class="bridge-banner-actions">
+      <button id="editBridgeButton" class="secondary">✎ Edit</button>
+      <button id="downloadBridgeZip" class="secondary">⬇ Download ZIP</button>
+    </div>
+  </div>
+
+  <!-- ── Camera card ── -->
+  <section class="card">
+    <!-- Preview row: main + optional thermal side-by-side -->
+    <div class="camera-previews">
+      <div class="camera-preview-wrap">
+        <span class="camera-label-badge">Main</span>
+        <video id="cameraPreview" autoplay playsinline muted></video>
+        <div id="cameraFallback">📷 Camera preview will appear here after you start the camera.</div>
+      </div>
+      <div id="thermalFrame" class="camera-preview-wrap" hidden>
+        <span class="camera-label-badge" style="background:rgba(180,60,0,.7);">Thermal / 2nd</span>
+        <video id="thermalPreview" autoplay playsinline muted></video>
+        <canvas id="depthCanvas" hidden style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;z-index:3;"></canvas>
+        <div id="depthBanner" hidden style="position:absolute;left:0;right:0;top:0;z-index:5;background:rgba(0,0,0,.8);color:#fff;font-size:.78rem;padding:5px 8px;text-align:center;line-height:1.35;"></div>
+      </div>
+    </div>
+    <canvas id="snapshotCanvas" hidden></canvas>
+
+    <!-- Main-camera selector (choose which device is the main camera) -->
+    <div id="mainCameraSelector" class="camera-selector" hidden>
+      <label for="mainCameraSelect">Main camera:</label>
+      <select id="mainCameraSelect"></select>
+    </div>
+
+    <!-- Second-camera selector (shown only when ≥2 cameras detected) -->
+    <div id="cameraSelector" class="camera-selector" hidden>
+      <label for="thermalCameraSelect">2nd camera:</label>
+      <select id="thermalCameraSelect"><option value="">None</option></select>
+      <button id="startThermalButton" hidden>▶ Start 2nd</button>
+      <button id="stopThermalButton" class="secondary" hidden>■ Stop 2nd</button>
+    </div>
+
+    <!-- Depth mode -->
+    <div id="depthModeRow" class="camera-selector" hidden>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="depthModeCheck" style="width:16px;height:16px;" />
+        <span style="font-size:.85rem;font-weight:600;">🔭 Depth map mode (2nd camera = right eye)</span>
+      </label>
+      <button id="calibrateDepthBtn" class="secondary" style="font-size:.78rem;padding:4px 10px;">⚙ Calibration</button>
+    </div>
+    <!-- Depth refine strength (sharp <-> filled). Auto-adapts per scene; slider scales it. -->
+    <div id="refineRow" class="camera-selector" hidden style="gap:8px;align-items:center;">
+      <span style="font-size:.8rem;font-weight:600;white-space:nowrap;">🎚 Depth detail</span>
+      <span style="font-size:.72rem;color:#94a3b8;">Sharp</span>
+      <input type="range" id="refineStrength" min="0" max="100" value="50" step="1" style="flex:1;min-width:90px;" />
+      <span style="font-size:.72rem;color:#94a3b8;">Filled</span>
+      <span id="refineStrengthVal" style="font-size:.72rem;color:#cbd5e1;width:2.4em;text-align:right;">0.50</span>
+    </div>
+    <!-- Depth cutoff distance: cull anything farther than this (0.25 m .. 4 m). -->
+    <div id="cutoffRow" class="camera-selector" hidden style="gap:8px;align-items:center;">
+      <span style="font-size:.8rem;font-weight:600;white-space:nowrap;">📏 Depth cutoff</span>
+      <span style="font-size:.72rem;color:#94a3b8;">0.25 m</span>
+      <input type="range" id="depthCutoff" min="0.25" max="4" value="1" step="0.05" style="flex:1;min-width:90px;" />
+      <span style="font-size:.72rem;color:#94a3b8;">4 m</span>
+      <span id="depthCutoffVal" style="font-size:.72rem;color:#cbd5e1;width:3.2em;text-align:right;">1.00 m</span>
+    </div>
+    <!-- Calibration panel (hidden by default) -->
+    <div id="calibPanel" class="overlay-panel" hidden>
+      <div class="panel-header-row"><h3>📐 Stereo Calibration</h3><button id="calibCloseBtn" class="secondary" style="padding:3px 10px;">✕</button></div>
+      <p style="font-size:.78rem;color:#94a3b8;">If you know your camera specs, enter them below. Otherwise click <strong>Auto-calibrate</strong> with a checkerboard pattern visible to both cameras.</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <label class="labeled-field"><span class="field-label">Focal length (px)</span><input id="calFocal" type="number" class="meta-input" value="700" /></label>
+        <label class="labeled-field"><span class="field-label">Baseline (mm)</span><input id="calBaseline" type="number" class="meta-input" value="60" /></label>
+        <label class="labeled-field"><span class="field-label">cx (principal x)</span><input id="calCx" type="number" class="meta-input" value="320" /></label>
+        <label class="labeled-field"><span class="field-label">cy (principal y)</span><input id="calCy" type="number" class="meta-input" value="240" /></label>
+        <label class="labeled-field"><span class="field-label">Min disparity</span><input id="calMinDisp" type="number" class="meta-input" value="0" /></label>
+        <label class="labeled-field"><span class="field-label">Num disparities (×16)</span><input id="calNumDisp" type="number" class="meta-input" value="8" /></label>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button id="saveCalibBtn">💾 Save calibration</button>
+        <button id="autoCalibBtn" class="secondary">🎯 Auto-calibrate with checkerboard</button>
+        <span id="calibStatus" style="font-size:.8rem;color:#94a3b8;align-self:center;"></span>
+      </div>
+    </div>
+
+    <!-- GPS + compass -->
+    <div class="geo-bar">
+      <button id="acquireGeoButton" class="secondary">📍 Get location &amp; direction</button>
+      <span id="geoText">Location: not acquired</span>
+      <span id="headingText">Direction: not acquired</span>
+    </div>
+
+    <!-- Comment -->
+    <textarea id="commentInput" rows="2" placeholder="Add a comment before capturing…"></textarea>
+
+    <!-- Tags -->
+    <div class="tags-field">
+      <div class="tags-field-label">🏷 Tags <span class="tags-field-hint">(pick any that apply)</span></div>
+      <div id="captureTags"></div>
+    </div>
+
+    <!-- Camera action buttons -->
+    <div class="actions-row">
+      <button id="startCameraButton">▶ Start Camera</button>
+      <button id="captureButton" disabled>📸 Capture</button>
+      <button id="switchCameraButton" class="secondary" disabled>🔄 Flip</button>
+      <button id="sketchButton" class="secondary">✏ Sketch</button>
+      <label class="secondary" style="padding:7px 14px;border-radius:8px;border:1px solid #334155;background:#273449;font-size:.85rem;font-weight:600;cursor:pointer;">
+        📂 Import
+        <input id="filePicker" type="file" accept="image/*" multiple hidden />
+      </label>
+    </div>
+
+    <!-- ── Guided pier scan (photogrammetry burst) ── -->
+    <div id="scanPanel" class="scan-panel">
+      <div class="scan-panel-head">
+        <span class="scan-title">🎞 Guided pier scan</span>
+        <input id="scanLabel" class="meta-input" placeholder="Target (e.g. Pier 3 – N face)" />
+        <button id="scanToggleBtn" class="secondary" disabled>▶ Start scan</button>
+      </div>
+      <p class="scan-hint">Auto-captures sharp, overlapping frames as you pan slowly across the surface. Produces a COLMAP/OpenMVG-ready image set. Lock zoom &amp; focus are applied automatically.</p>
+      <div id="scanHud" class="scan-hud" hidden>
+        <div id="scanGuide" class="scan-guide">Move slowly across the surface…</div>
+        <div class="scan-bar-wrap"><div id="scanOverlapBar" class="scan-bar"></div></div>
+        <div class="scan-hud-stats">
+          <span id="scanCount">0 frames</span>
+          <span id="scanFocus">Sharpness: –</span>
+          <span id="scanOverlapPct">Move: –</span>
+        </div>
+        <div class="scan-hud-actions">
+          <button id="scanShotBtn" class="secondary">📸 Force frame</button>
+          <button id="scanFinishBtn">■ Finish scan</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── KML / CAD overlay panel ── -->
+  <section class="card">
+    <div class="overlay-panel">
+      <div class="panel-header-row">
+        <h3>🗺 CAD Overlay (KML / KMZ)</h3>
+        <span id="kmlFileName"></span>
+        <button id="clearKmlButton" class="secondary" hidden>✕ Clear</button>
+        <label style="padding:5px 11px;border-radius:7px;border:1px solid #334155;background:#273449;font-size:.82rem;font-weight:600;cursor:pointer;">
+          📁 Load file
+          <input id="kmlFilePicker" type="file" accept=".kml,.kmz" hidden />
+        </label>
+      </div>
+      <p id="kmlStatus" style="font-size:.8rem;color:#94a3b8;">No overlay loaded. Load a KML or KMZ file to overlay CAD drawings on all maps.</p>
+      <div id="kmlOpacityRow" style="display:none;align-items:center;gap:9px;margin-top:6px;">
+        <label for="kmlOpacity" style="font-size:.8rem;color:#94a3b8;white-space:nowrap;">Overlay opacity</label>
+        <input id="kmlOpacity" type="range" min="0" max="100" value="100" style="flex:1;" />
+        <span id="kmlOpacityVal" style="font-size:.8rem;color:#cbd5e1;width:3ch;text-align:right;">100</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Status bar ── -->
+  <p id="statusMessage" class="status-bar">Initializing…</p>
+
+  <!-- ── Toolbar ── -->
+  <div class="actions-row" style="justify-content:flex-end">
+    <button id="wordReportButton" class="secondary" disabled>📄 Word Report</button>
+    <button id="clearAllButton" class="danger" disabled>🗑 Delete all</button>
+  </div>
+
+  <!-- ── Gallery ── -->
+  <p id="emptyState" class="status-bar" hidden>No photos yet. Start the camera or import images.</p>
+  <div id="photoGrid" hidden></div>
+
+  <!-- ── Pier scan sessions ── -->
+  <section class="card" id="scanSessionsCard" hidden>
+    <h3 style="margin:0 0 10px;">🎞 Pier scans (photogrammetry sets)</h3>
+    <div id="scanSessionsList"></div>
+  </section>
+
+  </div><!-- /#appView -->
+
+</main>
+
+<!-- ── Photo card template ── -->
+<template id="photoCardTemplate">
+  <article class="photo-card">
+    <div class="photo-images">
+      <div class="photo-img-wrap">
+        <span class="img-badge">Photo</span>
+        <img class="main-img" alt="Captured photo" />
+      </div>
+      <div class="photo-img-wrap thermal-img-wrap" hidden>
+        <span class="img-badge" style="background:rgba(180,60,0,.7);">Thermal</span>
+        <img class="thermal-img" alt="Thermal photo" />
+      </div>
+      <div class="photo-img-wrap depth-img-wrap" hidden>
+        <span class="img-badge" style="background:rgba(0,90,180,.75);">Depth</span>
+        <img class="depth-img" alt="Depth map" />
+      </div>
+    </div>
+    <div class="card-body">
+      <time class="card-time"></time>
+      <div class="photo-comment-area"></div>
+      <div class="photo-tags-area"></div>
+      <div class="photo-location-area"></div>
+      <div class="photo-heading-area"></div>
+      <div class="photo-attitude-area"></div>
+    </div>
+    <p class="map-hint" style="font-size:.75rem;color:#94a3b8;padding:4px 16px;">Drag the ▲ arrow to adjust location · Drag the yellow dot to adjust direction</p>
+    <div class="photo-map-container"></div>
+    <div class="photo-actions">
+      <button class="download-btn">⬇ Download</button>
+      <button class="delete-btn danger">🗑 Delete</button>
+    </div>
+  </article>
+</template>
+
+<script src="report.js"></script>
+<script src="basemap.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
