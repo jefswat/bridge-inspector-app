@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-06 14:40:00";
+const BUILD_STAMP = "2026-07-08 12:40:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -774,6 +774,14 @@ async function lockCameraForScan() {
   const caps = track.getCapabilities();
   const applied = [];
   const apply = async (c) => { try { await track.applyConstraints({ advanced: [c] }); applied.push(Object.keys(c).join("+")); return true; } catch (e) { console.warn("[scan] lock", c, e); return false; } };
+  // 0) Push scan capture to max available camera mode (prefer exact max, then ideal).
+  if (caps.width?.max && caps.height?.max) {
+    const wMax = caps.width.max, hMax = caps.height.max;
+    const exactOk = await apply({ width: wMax, height: hMax });
+    if (!exactOk) await apply({ width: { ideal: wMax }, height: { ideal: hMax } });
+    // Give the camera pipeline a moment to switch modes before we lock AF/AE.
+    await new Promise((r) => setTimeout(r, 250));
+  }
   // 1) Zoom → 1.0 (never digital-zoom; keeps focal length stable).
   if (caps.zoom) { const z = Math.min(Math.max(1, caps.zoom.min), caps.zoom.max); await apply({ zoom: z }); }
   // 2) Let AF/AE settle, then freeze at whatever it chose.
@@ -1489,6 +1497,458 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
   ));
+}
+
+// ── Photo annotation overlay (non-destructive) ────────────────────────────────
+let annotState = null;
+
+function openPhotoAnnotator(record) {
+  if (!record?.blob) return;
+  let overlay = document.getElementById("photoAnnotatorModal");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "photoAnnotatorModal";
+    overlay.className = "sketch-modal";
+    overlay.innerHTML = `
+      <div class="sketch-dialog photo-annotator-dialog">
+        <div class="sketch-header">
+          <span class="sketch-title">🖊 Photo annotation</span>
+          <button class="annot-close secondary" type="button">✕</button>
+        </div>
+        <div class="sketch-toolbar">
+          <button type="button" id="annotPenTool" class="secondary active">✍ Pen</button>
+          <button type="button" id="annotCalloutTool" class="secondary">🗨 Text callout</button>
+          <div class="sketch-swatches annot-swatches"></div>
+          <label class="sketch-custom">Color <input type="color" id="annotColor" value="#ef4444"></label>
+          <label class="sketch-size">Size <input type="range" id="annotSize" min="1" max="24" value="3"></label>
+          <label class="sketch-size">Callout fill
+            <select id="annotCalloutFill" class="meta-input" style="min-width:96px;">
+              <option value="white">White</option>
+              <option value="none">No fill</option>
+            </select>
+          </label>
+          <button type="button" id="annotEraser" class="secondary">🩹 Eraser</button>
+          <button type="button" id="annotDeleteCallout" class="secondary">🗑 Delete callout</button>
+          <button type="button" id="annotUndo" class="secondary">↶ Undo</button>
+          <button type="button" id="annotClear" class="secondary">🗑 Clear</button>
+        </div>
+        <div class="sketch-canvas-wrap photo-annotator-wrap">
+          <div class="photo-annotator-stage">
+            <img id="annotBaseImage" alt="Photo for annotation">
+            <canvas id="annotCanvas"></canvas>
+          </div>
+        </div>
+        <div class="sketch-footer">
+          <span class="sketch-hint">Overlay is stored separately from the photo. Use Pen for freehand stylus marks, or Text callout to place a leader + text box.</span>
+          <div class="sketch-footer-btns">
+            <button type="button" class="annot-cancel secondary">Cancel</button>
+            <button type="button" class="annot-remove secondary">Remove overlay</button>
+            <button type="button" class="annot-save">💾 Save overlay</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const sw = overlay.querySelector(".annot-swatches");
+    SKETCH_COLORS.forEach((c) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "sketch-swatch";
+      b.style.background = c;
+      b.dataset.color = c;
+      b.addEventListener("click", () => setAnnotColor(c));
+      sw.appendChild(b);
+    });
+
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) closePhotoAnnotator(); });
+    overlay.querySelector(".annot-close").addEventListener("click", closePhotoAnnotator);
+    overlay.querySelector(".annot-cancel").addEventListener("click", closePhotoAnnotator);
+    overlay.querySelector(".annot-save").addEventListener("click", savePhotoOverlay);
+    overlay.querySelector(".annot-remove").addEventListener("click", removePhotoOverlay);
+    overlay.querySelector("#annotColor").addEventListener("input", (e) => setAnnotColor(e.target.value));
+    overlay.querySelector("#annotSize").addEventListener("input", (e) => setAnnotSize(+e.target.value));
+    overlay.querySelector("#annotCalloutFill").addEventListener("change", (e) => setAnnotCalloutFill(e.target.value));
+    overlay.querySelector("#annotPenTool").addEventListener("click", () => setAnnotTool("pen"));
+    overlay.querySelector("#annotCalloutTool").addEventListener("click", () => setAnnotTool("callout"));
+    overlay.querySelector("#annotDeleteCallout").addEventListener("click", () => deleteSelectedCallout());
+    overlay.querySelector("#annotEraser").addEventListener("click", (e) => {
+      if (!annotState) return;
+      annotState.erasing = !annotState.erasing;
+      e.currentTarget.classList.toggle("active", annotState.erasing);
+    });
+    overlay.querySelector("#annotUndo").addEventListener("click", () => {
+      if (!annotState || !annotState.ops.length) return;
+      annotState.ops.pop();
+      redrawPhotoOverlay();
+    });
+    overlay.querySelector("#annotClear").addEventListener("click", () => {
+      if (!annotState) return;
+      annotState.ops = [];
+      redrawPhotoOverlay();
+    });
+    setupPhotoAnnotatorCanvas(overlay.querySelector("#annotCanvas"));
+  }
+
+  const baseImg = overlay.querySelector("#annotBaseImage");
+  const canvas = overlay.querySelector("#annotCanvas");
+  const prior = record.annotationData || { w: null, h: null, ops: [] };
+  const priorOps = Array.isArray(prior.ops) ? prior.ops : [];
+  annotState = {
+    record,
+    baseImg,
+    canvas,
+    ctx: canvas.getContext("2d"),
+    ops: priorOps.map((op) => JSON.parse(JSON.stringify(op))),
+    drawing: false,
+    current: null,
+    calloutStart: null,
+    dragCallout: null,
+    selectedCalloutIdx: -1,
+    tool: "pen",
+    color: "#ef4444",
+    size: 3,
+    calloutFill: "white",
+    erasing: false,
+  };
+  overlay.querySelector("#annotColor").value = "#ef4444";
+  overlay.querySelector("#annotSize").value = 3;
+  overlay.querySelector("#annotCalloutFill").value = "white";
+  overlay.querySelector("#annotEraser").classList.remove("active");
+  setAnnotTool("pen");
+  setAnnotColor("#ef4444");
+  syncAnnotControls();
+
+  const url = URL.createObjectURL(record.blob);
+  baseImg.src = url;
+  baseImg.onload = () => {
+    URL.revokeObjectURL(url);
+    const w = baseImg.naturalWidth, h = baseImg.naturalHeight;
+    canvas.width = w; canvas.height = h;
+    canvas.style.width = baseImg.clientWidth + "px";
+    canvas.style.height = baseImg.clientHeight + "px";
+    redrawPhotoOverlay();
+  };
+  overlay.style.display = "flex";
+}
+
+function setAnnotTool(tool) {
+  if (!annotState) return;
+  annotState.tool = tool;
+  const modal = document.getElementById("photoAnnotatorModal");
+  modal.querySelector("#annotPenTool").classList.toggle("active", tool === "pen");
+  modal.querySelector("#annotCalloutTool").classList.toggle("active", tool === "callout");
+  if (tool === "pen") annotState.calloutStart = null;
+}
+
+function setAnnotColor(c) {
+  if (!annotState) return;
+  annotState.color = c;
+  annotState.erasing = false;
+  const modal = document.getElementById("photoAnnotatorModal");
+  modal.querySelector("#annotColor").value = c;
+  modal.querySelector("#annotEraser").classList.remove("active");
+  modal.querySelectorAll(".annot-swatches .sketch-swatch").forEach((b) => b.classList.toggle("active", b.dataset.color === c));
+  applyAnnotStyleToSelectedCallout();
+}
+
+function setAnnotSize(sz) {
+  if (!annotState) return;
+  annotState.size = Math.max(1, Math.round(sz || 1));
+  const modal = document.getElementById("photoAnnotatorModal");
+  modal.querySelector("#annotSize").value = String(annotState.size);
+  applyAnnotStyleToSelectedCallout();
+}
+
+function setAnnotCalloutFill(fill) {
+  if (!annotState) return;
+  annotState.calloutFill = fill === "none" ? "none" : "white";
+  const modal = document.getElementById("photoAnnotatorModal");
+  modal.querySelector("#annotCalloutFill").value = annotState.calloutFill;
+  applyAnnotStyleToSelectedCallout();
+}
+
+function syncAnnotControls() {
+  if (!annotState) return;
+  const modal = document.getElementById("photoAnnotatorModal");
+  const selected = annotState.selectedCalloutIdx >= 0 ? annotState.ops[annotState.selectedCalloutIdx] : null;
+  if (selected && selected.type === "callout") {
+    modal.querySelector("#annotColor").value = selected.color || annotState.color;
+    modal.querySelector("#annotSize").value = String(Math.max(1, Math.round(selected.size || annotState.size)));
+    modal.querySelector("#annotCalloutFill").value = selected.fill === "none" ? "none" : "white";
+  } else {
+    modal.querySelector("#annotColor").value = annotState.color;
+    modal.querySelector("#annotSize").value = String(annotState.size);
+    modal.querySelector("#annotCalloutFill").value = annotState.calloutFill;
+  }
+}
+
+function applyAnnotStyleToSelectedCallout() {
+  if (!annotState) return;
+  const i = annotState.selectedCalloutIdx;
+  if (i < 0) return;
+  const op = annotState.ops[i];
+  if (!op || op.type !== "callout") return;
+  op.color = annotState.color;
+  op.size = annotState.size;
+  op.fill = annotState.calloutFill;
+  redrawPhotoOverlay();
+}
+
+function annotPos(e) {
+  const c = annotState.canvas;
+  const r = c.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * (c.width / r.width), y: (e.clientY - r.top) * (c.height / r.height) };
+}
+
+function calloutLayout(op, canvas, ctx) {
+  const size = Math.max(1, op.size || 3);
+  const fontPx = Math.max(14, Math.round(10 + size * 2));
+  const lines = String(op.text || "").trim().split(/\r?\n/).filter(Boolean);
+  const safeLines = lines.length ? lines : [" "];
+  const pad = 6;
+  ctx.save();
+  ctx.font = `${fontPx}px Arial, sans-serif`;
+  let textW = 0;
+  for (const ln of safeLines) textW = Math.max(textW, ctx.measureText(ln).width);
+  ctx.restore();
+  const boxW = textW + pad * 2;
+  const boxH = safeLines.length * (fontPx + 2) + pad * 2 - 2;
+  const bx = (op.box && isFinite(op.box[0])) ? op.box[0] : 0;
+  const by = (op.box && isFinite(op.box[1])) ? op.box[1] : 0;
+  const x = Math.max(2, Math.min(canvas.width - boxW - 2, bx));
+  const y = Math.max(2, Math.min(canvas.height - boxH - 2, by));
+  const ax = (op.anchor && isFinite(op.anchor[0])) ? op.anchor[0] : x;
+  const ay = (op.anchor && isFinite(op.anchor[1])) ? op.anchor[1] : y;
+  return { ax, ay, x, y, boxW, boxH, fontPx, pad, lines: safeLines };
+}
+
+function findCalloutHit(p) {
+  if (!annotState) return null;
+  const { canvas, ctx } = annotState;
+  const near = (x, y, px, py, r = 14) => ((x - px) ** 2 + (y - py) ** 2) <= r * r;
+  for (let i = annotState.ops.length - 1; i >= 0; i--) {
+    const op = annotState.ops[i];
+    if (!op || op.type !== "callout") continue;
+    const l = calloutLayout(op, canvas, ctx);
+    if (near(p.x, p.y, l.ax, l.ay, 14)) return { idx: i, mode: "anchor" };
+    if (near(p.x, p.y, l.x, l.y, 14)) return { idx: i, mode: "box" };
+    if (p.x >= l.x && p.x <= l.x + l.boxW && p.y >= l.y && p.y <= l.y + l.boxH) return { idx: i, mode: "moveBox", x0: l.x, y0: l.y };
+  }
+  return null;
+}
+
+function setupPhotoAnnotatorCanvas(canvas) {
+  canvas.addEventListener("pointerdown", (e) => {
+    if (!annotState) return;
+    canvas.setPointerCapture(e.pointerId);
+    const p = annotPos(e);
+    if (annotState.tool === "callout") {
+      const hit = findCalloutHit(p);
+      if (hit) {
+        annotState.selectedCalloutIdx = hit.idx;
+        const op = annotState.ops[hit.idx];
+        annotState.color = op.color || annotState.color;
+        annotState.size = Math.max(1, Math.round(op.size || annotState.size));
+        annotState.calloutFill = op.fill === "none" ? "none" : "white";
+        annotState.dragCallout = { idx: hit.idx, mode: hit.mode, p0: p, box0: op.box ? [op.box[0], op.box[1]] : [p.x, p.y] };
+        syncAnnotControls();
+        redrawPhotoOverlay();
+        return;
+      }
+      annotState.selectedCalloutIdx = -1;
+      syncAnnotControls();
+      annotState.calloutStart = p;
+      redrawPhotoOverlay();
+      return;
+    }
+    annotState.drawing = true;
+    annotState.selectedCalloutIdx = -1;
+    annotState.current = {
+      type: "stroke",
+      color: annotState.erasing ? "#000000" : annotState.color,
+      size: annotState.size,
+      erase: !!annotState.erasing,
+      points: [[p.x, p.y]],
+    };
+    annotState.ops.push(annotState.current);
+    redrawPhotoOverlay();
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    const p = annotPos(e);
+    if (annotState?.dragCallout) {
+      const { idx, mode, p0, box0 } = annotState.dragCallout;
+      const op = annotState.ops[idx];
+      if (!op || op.type !== "callout") return;
+      if (mode === "anchor") op.anchor = [p.x, p.y];
+      else if (mode === "box") op.box = [p.x, p.y];
+      else if (mode === "moveBox") op.box = [box0[0] + (p.x - p0.x), box0[1] + (p.y - p0.y)];
+      redrawPhotoOverlay();
+      return;
+    }
+    if (!annotState || !annotState.drawing || !annotState.current) return;
+    annotState.current.points.push([p.x, p.y]);
+    redrawPhotoOverlay();
+  });
+  canvas.addEventListener("pointerup", (e) => {
+    if (!annotState) return;
+    if (annotState.dragCallout) {
+      annotState.dragCallout = null;
+      redrawPhotoOverlay();
+      return;
+    }
+    if (annotState.tool === "callout" && annotState.calloutStart) {
+      const a = annotState.calloutStart;
+      const b = annotPos(e);
+      annotState.calloutStart = null;
+      const txt = prompt("Callout text:");
+      if (txt && txt.trim()) {
+        const idx = annotState.ops.length;
+        annotState.ops.push({
+          type: "callout",
+          color: annotState.color,
+          size: Math.max(1, annotState.size),
+          anchor: [a.x, a.y],
+          box: [b.x, b.y],
+          text: txt.trim(),
+          fill: annotState.calloutFill,
+        });
+        annotState.selectedCalloutIdx = idx;
+        // Prevent "stuck in callout mode": after creating one, return to pen.
+        setAnnotTool("pen");
+        syncAnnotControls();
+        redrawPhotoOverlay();
+      }
+      return;
+    }
+    annotState.drawing = false;
+    annotState.current = null;
+  });
+  canvas.addEventListener("pointercancel", () => {
+    if (!annotState) return;
+    annotState.drawing = false;
+    annotState.current = null;
+    annotState.calloutStart = null;
+    annotState.dragCallout = null;
+  });
+}
+
+function redrawPhotoOverlay() {
+  if (!annotState) return;
+  const { ctx, canvas } = annotState;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (const op of annotState.ops) {
+    if (op.type === "stroke") {
+      const pts = op.points || [];
+      if (!pts.length) continue;
+      ctx.save();
+      ctx.globalCompositeOperation = op.erase ? "destination-out" : "source-over";
+      ctx.strokeStyle = op.color || "#ef4444";
+      ctx.fillStyle = op.color || "#ef4444";
+      ctx.lineWidth = op.size || 3;
+      if (pts.length === 1) {
+        ctx.beginPath();
+        ctx.arc(pts[0][0], pts[0][1], (op.size || 3) / 2, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+        ctx.stroke();
+      }
+      ctx.restore();
+      continue;
+    }
+    if (op.type === "callout") {
+      const l = calloutLayout(op, canvas, ctx);
+      const { ax, ay, x, y, boxW, boxH, fontPx, lines, pad } = l;
+      const color = op.color || "#ef4444";
+      const size = Math.max(1, op.size || 3);
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(2, size);
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(x, y);
+      ctx.stroke();
+      ctx.font = `${fontPx}px Arial, sans-serif`;
+      ctx.textBaseline = "top";
+      if (op.fill !== "none") {
+        ctx.fillStyle = "rgba(255,255,255,0.88)";
+        ctx.fillRect(x, y, boxW, boxH);
+      }
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, boxW, boxH);
+      ctx.fillStyle = "#111827";
+      lines.forEach((ln, i) => ctx.fillText(ln, x + pad, y + pad + i * (fontPx + 2)));
+      if (annotState.selectedCalloutIdx >= 0 && annotState.ops[annotState.selectedCalloutIdx] === op) {
+        ctx.fillStyle = "#22d3ee";
+        ctx.beginPath(); ctx.arc(ax, ay, 5, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#f59e0b";
+        ctx.fillRect(x - 4, y - 4, 8, 8);
+      }
+      ctx.restore();
+    }
+  }
+  if (annotState.tool === "callout" && annotState.calloutStart) {
+    const p = annotState.calloutStart;
+    ctx.save();
+    ctx.strokeStyle = "#22d3ee";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(p.x - 8, p.y); ctx.lineTo(p.x + 8, p.y);
+    ctx.moveTo(p.x, p.y - 8); ctx.lineTo(p.x, p.y + 8);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function closePhotoAnnotator() {
+  const overlay = document.getElementById("photoAnnotatorModal");
+  if (overlay) overlay.style.display = "none";
+  annotState = null;
+}
+
+async function savePhotoOverlay() {
+  if (!annotState) return;
+  const rec = annotState.record;
+  const hasOps = annotState.ops.length > 0;
+  let overlayBlob = null;
+  if (hasOps) overlayBlob = await canvasToBlob(annotState.canvas, "image/png");
+  const updated = {
+    ...rec,
+    annotationData: hasOps ? { w: annotState.canvas.width, h: annotState.canvas.height, ops: annotState.ops } : null,
+    annotationOverlayBlob: overlayBlob,
+  };
+  await runTransaction("readwrite", (store) => store.put(updated));
+  await renderSavedPhotos();
+  closePhotoAnnotator();
+  setStatus(hasOps ? "🖊 Photo overlay saved (kept separate)." : "🖊 Overlay cleared.");
+}
+
+function deleteSelectedCallout() {
+  if (!annotState) return;
+  const i = annotState.selectedCalloutIdx;
+  if (i < 0 || !annotState.ops[i] || annotState.ops[i].type !== "callout") {
+    setStatus("Select a callout first (tap anchor, box corner, or inside the box).");
+    return;
+  }
+  annotState.ops.splice(i, 1);
+  annotState.selectedCalloutIdx = -1;
+  syncAnnotControls();
+  redrawPhotoOverlay();
+}
+
+async function removePhotoOverlay() {
+  if (!annotState) return;
+  const rec = annotState.record;
+  const updated = { ...rec, annotationData: null, annotationOverlayBlob: null };
+  await runTransaction("readwrite", (store) => store.put(updated));
+  await renderSavedPhotos();
+  closePhotoAnnotator();
+  setStatus("Overlay removed.");
 }
 
 // ── Sketch (draw instead of photo) ─────────────────────────────────────────────
@@ -2290,6 +2750,15 @@ function buildCard(record) {
     const badge = card.querySelector(".photo-img-wrap .img-badge");
     if (badge) { badge.textContent = "Sketch"; badge.style.background = "rgba(124,58,237,.75)"; }
   }
+  if (record.annotationOverlayBlob) {
+    const overlayImg = document.createElement("img");
+    overlayImg.className = "photo-annotation-overlay";
+    const ovUrl = URL.createObjectURL(record.annotationOverlayBlob);
+    overlayImg.src = ovUrl;
+    overlayImg.alt = "Annotation overlay";
+    overlayImg.addEventListener("load", () => URL.revokeObjectURL(ovUrl), { once: true });
+    card.querySelector(".photo-img-wrap").appendChild(overlayImg);
+  }
 
   if (record.thermalBlob) {
     const thermalWrap = card.querySelector(".thermal-img-wrap");
@@ -2319,9 +2788,21 @@ function buildCard(record) {
   renderHeadingArea(card.querySelector(".photo-heading-area"), record);
   renderAttitudeArea(card.querySelector(".photo-attitude-area"), record);
 
-  card.querySelector(".download-btn").addEventListener("click", () => downloadPhoto(record, record.blob, "photo"));
+  const dlBtn = card.querySelector(".download-btn");
+  if (record.annotationOverlayBlob) dlBtn.textContent = "⬇ Photo only";
+  dlBtn.addEventListener("click", () => downloadPhoto(record, record.blob, "photo"));
 
-  if (!record.isSketch) attachCrackTool(card, record);
+  if (!record.isSketch) {
+    const annotateBtn = makeButton("🖊 Annotate", "secondary");
+    annotateBtn.addEventListener("click", () => openPhotoAnnotator(record));
+    card.querySelector(".photo-actions").insertBefore(annotateBtn, card.querySelector(".download-btn"));
+    if (record.annotationOverlayBlob) {
+      const dlOverlay = makeButton("⬇ Photo+overlay", "secondary");
+      dlOverlay.addEventListener("click", () => downloadPhoto(record, record.blob, "photo-overlay", true, true));
+      card.querySelector(".photo-actions").insertBefore(dlOverlay, dlBtn.nextSibling);
+    }
+    attachCrackTool(card, record);
+  }
 
   if (record.thermalBlob) {
     const dlT = makeButton("\u2b07 Thermal", "secondary");
@@ -2352,7 +2833,7 @@ function buildCard(record) {
 }
 
 // ── Download with EXIF + metadata burn-in ────────────────────────────────────
-async function downloadPhoto(record, blob, label, burnMeta = true) {
+async function downloadPhoto(record, blob, label, burnMeta = true, includeOverlay = false) {
   // Stereo/depth images must stay pixel-identical for OpenCV: skip the
   // burned-in footer bar (and EXIF re-encode) entirely for those.
   if (!burnMeta) {
@@ -2363,7 +2844,7 @@ async function downloadPhoto(record, blob, label, burnMeta = true) {
     URL.revokeObjectURL(a.href);
     return;
   }
-  const finalBlob = await annotatePhotoBlob(record, blob);
+  const finalBlob = await annotatePhotoBlob(record, blob, { includeOverlay });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(finalBlob);
   a.download = `${label}-${record.id.slice(0, 8)}.jpg`;
@@ -2373,13 +2854,20 @@ async function downloadPhoto(record, blob, label, burnMeta = true) {
 
 // Returns a JPEG Blob of `blob` with a metadata footer burned in and GPS/comment
 // embedded as EXIF. Reused by both single-photo download and the bridge ZIP export.
-async function annotatePhotoBlob(record, blob) {
+async function annotatePhotoBlob(record, blob, opts = {}) {
+  const includeOverlay = !!opts.includeOverlay;
   const img    = await loadImage(blob);
   const canvas = document.createElement("canvas");
   canvas.width  = img.naturalWidth;
   canvas.height = img.naturalHeight;
   const ctx = canvas.getContext("2d");
   ctx.drawImage(img, 0, 0);
+  if (includeOverlay && record.annotationOverlayBlob) {
+    try {
+      const ov = await loadImage(record.annotationOverlayBlob);
+      ctx.drawImage(ov, 0, 0, canvas.width, canvas.height);
+    } catch (e) { console.warn("overlay compose failed:", e); }
+  }
 
   const lines = [];
   lines.push(new Date(record.createdAt).toLocaleString());
@@ -3621,7 +4109,9 @@ function createId() {
   if (globalThis.crypto?.getRandomValues) { const v = new Uint32Array(4); globalThis.crypto.getRandomValues(v); return Array.from(v, (n) => n.toString(16).padStart(8, "0")).join(""); }
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
-function canvasToBlob(canvas) { return new Promise((res, rej) => canvas.toBlob((b) => b ? res(b) : rej(new Error("Could not capture image.")), "image/jpeg", 0.92)); }
+function canvasToBlob(canvas, type = "image/jpeg", quality = 0.92) {
+  return new Promise((res, rej) => canvas.toBlob((b) => b ? res(b) : rej(new Error("Could not capture image.")), type, quality));
+}
 
 function openDatabase() {
   return new Promise((res, rej) => {
