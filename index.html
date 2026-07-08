@@ -18,7 +18,7 @@
   <script src="vendor/togeojson.umd.min.js"></script>
   <!-- docx (Word report generation) -->
   <script src="vendor/docx.umd.js"></script>
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=20260708-142200" />
 </head>
 <body>
 
@@ -26,6 +26,7 @@
   <h1>📷 Photo Vault <span id="buildStamp" style="font-size:.55rem;font-weight:400;opacity:.7;vertical-align:middle;">build …</span></h1>
   <div style="display:flex;gap:8px;align-items:center;">
     <a class="map-nav-link" href="map.html">🗺 Map summary</a>
+    <button id="openPeerTransferViewTop" class="secondary">🔁 Transfer</button>
     <button id="installButton" class="secondary" hidden>⬇ Install App</button>
   </div>
 </header>
@@ -58,6 +59,7 @@
     <div class="bridge-banner-actions">
       <button id="editBridgeButton" class="secondary">✎ Edit</button>
       <button id="downloadBridgeZip" class="secondary">⬇ Download ZIP</button>
+      <button id="openPeerTransferView" class="secondary">🔁 Transfer view</button>
     </div>
   </div>
 
@@ -149,7 +151,11 @@
     <!-- Tags -->
     <div class="tags-field">
       <div class="tags-field-label">🏷 Tags <span class="tags-field-hint">(pick any that apply)</span></div>
-      <div id="captureTags"></div>
+      <div class="tags-capture-row">
+        <button id="captureTagsButton" type="button" class="secondary">🏷 Select tags</button>
+        <span id="captureTagsSummary" class="tags-field-hint">No tags selected</span>
+      </div>
+      <div id="captureTags" hidden></div>
     </div>
 
     <!-- Camera action buttons -->
@@ -232,6 +238,75 @@
 
 </main>
 
+<!-- ── Local WebRTC transfer lab (Base / Rover) ── -->
+<section class="card peer-transfer-modal" id="peerTransferCard" hidden>
+  <div class="scan-panel">
+    <div class="peer-transfer-modal-head">
+      <span class="scan-title">🔁 Base / Rover transfer</span>
+      <button id="closePeerTransferView" type="button" class="secondary">✕ Close</button>
+    </div>
+    <div class="scan-panel-head">
+      <span class="scan-title">🔁 Base / Rover photo transfer</span>
+      <label class="peer-role-label" for="peerRoleSelect">This browser is:</label>
+      <select id="peerRoleSelect" class="meta-input peer-role-select">
+        <option value="base">Base (receiver)</option>
+        <option value="rover">Rover (sender)</option>
+      </select>
+    </div>
+    <p class="scan-hint">Open this app in two browsers/windows. Base creates offer, Rover scans/applies offer and creates answer, then Base scans/applies answer. After connected, Rover can send photos.</p>
+    <div class="peer-transfer-actions">
+      <button id="peerCreateOfferBtn" type="button">1) Create offer</button>
+      <button id="peerApplyOfferBtn" type="button" class="secondary">2) Apply offer + create answer</button>
+      <button id="peerApplyAnswerBtn" type="button" class="secondary">3) Apply answer</button>
+    </div>
+    <div class="peer-sdp-grid">
+      <label class="peer-sdp-field">
+        <span>Local SDP</span>
+        <textarea id="peerLocalSdp" rows="6" readonly placeholder="Generated here"></textarea>
+      </label>
+      <label class="peer-sdp-field">
+        <span>Remote SDP</span>
+        <textarea id="peerRemoteSdp" rows="6" placeholder="Paste offer/answer from the other browser"></textarea>
+      </label>
+    </div>
+    <div class="peer-transfer-actions">
+      <button id="peerCopyLocalSdpBtn" type="button" class="secondary">📋 Copy local SDP</button>
+      <button id="peerShowQrBtn" type="button" class="secondary">▦ Show local as QR</button>
+      <button id="peerScanQrBtn" type="button" class="secondary">📷 Scan QR to remote</button>
+      <button id="peerClearSessionBtn" type="button" class="secondary">♻ Reset transfer session</button>
+    </div>
+    <div id="peerQrBox" class="peer-qr-box" hidden>
+      <div id="peerQrCode" class="peer-qr-code" aria-label="Local SDP QR code"></div>
+      <p class="peer-qr-hint">Scan this QR from the other device to fill its Remote SDP box.</p>
+    </div>
+    <div id="peerSendRow" class="peer-send-row">
+      <button id="peerPickSavedBtn" type="button" class="secondary">🖼 Send from app photos</button>
+      <label class="secondary peer-file-label">
+        📂 Select photos to send
+        <input id="peerFileInput" type="file" accept="image/*" multiple hidden />
+      </label>
+      <button id="peerSendFilesBtn" type="button">📤 Send selected photos</button>
+      <label class="peer-auto-send-label">
+        <input id="peerAutoSendCheck" type="checkbox" />
+        Auto-send new captures
+      </label>
+    </div>
+    <p id="peerConnState" class="status-bar peer-conn-state">Transfer link: idle</p>
+    <pre id="peerTransferLog" class="peer-transfer-log">Waiting for session setup…</pre>
+  </div>
+</section>
+
+<div id="peerQrScannerModal" class="peer-qr-scanner-modal" hidden>
+  <div class="peer-qr-scanner-dialog">
+    <div class="peer-qr-scanner-head">
+      <strong>Scan QR</strong>
+      <button id="peerQrScannerClose" type="button" class="secondary">✕ Close</button>
+    </div>
+    <video id="peerQrScannerVideo" playsinline muted autoplay></video>
+    <p id="peerQrScannerStatus" class="scan-hint">Point camera at the QR code.</p>
+  </div>
+</div>
+
 <!-- ── Photo card template ── -->
 <template id="photoCardTemplate">
   <article class="photo-card">
@@ -253,9 +328,7 @@
       <time class="card-time"></time>
       <div class="photo-comment-area"></div>
       <div class="photo-tags-area"></div>
-      <div class="photo-location-area"></div>
-      <div class="photo-heading-area"></div>
-      <div class="photo-attitude-area"></div>
+      <div class="photo-nav-area"></div>
     </div>
     <p class="map-hint" style="font-size:.75rem;color:#94a3b8;padding:4px 16px;">Drag the ▲ arrow to adjust location · Drag the yellow dot to adjust direction</p>
     <div class="photo-map-container"></div>
@@ -266,8 +339,9 @@
   </article>
 </template>
 
-<script src="report.js"></script>
-<script src="basemap.js"></script>
-<script src="app.js"></script>
+<script src="report.js?v=20260708-142200"></script>
+<script src="basemap.js?v=20260708-142200"></script>
+<script src="vendor/qrcode.min.js?v=20260708-142200"></script>
+<script src="app.js?v=20260708-142200"></script>
 </body>
 </html>

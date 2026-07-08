@@ -320,6 +320,7 @@ main {
 
 /* ── Meta areas ── */
 .photo-comment-area,
+.photo-nav-area,
 .photo-location-area,
 .photo-heading-area {
   display: flex;
@@ -327,6 +328,11 @@ main {
   gap: 6px;
   border-top: 1px solid var(--border);
   padding-top: 10px;
+}
+.photo-nav-line {
+  font-size: 0.86rem;
+  color: var(--muted);
+  line-height: 1.35;
 }
 
 .area-header {
@@ -348,6 +354,12 @@ main {
   font-size: 0.9rem;
 }
 .area-value.muted { color: var(--muted); font-style: italic; }
+.tags-capture-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
 .area-value a { color: var(--accent); text-decoration: none; }
 .area-value a:hover { text-decoration: underline; }
 
@@ -726,6 +738,7 @@ select {
   background: var(--accent); color: #08131f; font-weight: 700;
   border: none; border-radius: 8px; padding: 8px 16px; cursor: pointer;
 }
+.capture-tags-dialog { width: min(720px, 100%); }
 .photo-annotator-dialog { width: min(1120px, 100%); }
 .photo-annotator-wrap { padding: 10px; }
 .photo-annotator-stage {
@@ -800,6 +813,32 @@ select {
 .bridge-banner-title { font-size: 1.1rem; font-weight: 700; color: var(--text); }
 .bridge-banner-desc { font-size: .8rem; color: var(--muted); }
 .bridge-banner-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ── Peer transfer view modal ─────────────────────────────────────────────── */
+#peerTransferCard.peer-transfer-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+  padding: 16px;
+  background: rgba(0,0,0,.62);
+  border: none;
+  border-radius: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#peerTransferCard.peer-transfer-modal .scan-panel {
+  width: min(980px, 100%);
+  max-height: 92vh;
+  overflow: auto;
+}
+.peer-transfer-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
 
 /* ── Bridge editor modal ──────────────────────────────────────── */
 .bridge-modal {
@@ -885,6 +924,177 @@ select {
 .scan-thumbs { display: flex; gap: 5px; overflow-x: auto; margin: 9px 0; padding-bottom: 3px; }
 .scan-thumbs img { height: 58px; border-radius: 5px; border: 1px solid #334155; flex: 0 0 auto; }
 .scan-session-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ── Peer transfer (WebRTC) ─────────────────────────────────────────────────── */
+.peer-role-label { font-size: .82rem; color: #cbd5e1; }
+.peer-role-select { min-width: 180px; max-width: 260px; }
+.peer-transfer-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.peer-transfer-actions button { flex: 1; min-width: 170px; }
+.peer-sdp-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+.peer-sdp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: .78rem;
+  color: #cbd5e1;
+}
+.peer-sdp-field textarea {
+  width: 100%;
+  min-height: 110px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #0f172a;
+  color: var(--text);
+  font-size: .72rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  resize: vertical;
+}
+.peer-send-row {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.peer-file-label { display: inline-flex; align-items: center; }
+.peer-auto-send-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: .78rem;
+  color: #cbd5e1;
+}
+.peer-saved-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+.peer-saved-item {
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #0f172a;
+  padding: 6px;
+}
+.peer-saved-item img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 6px;
+  display: block;
+}
+.peer-saved-meta {
+  margin-top: 5px;
+  font-size: .68rem;
+  color: #cbd5e1;
+  line-height: 1.3;
+}
+.peer-saved-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: .74rem;
+  color: var(--text);
+  margin-top: 5px;
+}
+.peer-saved-toprow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.peer-saved-count {
+  font-size: .8rem;
+  color: #cbd5e1;
+}
+.peer-conn-state {
+  text-align: left;
+  margin-top: 8px;
+  font-size: .78rem;
+}
+.peer-transfer-log {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #cbd5e1;
+  font-size: .72rem;
+  line-height: 1.35;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+.peer-qr-box {
+  margin-top: 8px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 10px;
+  background: #0f172a;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.peer-qr-code {
+  background: #fff;
+  border-radius: 8px;
+  padding: 8px;
+  width: fit-content;
+}
+.peer-qr-hint {
+  font-size: .75rem;
+  color: #cbd5e1;
+  text-align: center;
+}
+.peer-qr-scanner-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2250;
+  background: rgba(0,0,0,.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.peer-qr-scanner-dialog {
+  width: min(540px, 100%);
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: #1c2636;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.peer-qr-scanner-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+#peerQrScannerVideo {
+  width: 100%;
+  border-radius: 8px;
+  background: #000;
+  border: 1px solid #334155;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+@media (min-width: 840px) {
+  .peer-sdp-grid { grid-template-columns: 1fr 1fr; }
+}
 
 /* ── Crack detection overlay ──────────────────────────────────────────────── */
 .crack-overlay {

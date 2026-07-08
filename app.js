@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-08 12:40:00";
+const BUILD_STAMP = "2026-07-08 14:22:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -92,6 +92,8 @@ const photoGrid          = document.getElementById("photoGrid");
 const photoCardTemplate  = document.getElementById("photoCardTemplate");
 const commentInput       = document.getElementById("commentInput");
 const captureTagsEl      = document.getElementById("captureTags");
+const captureTagsButton  = document.getElementById("captureTagsButton");
+const captureTagsSummary = document.getElementById("captureTagsSummary");
 const acquireGeoButton   = document.getElementById("acquireGeoButton");
 const geoText            = document.getElementById("geoText");
 const headingText        = document.getElementById("headingText");
@@ -137,6 +139,33 @@ const scanShotBtn        = document.getElementById("scanShotBtn");
 const scanFinishBtn      = document.getElementById("scanFinishBtn");
 const scanSessionsCard   = document.getElementById("scanSessionsCard");
 const scanSessionsList   = document.getElementById("scanSessionsList");
+const openPeerTransferViewBtn = document.getElementById("openPeerTransferView");
+const openPeerTransferViewTopBtn = document.getElementById("openPeerTransferViewTop");
+const closePeerTransferViewBtn = document.getElementById("closePeerTransferView");
+const peerTransferCard   = document.getElementById("peerTransferCard");
+const peerRoleSelect     = document.getElementById("peerRoleSelect");
+const peerCreateOfferBtn = document.getElementById("peerCreateOfferBtn");
+const peerApplyOfferBtn  = document.getElementById("peerApplyOfferBtn");
+const peerApplyAnswerBtn = document.getElementById("peerApplyAnswerBtn");
+const peerCopyLocalSdpBtn= document.getElementById("peerCopyLocalSdpBtn");
+const peerShowQrBtn      = document.getElementById("peerShowQrBtn");
+const peerScanQrBtn      = document.getElementById("peerScanQrBtn");
+const peerClearSessionBtn= document.getElementById("peerClearSessionBtn");
+const peerLocalSdp       = document.getElementById("peerLocalSdp");
+const peerRemoteSdp      = document.getElementById("peerRemoteSdp");
+const peerQrBox          = document.getElementById("peerQrBox");
+const peerQrCode         = document.getElementById("peerQrCode");
+const peerQrScannerModal = document.getElementById("peerQrScannerModal");
+const peerQrScannerVideo = document.getElementById("peerQrScannerVideo");
+const peerQrScannerStatus= document.getElementById("peerQrScannerStatus");
+const peerQrScannerClose = document.getElementById("peerQrScannerClose");
+const peerSendRow        = document.getElementById("peerSendRow");
+const peerPickSavedBtn   = document.getElementById("peerPickSavedBtn");
+const peerFileInput      = document.getElementById("peerFileInput");
+const peerSendFilesBtn   = document.getElementById("peerSendFilesBtn");
+const peerAutoSendCheck  = document.getElementById("peerAutoSendCheck");
+const peerConnState      = document.getElementById("peerConnState");
+const peerTransferLog    = document.getElementById("peerTransferLog");
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let db;
@@ -155,6 +184,11 @@ let depthWs                = null;
 let captureTags            = emptyTags(); // tags selected in the capture card
 let bridges                = [];   // all bridge records (cached)
 let activeBridgeId         = null; // currently opened bridge, or null on overview
+let peerState              = { role: "base", pc: null, dc: null, incoming: null, sending: false, autoSend: true };
+let peerSendQueue          = Promise.resolve();
+let peerQrDetector         = null;
+let peerQrScanStream       = null;
+let peerQrScanLoopId       = null;
 
 // ── Guided scan (photogrammetry burst) state ──────────────────────────────────
 let scanActive     = false;
@@ -180,8 +214,55 @@ const _scanSmallCanvas = document.createElement("canvas");
 const _scanMedCanvas   = document.createElement("canvas");
 
 function renderCaptureTags() {
-  if (!captureTagsEl) return;
-  captureTagsEl.replaceChildren(buildTagPicker(captureTags));
+  if (captureTagsSummary) {
+    const flat = tagsToFlatString(captureTags);
+    captureTagsSummary.textContent = flat || "No tags selected";
+  }
+}
+
+function openCaptureTagsModal() {
+  let overlay = document.getElementById("captureTagsModal");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "captureTagsModal";
+    overlay.className = "sketch-modal";
+    overlay.innerHTML = `
+      <div class="sketch-dialog capture-tags-dialog">
+        <div class="sketch-header">
+          <span class="sketch-title">🏷 Select tags</span>
+          <button class="capture-tags-close secondary" type="button">✕</button>
+        </div>
+        <div class="sketch-canvas-wrap" style="display:block;max-height:60vh;overflow:auto;padding:12px;">
+          <div id="captureTagsPickerHost"></div>
+        </div>
+        <div class="sketch-footer">
+          <span class="sketch-hint">These tags will be applied to the next capture/import/sketch.</span>
+          <div class="sketch-footer-btns">
+            <button type="button" class="capture-tags-clear danger">Clear</button>
+            <button type="button" class="capture-tags-cancel secondary">Cancel</button>
+            <button type="button" class="capture-tags-save">Save</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.style.display = "none"; });
+    overlay.querySelector(".capture-tags-close").addEventListener("click", () => { overlay.style.display = "none"; });
+    overlay.querySelector(".capture-tags-cancel").addEventListener("click", () => { overlay.style.display = "none"; });
+  }
+  const working = normalizeTags(captureTags);
+  const host = overlay.querySelector("#captureTagsPickerHost");
+  host.replaceChildren(buildTagPicker(working));
+  overlay.querySelector(".capture-tags-clear").onclick = () => {
+    captureTags = emptyTags();
+    renderCaptureTags();
+    overlay.style.display = "none";
+  };
+  overlay.querySelector(".capture-tags-save").onclick = () => {
+    captureTags = working;
+    renderCaptureTags();
+    overlay.style.display = "none";
+  };
+  overlay.style.display = "flex";
 }
 
 // id -> { lmap, arrowMarker, handleMarker, kmlLayer }
@@ -200,6 +281,7 @@ async function init() {
   if (bs) bs.textContent = 'build ' + BUILD_STAMP;
   console.log('Photo Vault build', BUILD_STAMP);
   renderCaptureTags();
+  updatePeerTransferUi();
   db = await openDatabase();
   await ensureBridges();
   registerEvents();
@@ -305,6 +387,7 @@ function registerEvents() {
     if (files.length) await saveFiles(files);
     filePicker.value = "";
   });
+  if (captureTagsButton) captureTagsButton.addEventListener("click", () => openCaptureTagsModal());
   clearAllButton.addEventListener("click",   () => clearAllPhotos());
   if (sketchButton) sketchButton.addEventListener("click", () => openSketchModal());
   const newBridgeBtn = document.getElementById("newBridgeButton");
@@ -312,7 +395,7 @@ function registerEvents() {
   const importNbiBtn = document.getElementById("importNbiButton");
   if (importNbiBtn) importNbiBtn.addEventListener("click", () => openNbiImport());
   const backBtn = document.getElementById("backToBridges");
-  if (backBtn) backBtn.addEventListener("click", () => showBridgesOverview());
+  if (backBtn) backBtn.addEventListener("click", () => { closePeerTransferView(); showBridgesOverview(); });
   const zipBtn = document.getElementById("downloadBridgeZip");
   if (zipBtn) zipBtn.addEventListener("click", () => { if (activeBridgeId) downloadBridgeZip(activeBridgeId); });
   const editBridgeBtn = document.getElementById("editBridgeButton");
@@ -332,7 +415,9 @@ function registerEvents() {
   try {
     const savedOp = parseFloat(localStorage.getItem("kml-opacity"));
     if (!isNaN(savedOp)) { kmlOverlayOpacity = savedOp; }
-  } catch {}
+  } catch (e) {
+    if (peerQrScannerStatus) peerQrScannerStatus.textContent = "Scanning…";
+  }
   if (kmlOpacitySlider) {
     kmlOpacitySlider.value = Math.round(kmlOverlayOpacity * 100);
     if (kmlOpacityVal) kmlOpacityVal.textContent = Math.round(kmlOverlayOpacity * 100);
@@ -348,6 +433,590 @@ function registerEvents() {
     deferredInstallPrompt = null; installButton.hidden = true;
   });
   window.addEventListener("appinstalled", () => { installButton.hidden = true; setStatus("App installed."); });
+  if (peerRoleSelect) peerRoleSelect.addEventListener("change", () => {
+    peerState.role = peerRoleSelect.value === "rover" ? "rover" : "base";
+    updatePeerTransferUi();
+  });
+  if (openPeerTransferViewBtn) openPeerTransferViewBtn.addEventListener("click", () => openPeerTransferView());
+  if (openPeerTransferViewTopBtn) openPeerTransferViewTopBtn.addEventListener("click", () => openPeerTransferView());
+  if (closePeerTransferViewBtn) closePeerTransferViewBtn.addEventListener("click", () => closePeerTransferView());
+  if (peerTransferCard) peerTransferCard.addEventListener("click", (e) => {
+    if (e.target === peerTransferCard) closePeerTransferView();
+  });
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && peerTransferCard && !peerTransferCard.hidden) closePeerTransferView();
+  });
+  if (peerCreateOfferBtn) peerCreateOfferBtn.addEventListener("click", () => peerCreateOffer());
+  if (peerApplyOfferBtn) peerApplyOfferBtn.addEventListener("click", () => peerApplyOffer());
+  if (peerApplyAnswerBtn) peerApplyAnswerBtn.addEventListener("click", () => peerApplyAnswer());
+  if (peerCopyLocalSdpBtn) peerCopyLocalSdpBtn.addEventListener("click", () => copyLocalSdp());
+  if (peerShowQrBtn) peerShowQrBtn.addEventListener("click", () => renderPeerLocalQr());
+  if (peerScanQrBtn) peerScanQrBtn.addEventListener("click", () => { void startPeerQrScan(); });
+  if (peerClearSessionBtn) peerClearSessionBtn.addEventListener("click", () => resetPeerSession(false));
+  if (peerQrScannerClose) peerQrScannerClose.addEventListener("click", () => stopPeerQrScan("QR scan closed."));
+  if (peerQrScannerModal) peerQrScannerModal.addEventListener("click", (e) => {
+    if (e.target === peerQrScannerModal) stopPeerQrScan("QR scan closed.");
+  });
+  if (peerPickSavedBtn) peerPickSavedBtn.addEventListener("click", () => { void openPeerSavedPickerModal(); });
+  if (peerSendFilesBtn) peerSendFilesBtn.addEventListener("click", () => peerSendSelectedFiles());
+  if (peerAutoSendCheck) peerAutoSendCheck.addEventListener("change", () => {
+    peerState.autoSend = !!peerAutoSendCheck.checked;
+    localStorage.setItem("peer-auto-send-captures", peerState.autoSend ? "1" : "0");
+  });
+}
+
+function updatePeerTransferUi() {
+  peerState.autoSend = localStorage.getItem("peer-auto-send-captures") !== "0";
+  peerState.role = (peerRoleSelect && peerRoleSelect.value === "rover") ? "rover" : "base";
+  if (peerSendRow) peerSendRow.hidden = peerState.role !== "rover";
+  if (peerCreateOfferBtn) peerCreateOfferBtn.disabled = peerState.role !== "base";
+  if (peerApplyOfferBtn) peerApplyOfferBtn.disabled = peerState.role !== "rover";
+  if (peerApplyAnswerBtn) peerApplyAnswerBtn.disabled = peerState.role !== "base";
+  if (peerPickSavedBtn) peerPickSavedBtn.disabled = peerState.role !== "rover";
+  if (peerSendFilesBtn) peerSendFilesBtn.disabled = peerState.role !== "rover";
+  if (peerAutoSendCheck) {
+    peerAutoSendCheck.checked = peerState.autoSend;
+    peerAutoSendCheck.disabled = peerState.role !== "rover";
+  }
+  setPeerConnState("Transfer link: idle");
+}
+
+function openPeerTransferView() {
+  if (!peerTransferCard) return;
+  peerTransferCard.hidden = false;
+}
+
+function closePeerTransferView() {
+  stopPeerQrScan();
+  if (!peerTransferCard) return;
+  peerTransferCard.hidden = true;
+}
+
+function appendPeerLog(line) {
+  if (!peerTransferLog) return;
+  const ts = new Date().toLocaleTimeString();
+  const next = `[${ts}] ${line}`;
+  const cur = String(peerTransferLog.textContent || "").trim();
+  peerTransferLog.textContent = cur ? `${cur}\n${next}` : next;
+  peerTransferLog.scrollTop = peerTransferLog.scrollHeight;
+}
+
+function setPeerConnState(text) {
+  if (peerConnState) peerConnState.textContent = text;
+}
+
+function resetPeerSession(keepSdp = false) {
+  if (peerState.dc) {
+    try { peerState.dc.onopen = null; peerState.dc.onclose = null; peerState.dc.onmessage = null; peerState.dc.close(); } catch (e) { console.warn("peer dc close:", e); }
+  }
+  if (peerState.pc) {
+    try { peerState.pc.onconnectionstatechange = null; peerState.pc.oniceconnectionstatechange = null; peerState.pc.ondatachannel = null; peerState.pc.close(); } catch (e) { console.warn("peer pc close:", e); }
+  }
+  peerState.pc = null;
+  peerState.dc = null;
+  peerState.incoming = null;
+  peerState.sending = false;
+  if (!keepSdp) {
+    if (peerLocalSdp) peerLocalSdp.value = "";
+    if (peerRemoteSdp) peerRemoteSdp.value = "";
+  }
+  clearPeerQr();
+  updatePeerTransferUi();
+}
+
+function createPeerConnection(role) {
+  resetPeerSession(true);
+  peerState.role = role;
+  if (peerRoleSelect) peerRoleSelect.value = role;
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  peerState.pc = pc;
+  pc.onconnectionstatechange = () => {
+    setPeerConnState(`Transfer link: ${pc.connectionState}`);
+    appendPeerLog(`Peer connection state: ${pc.connectionState}`);
+  };
+  pc.oniceconnectionstatechange = () => appendPeerLog(`ICE: ${pc.iceConnectionState}`);
+  if (role === "base") {
+    attachPeerDataChannel(pc.createDataChannel("photo-transfer", { ordered: true }));
+  } else {
+    pc.ondatachannel = (evt) => attachPeerDataChannel(evt.channel);
+  }
+  return pc;
+}
+
+function waitForIceGatheringComplete(pc) {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    const onState = () => {
+      if (pc.iceGatheringState === "complete") {
+        pc.removeEventListener("icegatheringstatechange", onState);
+        resolve();
+      }
+    };
+    pc.addEventListener("icegatheringstatechange", onState);
+    setTimeout(() => {
+      pc.removeEventListener("icegatheringstatechange", onState);
+      resolve();
+    }, 8000);
+  });
+}
+
+function parseRemoteSdp() {
+  const raw = (peerRemoteSdp?.value || "").trim();
+  if (!raw) throw new Error("Paste the remote SDP first.");
+  const obj = JSON.parse(raw);
+  if (!obj || typeof obj.type !== "string" || typeof obj.sdp !== "string") throw new Error("Remote SDP is invalid.");
+  return obj;
+}
+
+async function peerCreateOffer() {
+  if (peerState.role !== "base") { setStatus("Switch to Base role before creating an offer."); return; }
+  try {
+    const pc = createPeerConnection("base");
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitForIceGatheringComplete(pc);
+    if (peerLocalSdp) peerLocalSdp.value = JSON.stringify(pc.localDescription);
+    clearPeerQr();
+    setPeerConnState("Transfer link: waiting for answer");
+    appendPeerLog("Offer created. Share Local SDP to Rover.");
+    setStatus("Offer created. Copy Local SDP into the Rover browser.");
+  } catch (e) {
+    setStatus("WebRTC offer failed: " + e.message);
+  }
+}
+
+async function peerApplyOffer() {
+  if (peerState.role !== "rover") { setStatus("Switch to Rover role before applying an offer."); return; }
+  try {
+    const remote = parseRemoteSdp();
+    if (remote.type !== "offer") throw new Error("Remote SDP must be an offer.");
+    const pc = createPeerConnection("rover");
+    await pc.setRemoteDescription(remote);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await waitForIceGatheringComplete(pc);
+    if (peerLocalSdp) peerLocalSdp.value = JSON.stringify(pc.localDescription);
+    clearPeerQr();
+    appendPeerLog("Offer applied. Share Local SDP answer back to Base.");
+    setStatus("Answer created. Copy Local SDP into the Base browser.");
+  } catch (e) {
+    setStatus("Apply offer failed: " + e.message);
+  }
+}
+
+async function peerApplyAnswer() {
+  if (peerState.role !== "base") { setStatus("Switch to Base role before applying an answer."); return; }
+  try {
+    if (!peerState.pc) throw new Error("Create an offer first.");
+    const remote = parseRemoteSdp();
+    if (remote.type !== "answer") throw new Error("Remote SDP must be an answer.");
+    await peerState.pc.setRemoteDescription(remote);
+    appendPeerLog("Answer applied. Waiting for data channel to open.");
+    setStatus("Answer applied. Waiting for link to connect…");
+  } catch (e) {
+    setStatus("Apply answer failed: " + e.message);
+  }
+}
+
+async function copyLocalSdp() {
+  const text = (peerLocalSdp?.value || "").trim();
+  if (!text) { setStatus("No Local SDP yet."); return; }
+  if (!navigator.clipboard?.writeText) { setStatus("Clipboard API unavailable in this browser context."); return; }
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus("Local SDP copied.");
+  } catch (e) {
+    setStatus("Clipboard copy failed: " + e.message);
+  }
+}
+
+function clearPeerQr() {
+  if (peerQrCode) peerQrCode.innerHTML = "";
+  if (peerQrBox) peerQrBox.hidden = true;
+}
+
+function renderPeerLocalQr() {
+  const text = (peerLocalSdp?.value || "").trim();
+  if (!text) { setStatus("No Local SDP yet."); return; }
+  if (typeof QRCode !== "function") { setStatus("QR generator not loaded."); return; }
+  if (!peerQrCode || !peerQrBox) return;
+  try {
+    peerQrCode.innerHTML = "";
+    new QRCode(peerQrCode, {
+      text,
+      width: 240,
+      height: 240,
+      colorDark: "#0f172a",
+      colorLight: "#ffffff",
+      correctLevel: QRCode.CorrectLevel.M
+    });
+    peerQrBox.hidden = false;
+    appendPeerLog("Rendered local SDP as QR.");
+    setStatus("QR ready. Scan it on the other device.");
+  } catch (e) {
+    setStatus("QR generation failed: " + e.message);
+  }
+}
+
+async function startPeerQrScan() {
+  if (!peerQrScannerModal || !peerQrScannerVideo || !peerRemoteSdp) return;
+  if (!("BarcodeDetector" in window)) {
+    setStatus("QR scan needs BarcodeDetector support. Paste SDP manually.");
+    return;
+  }
+  try {
+    if (!peerQrDetector) peerQrDetector = new BarcodeDetector({ formats: ["qr_code"] });
+    peerQrScanStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    peerQrScannerVideo.srcObject = peerQrScanStream;
+    await peerQrScannerVideo.play();
+    peerQrScannerModal.hidden = false;
+    if (peerQrScannerStatus) peerQrScannerStatus.textContent = "Point camera at the QR code.";
+    runPeerQrScanLoop();
+  } catch (e) {
+    stopPeerQrScan();
+    setStatus("QR scan start failed: " + e.message);
+  }
+}
+
+function runPeerQrScanLoop() {
+  if (!peerQrScannerVideo || !peerQrDetector) return;
+  const tick = async () => {
+    if (!peerQrScanStream || !peerQrDetector) return;
+    try {
+      const barcodes = await peerQrDetector.detect(peerQrScannerVideo);
+      const hit = barcodes && barcodes[0] && typeof barcodes[0].rawValue === "string" ? barcodes[0].rawValue.trim() : "";
+      if (hit) {
+        if (peerRemoteSdp) peerRemoteSdp.value = hit;
+        stopPeerQrScan();
+        appendPeerLog("Scanned QR into Remote SDP.");
+        setStatus("QR scanned. Apply offer/answer now.");
+        return;
+      }
+    } catch (e) {
+      if (peerQrScannerStatus) peerQrScannerStatus.textContent = "Scanning…";
+      console.warn("QR detect frame error:", e);
+    }
+    peerQrScanLoopId = requestAnimationFrame(tick);
+  };
+  peerQrScanLoopId = requestAnimationFrame(tick);
+}
+
+function stopPeerQrScan(statusText) {
+  if (peerQrScanLoopId) {
+    cancelAnimationFrame(peerQrScanLoopId);
+    peerQrScanLoopId = null;
+  }
+  if (peerQrScannerVideo) {
+    try { peerQrScannerVideo.pause(); } catch (e) { console.warn("QR video pause:", e); }
+    peerQrScannerVideo.srcObject = null;
+  }
+  if (peerQrScanStream) {
+    for (const t of peerQrScanStream.getTracks()) t.stop();
+    peerQrScanStream = null;
+  }
+  if (peerQrScannerModal) peerQrScannerModal.hidden = true;
+  if (statusText) setStatus(statusText);
+}
+
+function attachPeerDataChannel(dc) {
+  peerState.dc = dc;
+  dc.binaryType = "arraybuffer";
+  dc.onopen = () => {
+    setPeerConnState(`Transfer link: connected (${peerState.role})`);
+    appendPeerLog("Data channel open.");
+    if (peerSendFilesBtn) peerSendFilesBtn.disabled = peerState.role !== "rover";
+    setStatus("Transfer link connected.");
+  };
+  dc.onclose = () => {
+    appendPeerLog("Data channel closed.");
+    setPeerConnState("Transfer link: closed");
+    if (peerSendFilesBtn) peerSendFilesBtn.disabled = true;
+  };
+  dc.onmessage = (evt) => { void handlePeerMessage(evt.data); };
+}
+
+async function handlePeerMessage(data) {
+  if (typeof data === "string") {
+    let msg;
+    try { msg = JSON.parse(data); } catch (e) { console.warn("peer msg parse:", e); return; }
+    if (msg.t === "file-start") {
+      peerState.incoming = {
+        id: msg.id,
+        name: msg.name || "photo.jpg",
+        mime: msg.mime || "image/jpeg",
+        hash: msg.hash || null,
+        size: Number(msg.size) || 0,
+        createdAt: msg.createdAt || new Date().toISOString(),
+        chunks: [],
+        received: 0
+      };
+      appendPeerLog(`Receiving ${peerState.incoming.name} (${peerState.incoming.size} bytes)…`);
+      return;
+    }
+    if (msg.t === "file-end") {
+      await finalizeIncomingFile(msg.id);
+      return;
+    }
+    return;
+  }
+  if (!peerState.incoming) return;
+  const chunkBuffer = data instanceof ArrayBuffer ? data : await data.arrayBuffer();
+  peerState.incoming.chunks.push(chunkBuffer);
+  peerState.incoming.received += chunkBuffer.byteLength;
+  if (peerState.incoming.size) {
+    const pct = Math.min(100, Math.round(peerState.incoming.received * 100 / peerState.incoming.size));
+    setPeerConnState(`Transfer link: receiving ${peerState.incoming.name} (${pct}%)`);
+  }
+}
+
+async function finalizeIncomingFile(fileId) {
+  const incoming = peerState.incoming;
+  if (!incoming || incoming.id !== fileId) return;
+  const blob = new Blob(incoming.chunks, { type: incoming.mime || "image/jpeg" });
+  let targetBridgeId = activeBridgeId || (bridges[0]?.id || null);
+  if (!targetBridgeId) {
+    const b = {
+      id: createId(),
+      title: "Transferred Photos",
+      description: "Auto-created by the WebRTC transfer tool.",
+      createdAt: new Date().toISOString(),
+      kml: null,
+      reportConfig: null,
+    };
+    await putBridgeRec(b);
+    bridges.push(b);
+    targetBridgeId = b.id;
+  }
+  let incomingHash = incoming.hash || null;
+  if (!incomingHash) {
+    try { incomingHash = await sha256HexFromBlob(blob); } catch (e) { console.warn("incoming hash:", e); }
+  }
+  const existing = await runTransaction("readonly", (store) => store.getAll());
+  const dup = incomingHash
+    ? existing.find((r) => r && !r.isScanFrame && !r.isScanSession && r.bridgeId === targetBridgeId && r.transferHash === incomingHash)
+    : null;
+  if (dup) {
+    appendPeerLog(`Skipped duplicate transfer for ${incoming.name}.`);
+    setStatus(`Received photo already exists: ${incoming.name}`);
+  } else {
+    const record = {
+      id: createId(),
+      bridgeId: targetBridgeId,
+      createdAt: incoming.createdAt,
+      comment: `Transferred from rover: ${incoming.name}`,
+      location: null,
+      heading: null,
+      facing: null,
+      blob,
+      thermalBlob: null,
+      depthBlob: null,
+      plyText: null,
+      tags: emptyTags(),
+      transferredVia: "webrtc-local",
+      transferHash: incomingHash,
+    };
+    await runTransaction("readwrite", (store) => store.put(record));
+    if (activeBridgeId === targetBridgeId) await renderSavedPhotos();
+    appendPeerLog(`Saved ${incoming.name} to this device.`);
+    setStatus(`Received photo: ${incoming.name}`);
+  }
+  setPeerConnState("Transfer link: connected");
+  peerState.incoming = null;
+}
+
+async function waitForDcDrain(dc, maxBuffered = 4 * 1024 * 1024, target = 512 * 1024, timeoutMs = 8000) {
+  if (dc.bufferedAmount <= maxBuffered) return;
+  const started = Date.now();
+  while (dc.bufferedAmount > target) {
+    if (Date.now() - started > timeoutMs) throw new Error("Sender backpressure timeout.");
+    await new Promise((r) => setTimeout(r, 30));
+  }
+}
+
+async function peerSendSelectedFiles() {
+  if (peerState.role !== "rover") { setStatus("Switch to Rover role to send files."); return; }
+  const dc = peerState.dc;
+  if (!dc || dc.readyState !== "open") { setStatus("Connect the transfer link first."); return; }
+  const files = Array.from(peerFileInput?.files || []);
+  if (!files.length) { setStatus("Select one or more photos first."); return; }
+  if (peerState.sending) { setStatus("A transfer is already in progress."); return; }
+  peerState.sending = true;
+  if (peerSendFilesBtn) peerSendFilesBtn.disabled = true;
+  try {
+    for (const f of files) await sendBlobOverDataChannel(f, f.name || "photo.jpg", f.type || "image/jpeg", dc);
+    appendPeerLog(`Sent ${files.length} file(s).`);
+    setStatus(`Sent ${files.length} photo${files.length === 1 ? "" : "s"}.`);
+    if (peerFileInput) peerFileInput.value = "";
+  } catch (e) {
+    setStatus("Send failed: " + e.message);
+  } finally {
+    peerState.sending = false;
+    if (peerSendFilesBtn) peerSendFilesBtn.disabled = false;
+  }
+}
+
+async function sendBlobOverDataChannel(blob, name, mime, dc) {
+  const id = createId();
+  const CHUNK = 64 * 1024;
+  const hash = await sha256HexFromBlob(blob);
+  dc.send(JSON.stringify({ t: "file-start", id, name: name || "photo.jpg", mime: mime || "image/jpeg", size: blob.size, hash, createdAt: new Date().toISOString() }));
+  const buf = await blob.arrayBuffer();
+  let sent = 0;
+  while (sent < buf.byteLength) {
+    const end = Math.min(sent + CHUNK, buf.byteLength);
+    dc.send(buf.slice(sent, end));
+    sent = end;
+    await waitForDcDrain(dc);
+  }
+  dc.send(JSON.stringify({ t: "file-end", id }));
+  appendPeerLog(`Sent ${name || "photo.jpg"} (${blob.size} bytes).`);
+}
+
+function queueAutoSendCapture(blob) {
+  if (peerState.role !== "rover" || !peerState.autoSend) return;
+  const dc = peerState.dc;
+  if (!dc || dc.readyState !== "open") return;
+  peerSendQueue = peerSendQueue.then(async () => {
+    if (peerState.sending) return;
+    peerState.sending = true;
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      await sendBlobOverDataChannel(blob, `capture-${stamp}.jpg`, "image/jpeg", dc);
+      setStatus("Photo saved and auto-sent.");
+    } catch (e) {
+      setStatus("Photo saved, but auto-send failed: " + e.message);
+    } finally {
+      peerState.sending = false;
+    }
+
+    async function sha256HexFromBlob(blob) {
+      if (!crypto?.subtle) throw new Error("WebCrypto not available.");
+      const buf = await blob.arrayBuffer();
+      const hashBuf = await crypto.subtle.digest("SHA-256", buf);
+      const arr = Array.from(new Uint8Array(hashBuf));
+      return arr.map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
+  }).catch((e) => console.warn("auto-send queue:", e));
+}
+
+async function openPeerSavedPickerModal() {
+  if (peerState.role !== "rover") { setStatus("Switch to Rover role to send saved photos."); return; }
+  const dc = peerState.dc;
+  if (!dc || dc.readyState !== "open") { setStatus("Connect the transfer link first."); return; }
+  const records = await getActivePhotos();
+  const sendable = records.filter((r) => r?.blob instanceof Blob);
+  if (!sendable.length) { setStatus("No saved photos in this bridge yet."); return; }
+  let overlay = document.getElementById("peerSavedPickerModal");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "peerSavedPickerModal";
+    overlay.className = "sketch-modal";
+    overlay.innerHTML = `
+      <div class="sketch-dialog capture-tags-dialog" style="max-width:860px;">
+        <div class="sketch-header">
+          <span class="sketch-title">🖼 Send saved app photos</span>
+          <button class="peer-saved-close secondary" type="button">✕</button>
+        </div>
+        <div class="sketch-canvas-wrap" style="display:block;max-height:62vh;overflow:auto;padding:10px 12px;">
+          <div class="peer-saved-toprow">
+            <span id="peerSavedCount" class="peer-saved-count">0 selected</span>
+            <div style="display:flex;gap:8px;">
+              <button id="peerSavedSelectAll" type="button" class="secondary">Select all</button>
+              <button id="peerSavedClearAll" type="button" class="secondary">Clear</button>
+            </div>
+          </div>
+          <div id="peerSavedGrid" class="peer-saved-grid"></div>
+        </div>
+        <div class="sketch-footer">
+          <span class="sketch-hint">Photos come from the current bridge gallery in this app.</span>
+          <div class="sketch-footer-btns">
+            <button type="button" class="peer-saved-cancel secondary">Cancel</button>
+            <button type="button" class="peer-saved-send">📤 Send selected</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.style.display = "none"; });
+    overlay.querySelector(".peer-saved-close").addEventListener("click", () => { overlay.style.display = "none"; });
+    overlay.querySelector(".peer-saved-cancel").addEventListener("click", () => { overlay.style.display = "none"; });
+  }
+
+  const grid = overlay.querySelector("#peerSavedGrid");
+  const countEl = overlay.querySelector("#peerSavedCount");
+  const selected = new Set();
+  const byId = new Map(sendable.map((r) => [r.id, r]));
+  const thumbUrls = [];
+  const refreshCount = () => { countEl.textContent = `${selected.size} selected`; };
+  const revokeThumbs = () => { while (thumbUrls.length) URL.revokeObjectURL(thumbUrls.pop()); };
+  const closeModal = () => { overlay.style.display = "none"; revokeThumbs(); };
+  overlay.onclick = (e) => { if (e.target === overlay) closeModal(); };
+  overlay.querySelector(".peer-saved-close").onclick = closeModal;
+  overlay.querySelector(".peer-saved-cancel").onclick = closeModal;
+
+  grid.replaceChildren();
+  sendable.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  for (const rec of sendable) {
+    const item = document.createElement("div");
+    item.className = "peer-saved-item";
+    const url = URL.createObjectURL(rec.blob);
+    thumbUrls.push(url);
+    const ts = rec.createdAt ? new Date(rec.createdAt).toLocaleString() : "";
+    item.innerHTML = `
+      <img alt="Saved photo" src="${url}">
+      <label class="peer-saved-check"><input type="checkbox" data-id="${rec.id}">Select</label>
+      <div class="peer-saved-meta">${ts}</div>`;
+    const box = item.querySelector("input[type=checkbox]");
+    box.addEventListener("change", () => {
+      if (box.checked) selected.add(rec.id);
+      else selected.delete(rec.id);
+      refreshCount();
+    });
+    grid.append(item);
+  }
+  refreshCount();
+
+  overlay.querySelector("#peerSavedSelectAll").onclick = () => {
+    for (const cb of grid.querySelectorAll("input[type=checkbox]")) { cb.checked = true; selected.add(cb.dataset.id); }
+    refreshCount();
+  };
+  overlay.querySelector("#peerSavedClearAll").onclick = () => {
+    for (const cb of grid.querySelectorAll("input[type=checkbox]")) cb.checked = false;
+    selected.clear();
+    refreshCount();
+  };
+  overlay.querySelector(".peer-saved-send").onclick = async () => {
+    if (!selected.size) { setStatus("Select at least one saved photo."); return; }
+    const dcNow = peerState.dc;
+    if (!dcNow || dcNow.readyState !== "open") { setStatus("Transfer link disconnected. Reconnect first."); return; }
+    if (peerState.sending) { setStatus("A transfer is already in progress."); return; }
+    peerState.sending = true;
+    if (peerSendFilesBtn) peerSendFilesBtn.disabled = true;
+    if (peerPickSavedBtn) peerPickSavedBtn.disabled = true;
+    try {
+      let sent = 0;
+      for (const id of selected) {
+        const rec = byId.get(id);
+        if (!rec || !(rec.blob instanceof Blob)) continue;
+        const stamp = String(rec.createdAt || new Date().toISOString()).replace(/[:.]/g, "-");
+        await sendBlobOverDataChannel(rec.blob, `saved-${stamp}-${rec.id.slice(0, 8)}.jpg`, "image/jpeg", dcNow);
+        sent++;
+      }
+      appendPeerLog(`Sent ${sent} saved app photo(s).`);
+      setStatus(`Sent ${sent} saved app photo${sent === 1 ? "" : "s"}.`);
+      closeModal();
+    } catch (e) {
+      setStatus("Send saved photos failed: " + e.message);
+    } finally {
+      peerState.sending = false;
+      if (peerSendFilesBtn) peerSendFilesBtn.disabled = false;
+      if (peerPickSavedBtn) peerPickSavedBtn.disabled = false;
+    }
+  };
+
+  overlay.style.display = "flex";
 }
 
 // ── Camera ────────────────────────────────────────────────────────────────────
@@ -418,9 +1087,16 @@ async function populateThermalSelector() {
     });
     cameraSelector.hidden = cameras.length < 2;
     depthModeRow.hidden   = cameras.length < 2;
-    if (refineRow) refineRow.hidden = cameras.length < 2;
-    if (cutoffRow) cutoffRow.hidden = cameras.length < 2;
+    updateDepthUiVisibility(cameras.length >= 2);
   } catch (e) { console.warn("Camera enumeration:", e); }
+}
+
+function updateDepthUiVisibility(hasStereoCamera = !!thermalStream) {
+  const canShowToggle = !!hasStereoCamera;
+  if (depthModeRow) depthModeRow.hidden = !canShowToggle;
+  if (refineRow) refineRow.hidden = !canShowToggle || !depthModeEnabled;
+  if (cutoffRow) cutoffRow.hidden = !canShowToggle || !depthModeEnabled;
+  if (calibrateDepthBtn) calibrateDepthBtn.hidden = !canShowToggle || !depthModeEnabled;
 }
 
 async function startThermalCamera() {
@@ -475,6 +1151,7 @@ async function startThermalCamera() {
     thermalFrame.hidden = false;
     startThermalButton.hidden = true;
     stopThermalButton.hidden = false;
+    updateDepthUiVisibility(true);
 
     const s = track.getSettings();
     setStatus(`Stereo camera: actual ${s.width}\u00d7${s.height} \u00b7 ${capsInfo}`);
@@ -485,12 +1162,16 @@ async function startThermalCamera() {
 
 function stopThermalCamera() {
   if (!thermalStream) return;
+  depthModeEnabled = false;
+  if (depthModeCheck) depthModeCheck.checked = false;
+  stopDepthMode();
   for (const t of thermalStream.getTracks()) t.stop();
   thermalStream = undefined;
   thermalPreview.srcObject = null;
   thermalFrame.hidden = true;
   startThermalButton.hidden = false;
   stopThermalButton.hidden = true;
+  updateDepthUiVisibility(false);
 }
 
 function stopMainCamera() {
@@ -665,6 +1346,7 @@ async function capturePhoto() {
       headingText.textContent = orientationSummary();
     }
     await savePhoto(mainBlob, thermalBlob, commentInput.value.trim(), captureLoc, currentHeading, facingMode, depthBlob, plyText, normalizeTags(captureTags), { attitude: currentAttitude });
+    queueAutoSendCapture(mainBlob);
   } catch (e) {
     console.error("[capture] savePhoto FAILED:", e);
     setStatus("⚠ Save failed: " + e.message + (plyText ? " (PLY too large for storage?)" : ""));
@@ -1003,16 +1685,19 @@ async function getScanFrames(sessionId) {
 
 async function renderScanSessions() {
   if (!scanSessionsCard) return;
-  const sessions = (await getActiveScanSessions()).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const allSessions = await getActiveScanSessions();
+  const scanNoById = buildScanNumberMap(allSessions);
+  const sessions = allSessions.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   scanSessionsList.replaceChildren();
   if (!sessions.length) { scanSessionsCard.hidden = true; return; }
   scanSessionsCard.hidden = false;
 
   for (const s of sessions) {
+    const scanNo = scanNoById.get(s.id) || "scan";
     const frames = await getScanFrames(s.id);
     const wrap = document.createElement("div"); wrap.className = "scan-session";
     const head = document.createElement("div"); head.className = "scan-session-head";
-    const title = document.createElement("div"); title.className = "scan-session-title"; title.textContent = "🎞 " + s.label;
+    const title = document.createElement("div"); title.className = "scan-session-title"; title.textContent = `🎞 ${scanNo} · ${s.label}`;
     const meta = document.createElement("div"); meta.className = "scan-session-meta";
     const cam = s.camera || {};
     meta.textContent = `${frames.length} frame${frames.length === 1 ? "" : "s"} · ${new Date(s.createdAt).toLocaleString()}${cam.imgW ? ` · ${cam.imgW}×${cam.imgH}` : ""}${cam.locked ? " · locked" : ""}`;
@@ -1030,7 +1715,7 @@ async function renderScanSessions() {
 
     const actions = document.createElement("div"); actions.className = "scan-session-actions";
     const dl = makeButton("⬇ Download COLMAP set", "");
-    dl.addEventListener("click", () => downloadScanSet(s.id));
+    dl.addEventListener("click", () => downloadScanSet(s.id, scanNo));
     const del = makeButton("🗑 Delete scan", "danger");
     del.addEventListener("click", () => deleteScanSession(s.id, s.label));
     actions.append(dl, del); wrap.append(actions);
@@ -1048,18 +1733,19 @@ async function deleteScanSession(sessionId, label) {
 }
 
 // Export a scan as a COLMAP/OpenMVG-ready folder inside a ZIP.
-async function downloadScanSet(sessionId) {
+async function downloadScanSet(sessionId, scanNoHint = null) {
   if (!window.JSZip) { setStatus("⚠ JSZip not loaded."); return; }
   const sessions = await getActiveScanSessions();
   const s = sessions.find((x) => x.id === sessionId);
   if (!s) { setStatus("Scan not found."); return; }
+  const scanNo = scanNoHint || buildScanNumberMap(sessions).get(sessionId) || "scan";
   const frames = await getScanFrames(sessionId);
   if (!frames.length) { setStatus("Scan has no frames."); return; }
 
   setStatus(`Building COLMAP set for “${s.label}” (${frames.length} frames)…`);
   const zip = new JSZip();
   const safe = (str) => (str || "scan").replace(/[^\w\-]+/g, "_").slice(0, 50);
-  const root = zip.folder(`scan_${safe(s.label)}`);
+  const root = zip.folder(`${safe(scanNo)}_${safe(s.label)}`);
   const images = root.folder("images");
 
   const cam = s.camera || {};
@@ -1089,7 +1775,7 @@ async function downloadScanSet(sessionId) {
   const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `scan_${safe(s.label)}.zip`;
+  a.download = `${safe(scanNo)}.zip`;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   setStatus(`COLMAP set “${s.label}” downloaded (${frames.length} frames).`);
@@ -1147,11 +1833,45 @@ async function getActivePhotos() {
   return records.filter((r) => r.bridgeId === activeBridgeId && !r.isScanFrame && !r.isScanSession);
 }
 
+function sortOldestFirst(records) {
+  return [...records].sort((a, b) =>
+    String(a.createdAt || "").localeCompare(String(b.createdAt || "")) ||
+    String(a.id || "").localeCompare(String(b.id || ""))
+  );
+}
+
+function buildPhotoNumberMap(records) {
+  const out = new Map();
+  const oldest = sortOldestFirst(records);
+  oldest.forEach((r, idx) => {
+    const n = idx + 1;
+    const dual = !!r.thermalBlob;
+    const isSketch = !!r.isSketch;
+    const main = isSketch ? `${n}-sketch` : (dual ? `${n}-a` : `${n}`);
+    const thermal = dual ? `${n}-b` : null;
+    const overlay = isSketch ? `${n}-sketch-overlay` : (dual ? `${n}-a-overlay` : `${n}-overlay`);
+    out.set(r.id, { index: n, main, thermal, overlay, depth: `${n}-depth`, ply: `${n}-ply` });
+  });
+  return out;
+}
+
+function buildScanNumberMap(sessions) {
+  const out = new Map();
+  const oldest = sortOldestFirst(sessions);
+  oldest.forEach((s, idx) => out.set(s.id, `${idx + 1}-scan`));
+  return out;
+}
+
+function safeStem(text) {
+  return String(text || "photo").replace(/[^\w\-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80) || "photo";
+}
+
 async function renderSavedPhotos() {
   for (const [, inst] of leafletInstances) inst.lmap.remove();
   leafletInstances.clear();
 
   const records = (await getActivePhotos());
+  const photoNoById = buildPhotoNumberMap(records);
   records.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   photoGrid.replaceChildren();
 
@@ -1165,7 +1885,7 @@ async function renderSavedPhotos() {
   if (wordReportButton) wordReportButton.disabled = false;
 
   for (const record of records) {
-    const card = buildCard(record);
+    const card = buildCard(record, photoNoById.get(record.id));
     photoGrid.append(card);
     const mapContainer = card.querySelector(".photo-map-container");
     if (record.location) {
@@ -1183,6 +1903,15 @@ async function renderSavedPhotos() {
 
 async function clearAllPhotos() {
   const mine = await getActivePhotos();
+  if (!mine.length) {
+    setStatus("No photos to delete in this bridge.");
+    return;
+  }
+  const confirmed = window.confirm(`Delete all ${mine.length} photo(s) in this bridge? This cannot be undone.`);
+  if (!confirmed) {
+    setStatus("Delete all canceled.");
+    return;
+  }
   for (const p of mine) await runTransaction("readwrite", (store) => store.delete(p.id));
   await renderSavedPhotos();
   setStatus("All photos in this bridge deleted.");
@@ -1528,6 +2257,7 @@ function openPhotoAnnotator(record) {
             </select>
           </label>
           <button type="button" id="annotEraser" class="secondary">🩹 Eraser</button>
+          <button type="button" id="annotEditCallout" class="secondary">✎ Edit text</button>
           <button type="button" id="annotDeleteCallout" class="secondary">🗑 Delete callout</button>
           <button type="button" id="annotUndo" class="secondary">↶ Undo</button>
           <button type="button" id="annotClear" class="secondary">🗑 Clear</button>
@@ -1570,6 +2300,7 @@ function openPhotoAnnotator(record) {
     overlay.querySelector("#annotCalloutFill").addEventListener("change", (e) => setAnnotCalloutFill(e.target.value));
     overlay.querySelector("#annotPenTool").addEventListener("click", () => setAnnotTool("pen"));
     overlay.querySelector("#annotCalloutTool").addEventListener("click", () => setAnnotTool("callout"));
+    overlay.querySelector("#annotEditCallout").addEventListener("click", () => editSelectedCalloutText());
     overlay.querySelector("#annotDeleteCallout").addEventListener("click", () => deleteSelectedCallout());
     overlay.querySelector("#annotEraser").addEventListener("click", (e) => {
       if (!annotState) return;
@@ -1726,13 +2457,60 @@ function findCalloutHit(p) {
   if (!annotState) return null;
   const { canvas, ctx } = annotState;
   const near = (x, y, px, py, r = 14) => ((x - px) ** 2 + (y - py) ** 2) <= r * r;
+  const distSeg = (px, py, x1, y1, x2, y2) => {
+    const vx = x2 - x1, vy = y2 - y1;
+    const wx = px - x1, wy = py - y1;
+    const c1 = vx * wx + vy * wy;
+    if (c1 <= 0) return Math.hypot(px - x1, py - y1);
+    const c2 = vx * vx + vy * vy;
+    if (c2 <= c1) return Math.hypot(px - x2, py - y2);
+    const t = c1 / c2;
+    const qx = x1 + t * vx, qy = y1 + t * vy;
+    return Math.hypot(px - qx, py - qy);
+  };
   for (let i = annotState.ops.length - 1; i >= 0; i--) {
     const op = annotState.ops[i];
     if (!op || op.type !== "callout") continue;
     const l = calloutLayout(op, canvas, ctx);
+    const size = Math.max(1, op.size || 3);
     if (near(p.x, p.y, l.ax, l.ay, 14)) return { idx: i, mode: "anchor" };
     if (near(p.x, p.y, l.x, l.y, 14)) return { idx: i, mode: "box" };
+    if (distSeg(p.x, p.y, l.ax, l.ay, l.x, l.y) <= Math.max(8, size + 4)) return { idx: i, mode: "line" };
     if (p.x >= l.x && p.x <= l.x + l.boxW && p.y >= l.y && p.y <= l.y + l.boxH) return { idx: i, mode: "moveBox", x0: l.x, y0: l.y };
+  }
+  return null;
+}
+
+function findAnnotOpHit(p) {
+  if (!annotState) return null;
+  const callHit = findCalloutHit(p);
+  if (callHit) return { idx: callHit.idx, mode: callHit.mode, type: "callout" };
+  const distSeg = (px, py, x1, y1, x2, y2) => {
+    const vx = x2 - x1, vy = y2 - y1;
+    const wx = px - x1, wy = py - y1;
+    const c1 = vx * wx + vy * wy;
+    if (c1 <= 0) return Math.hypot(px - x1, py - y1);
+    const c2 = vx * vx + vy * vy;
+    if (c2 <= c1) return Math.hypot(px - x2, py - y2);
+    const t = c1 / c2;
+    const qx = x1 + t * vx, qy = y1 + t * vy;
+    return Math.hypot(px - qx, py - qy);
+  };
+  for (let i = annotState.ops.length - 1; i >= 0; i--) {
+    const op = annotState.ops[i];
+    if (!op || op.type !== "stroke") continue;
+    const pts = op.points || [];
+    const r = Math.max(8, (op.size || 3) * 1.3);
+    if (pts.length === 1) {
+      const dx = p.x - pts[0][0], dy = p.y - pts[0][1];
+      if (Math.hypot(dx, dy) <= r) return { idx: i, mode: "stroke", type: "stroke" };
+      continue;
+    }
+    for (let j = 1; j < pts.length; j++) {
+      if (distSeg(p.x, p.y, pts[j - 1][0], pts[j - 1][1], pts[j][0], pts[j][1]) <= r) {
+        return { idx: i, mode: "stroke", type: "stroke" };
+      }
+    }
   }
   return null;
 }
@@ -1742,15 +2520,44 @@ function setupPhotoAnnotatorCanvas(canvas) {
     if (!annotState) return;
     canvas.setPointerCapture(e.pointerId);
     const p = annotPos(e);
-    if (annotState.tool === "callout") {
-      const hit = findCalloutHit(p);
+    const hit = findAnnotOpHit(p);
+    if (annotState.erasing) {
       if (hit) {
-        annotState.selectedCalloutIdx = hit.idx;
-        const op = annotState.ops[hit.idx];
+        annotState.ops.splice(hit.idx, 1);
+        if (annotState.selectedCalloutIdx === hit.idx) annotState.selectedCalloutIdx = -1;
+        else if (annotState.selectedCalloutIdx > hit.idx) annotState.selectedCalloutIdx -= 1;
+        syncAnnotControls();
+        redrawPhotoOverlay();
+      }
+      return;
+    }
+    if (hit && hit.type === "callout" && annotState.tool !== "callout") {
+      setAnnotTool("callout");
+      annotState.selectedCalloutIdx = hit.idx;
+      const op = annotState.ops[hit.idx];
+      annotState.color = op.color || annotState.color;
+      annotState.size = Math.max(1, Math.round(op.size || annotState.size));
+      annotState.calloutFill = op.fill === "none" ? "none" : "white";
+      if (hit.mode === "anchor" || hit.mode === "box" || hit.mode === "moveBox") {
+        annotState.dragCallout = { idx: hit.idx, mode: hit.mode, p0: p, box0: op.box ? [op.box[0], op.box[1]] : [p.x, p.y] };
+      }
+      syncAnnotControls();
+      redrawPhotoOverlay();
+      return;
+    }
+    if (annotState.tool === "callout") {
+      const callHit = findCalloutHit(p);
+      if (callHit) {
+        annotState.selectedCalloutIdx = callHit.idx;
+        const op = annotState.ops[callHit.idx];
         annotState.color = op.color || annotState.color;
         annotState.size = Math.max(1, Math.round(op.size || annotState.size));
         annotState.calloutFill = op.fill === "none" ? "none" : "white";
-        annotState.dragCallout = { idx: hit.idx, mode: hit.mode, p0: p, box0: op.box ? [op.box[0], op.box[1]] : [p.x, p.y] };
+        if (callHit.mode === "anchor" || callHit.mode === "box" || callHit.mode === "moveBox") {
+          annotState.dragCallout = { idx: callHit.idx, mode: callHit.mode, p0: p, box0: op.box ? [op.box[0], op.box[1]] : [p.x, p.y] };
+        } else {
+          annotState.dragCallout = null;
+        }
         syncAnnotControls();
         redrawPhotoOverlay();
         return;
@@ -1865,12 +2672,22 @@ function redrawPhotoOverlay() {
       const { ax, ay, x, y, boxW, boxH, fontPx, lines, pad } = l;
       const color = op.color || "#ef4444";
       const size = Math.max(1, op.size || 3);
+      // Leader should terminate on the closest edge of the text box, not the box's
+      // top-left corner. This makes the arrowhead visible and geometrically correct.
+      const cx = x + boxW * 0.5, cy = y + boxH * 0.5;
+      const dx0 = cx - ax, dy0 = cy - ay;
+      const halfW = boxW * 0.5, halfH = boxH * 0.5;
+      const sx = Math.abs(dx0) > 1e-6 ? halfW / Math.abs(dx0) : Infinity;
+      const sy = Math.abs(dy0) > 1e-6 ? halfH / Math.abs(dy0) : Infinity;
+      const t = Math.min(sx, sy);
+      const tx = cx - dx0 * t, ty = cy - dy0 * t;
       ctx.save();
       ctx.strokeStyle = color;
-      ctx.lineWidth = Math.max(2, size);
+      // Thinner leader line for better readability under text.
+      ctx.lineWidth = Math.max(1, size * 0.5);
       ctx.beginPath();
       ctx.moveTo(ax, ay);
-      ctx.lineTo(x, y);
+      ctx.lineTo(tx, ty);
       ctx.stroke();
       ctx.font = `${fontPx}px Arial, sans-serif`;
       ctx.textBaseline = "top";
@@ -1881,6 +2698,21 @@ function redrawPhotoOverlay() {
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.strokeRect(x, y, boxW, boxH);
+      // Arrowhead at the target end of the leader (anchor side).
+      const dx = ax - tx, dy = ay - ty;
+      const mag = Math.hypot(dx, dy) || 1;
+      const ux = dx / mag, uy = dy / mag;
+      const ahLen = Math.max(10, size * 3.4);
+      const ahWid = Math.max(10, size * 3.0);
+      const bx = ax - ux * ahLen, by = ay - uy * ahLen;
+      const px = -uy, py = ux;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx + px * ahWid * 0.5, by + py * ahWid * 0.5);
+      ctx.lineTo(bx - px * ahWid * 0.5, by - py * ahWid * 0.5);
+      ctx.closePath();
+      ctx.fill();
       ctx.fillStyle = "#111827";
       lines.forEach((ln, i) => ctx.fillText(ln, x + pad, y + pad + i * (fontPx + 2)));
       if (annotState.selectedCalloutIdx >= 0 && annotState.ops[annotState.selectedCalloutIdx] === op) {
@@ -1938,6 +2770,25 @@ function deleteSelectedCallout() {
   annotState.ops.splice(i, 1);
   annotState.selectedCalloutIdx = -1;
   syncAnnotControls();
+  redrawPhotoOverlay();
+}
+
+function editSelectedCalloutText() {
+  if (!annotState) return;
+  const i = annotState.selectedCalloutIdx;
+  if (i < 0 || !annotState.ops[i] || annotState.ops[i].type !== "callout") {
+    setStatus("Select a callout first, then press Edit text.");
+    return;
+  }
+  const op = annotState.ops[i];
+  const txt = prompt("Edit callout text:", String(op.text || ""));
+  if (txt == null) return; // cancelled
+  const t = txt.trim();
+  if (!t) {
+    setStatus("Callout text cannot be empty.");
+    return;
+  }
+  op.text = t;
   redrawPhotoOverlay();
 }
 
@@ -2135,6 +2986,7 @@ function bridgesView()  { return document.getElementById("bridgesView"); }
 function appView()      { return document.getElementById("appView"); }
 
 function showBridgesOverview() {
+  closePeerTransferView();
   activeBridgeId = null;
   localStorage.removeItem(ACTIVE_BRIDGE_KEY);
   if (appView()) appView().hidden = true;
@@ -2212,6 +3064,7 @@ async function renderBridgesList() {
 }
 
 async function openBridge(id) {
+  closePeerTransferView();
   const b = bridges.find((x) => x.id === id) || (await getBridgeRec(id));
   if (!b) { showBridgesOverview(); return; }
   if (!bridges.some((x) => x.id === id)) bridges.push(b);
@@ -2650,6 +3503,7 @@ async function downloadBridgeZip(id) {
   if (idx >= 0) bridges[idx] = b;
   const photos = (await runTransaction("readonly", (store) => store.getAll())).filter((p) => p.bridgeId === id && !p.isScanFrame && !p.isScanSession);
   photos.sort((a, c) => a.createdAt.localeCompare(c.createdAt));
+  const photoNoById = buildPhotoNumberMap(photos);
 
   setStatus(`Building ZIP for “${b.title}” (${photos.length} item(s))…`);
   const zip = new JSZip();
@@ -2672,8 +3526,7 @@ async function downloadBridgeZip(id) {
   let i = 0;
   for (const p of photos) {
     i++;
-    const n = String(i).padStart(3, "0");
-    const shortId = p.id.slice(0, 8);
+    const num = photoNoById.get(p.id) || { index: i, main: String(i), thermal: null, depth: `${i}-depth`, ply: `${i}-ply` };
     const kind = p.isSketch ? "sketch" : "photo";
     const files = [];
 
@@ -2681,17 +3534,17 @@ async function downloadBridgeZip(id) {
       try {
         // Sketches are PNG with transparency-free white bg; embed metadata all the same.
         const annotated = await annotatePhotoBlob(p, p.blob);
-        const fname = `${n}_${kind}_${shortId}.jpg`;
+        const fname = `${safeStem(num.main)}.jpg`;
         imgFolder.file(fname, annotated);
         files.push("images/" + fname);
       } catch (e) { console.warn("annotate failed for", p.id, e); }
     }
-    if (p.thermalBlob) { const f = `${n}_stereo_${shortId}.jpg`; imgFolder.file(f, p.thermalBlob); files.push("images/" + f); }
-    if (p.depthBlob)   { const f = `${n}_depth_${shortId}.jpg`;  imgFolder.file(f, p.depthBlob);  files.push("images/" + f); }
-    if (p.plyText)     { const f = `${n}_${shortId}.ply`; plyFolder.file(f, p.plyText); files.push("pointclouds/" + f); }
+    if (p.thermalBlob) { const f = `${safeStem(num.thermal || `${num.index}-b`)}.jpg`; imgFolder.file(f, p.thermalBlob); files.push("images/" + f); }
+    if (p.depthBlob)   { const f = `${safeStem(num.depth || `${num.index}-depth`)}.jpg`;  imgFolder.file(f, p.depthBlob);  files.push("images/" + f); }
+    if (p.plyText)     { const f = `${safeStem(num.ply || `${num.index}-ply`)}.ply`; plyFolder.file(f, p.plyText); files.push("pointclouds/" + f); }
 
     manifest.photos.push({
-      seq: i, id: p.id, capturedAt: p.createdAt, comment: p.comment || "",
+      seq: i, photoNo: num.main, id: p.id, capturedAt: p.createdAt, comment: p.comment || "",
       tags: p.tags || null, location: p.location || null, heading: p.heading ?? null,
       attitude: p.attitude ?? null, facing: p.facing || null, isSketch: !!p.isSketch, files,
     });
@@ -2738,17 +3591,19 @@ async function downloadBridgeZip(id) {
 }
 
 // ── Card builder ──────────────────────────────────────────────────────────────
-function buildCard(record) {
+function buildCard(record, photoNo) {
   const card = photoCardTemplate.content.firstElementChild.cloneNode(true);
+  const labels = photoNo || { main: "photo", thermal: "stereo", overlay: "photo-overlay", depth: "depth", ply: "pointcloud" };
 
   const mainImg = card.querySelector(".main-img");
   const mainUrl = URL.createObjectURL(record.blob);
   mainImg.src = mainUrl;
   mainImg.addEventListener("load", () => URL.revokeObjectURL(mainUrl), { once: true });
 
-  if (record.isSketch) {
-    const badge = card.querySelector(".photo-img-wrap .img-badge");
-    if (badge) { badge.textContent = "Sketch"; badge.style.background = "rgba(124,58,237,.75)"; }
+  const mainBadge = card.querySelector(".photo-img-wrap .img-badge");
+  if (mainBadge) {
+    mainBadge.textContent = labels.main;
+    if (record.isSketch) mainBadge.style.background = "rgba(124,58,237,.75)";
   }
   if (record.annotationOverlayBlob) {
     const overlayImg = document.createElement("img");
@@ -2763,6 +3618,8 @@ function buildCard(record) {
   if (record.thermalBlob) {
     const thermalWrap = card.querySelector(".thermal-img-wrap");
     const thermalImg  = card.querySelector(".thermal-img");
+    const thermalBadge = card.querySelector(".thermal-img-wrap .img-badge");
+    if (thermalBadge) thermalBadge.textContent = labels.thermal || "stereo";
     const thermalUrl  = URL.createObjectURL(record.thermalBlob);
     thermalImg.src = thermalUrl;
     thermalImg.addEventListener("load", () => URL.revokeObjectURL(thermalUrl), { once: true });
@@ -2772,6 +3629,8 @@ function buildCard(record) {
   if (record.depthBlob) {
     const depthWrap = card.querySelector(".depth-img-wrap");
     const depthImg  = card.querySelector(".depth-img");
+    const depthBadge = card.querySelector(".depth-img-wrap .img-badge");
+    if (depthBadge) depthBadge.textContent = labels.depth || "depth";
     const depthUrl  = URL.createObjectURL(record.depthBlob);
     depthImg.src = depthUrl;
     depthImg.addEventListener("load", () => URL.revokeObjectURL(depthUrl), { once: true });
@@ -2780,17 +3639,15 @@ function buildCard(record) {
 
   const time = card.querySelector("time");
   time.dateTime = record.createdAt;
-  time.textContent = new Date(record.createdAt).toLocaleString();
+  time.textContent = `${labels.main} · ${new Date(record.createdAt).toLocaleString()}`;
 
   renderComment(card.querySelector(".photo-comment-area"), record);
   renderTagsArea(card.querySelector(".photo-tags-area"), record);
-  renderLocationArea(card.querySelector(".photo-location-area"), record);
-  renderHeadingArea(card.querySelector(".photo-heading-area"), record);
-  renderAttitudeArea(card.querySelector(".photo-attitude-area"), record);
+  renderNavArea(card.querySelector(".photo-nav-area"), record);
 
   const dlBtn = card.querySelector(".download-btn");
   if (record.annotationOverlayBlob) dlBtn.textContent = "⬇ Photo only";
-  dlBtn.addEventListener("click", () => downloadPhoto(record, record.blob, "photo"));
+  dlBtn.addEventListener("click", () => downloadPhoto(record, record.blob, labels.main));
 
   if (!record.isSketch) {
     const annotateBtn = makeButton("🖊 Annotate", "secondary");
@@ -2798,7 +3655,7 @@ function buildCard(record) {
     card.querySelector(".photo-actions").insertBefore(annotateBtn, card.querySelector(".download-btn"));
     if (record.annotationOverlayBlob) {
       const dlOverlay = makeButton("⬇ Photo+overlay", "secondary");
-      dlOverlay.addEventListener("click", () => downloadPhoto(record, record.blob, "photo-overlay", true, true));
+      dlOverlay.addEventListener("click", () => downloadPhoto(record, record.blob, labels.overlay, true, true));
       card.querySelector(".photo-actions").insertBefore(dlOverlay, dlBtn.nextSibling);
     }
     attachCrackTool(card, record);
@@ -2806,22 +3663,27 @@ function buildCard(record) {
 
   if (record.thermalBlob) {
     const dlT = makeButton("\u2b07 Thermal", "secondary");
-    dlT.addEventListener("click", () => downloadPhoto(record, record.thermalBlob, "stereo", false));
+    dlT.addEventListener("click", () => downloadPhoto(record, record.thermalBlob, labels.thermal || "stereo", false));
     card.querySelector(".photo-actions").insertBefore(dlT, card.querySelector(".download-btn").nextSibling);
   }
 
   if (record.depthBlob) {
     const dlD = makeButton("\u2b07 Depth", "secondary");
-    dlD.addEventListener("click", () => downloadPhoto(record, record.depthBlob, "depth", false));
+    dlD.addEventListener("click", () => downloadPhoto(record, record.depthBlob, labels.depth || "depth", false));
     card.querySelector(".photo-actions").insertBefore(dlD, card.querySelector(".download-btn").nextSibling);
   }
   if (record.plyText) {
     const dlP = makeButton("\u2b07 PLY (3D)", "secondary");
-    dlP.addEventListener("click", () => downloadPly(record));
+    dlP.addEventListener("click", () => downloadPly(record, labels.ply || "pointcloud"));
     card.querySelector(".photo-actions").insertBefore(dlP, card.querySelector(".download-btn").nextSibling);
   }
 
   card.querySelector(".delete-btn").addEventListener("click", async () => {
+    const confirmed = window.confirm(`Delete photo ${labels.main}? This cannot be undone.`);
+    if (!confirmed) {
+      setStatus("Photo delete canceled.");
+      return;
+    }
     const inst = leafletInstances.get(record.id);
     if (inst) { inst.lmap.remove(); leafletInstances.delete(record.id); }
     await runTransaction("readwrite", (store) => store.delete(record.id));
@@ -2833,13 +3695,13 @@ function buildCard(record) {
 }
 
 // ── Download with EXIF + metadata burn-in ────────────────────────────────────
-async function downloadPhoto(record, blob, label, burnMeta = true, includeOverlay = false) {
+async function downloadPhoto(record, blob, stem, burnMeta = true, includeOverlay = false) {
   // Stereo/depth images must stay pixel-identical for OpenCV: skip the
   // burned-in footer bar (and EXIF re-encode) entirely for those.
   if (!burnMeta) {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `${label}-${record.id.slice(0, 8)}.jpg`;
+    a.download = `${safeStem(stem)}.jpg`;
     a.click();
     URL.revokeObjectURL(a.href);
     return;
@@ -2847,7 +3709,7 @@ async function downloadPhoto(record, blob, label, burnMeta = true, includeOverla
   const finalBlob = await annotatePhotoBlob(record, blob, { includeOverlay });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(finalBlob);
-  a.download = `${label}-${record.id.slice(0, 8)}.jpg`;
+  a.download = `${safeStem(stem)}.jpg`;
   a.click();
   URL.revokeObjectURL(a.href);
 }
@@ -2871,16 +3733,16 @@ async function annotatePhotoBlob(record, blob, opts = {}) {
 
   const lines = [];
   lines.push(new Date(record.createdAt).toLocaleString());
+  const navParts = [];
   if (record.location) {
     const { lat, lng, accuracy } = record.location;
-    lines.push(`GPS: ${lat.toFixed(6)}, ${lng.toFixed(6)}${accuracy ? ` (\u00b1${accuracy}m)` : ""}`);
+    navParts.push(`GPS ${lat.toFixed(6)}, ${lng.toFixed(6)}${accuracy ? ` (\u00b1${accuracy}m)` : ""}`);
   }
   if (record.heading != null) {
-    lines.push(`Direction: ${record.heading}\u00b0 ${bearingLabel(record.heading)}${record.facing ? ` (${facingLabel(record.facing)} camera)` : ""}`);
+    navParts.push(`Direction ${record.heading}\u00b0 ${bearingLabel(record.heading)}${record.facing ? ` (${facingLabel(record.facing)} camera)` : ""}`);
   }
-  if (record.attitude != null && isFinite(record.attitude)) {
-    lines.push(`Attitude: ${attitudeLabel(record.attitude)}`);
-  }
+  if (record.attitude != null && isFinite(record.attitude)) navParts.push(`Attitude ${attitudeLabel(record.attitude)}`);
+  if (navParts.length) lines.push(navParts.join(" \u00b7 "));
   if (record.comment) lines.push(`Comment: ${record.comment}`);
   const tagStr = tagsToFlatString(record.tags);
   if (tagStr) lines.push(`Tags: ${tagStr}`);
@@ -2932,11 +3794,11 @@ async function annotatePhotoBlob(record, blob, opts = {}) {
   return finalBlob;
 }
 
-function downloadPly(record) {
+function downloadPly(record, stem = "pointcloud") {
   const blob = new Blob([record.plyText], { type: "application/octet-stream" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `pointcloud-${record.id.slice(0, 8)}.ply`;
+  a.download = `${safeStem(stem)}.ply`;
   a.click();
   URL.revokeObjectURL(a.href);
 }
@@ -3315,8 +4177,8 @@ function initMap(container, record) {
     // Live-update the coordinate display while dragging
     const card = container.closest(".photo-card");
     if (card) {
-      const valEl = card.querySelector(".photo-location-area .area-value");
-      if (valEl) valEl.textContent = `${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}`;
+      const valEl = card.querySelector(".photo-nav-area .photo-nav-line");
+      if (valEl) valEl.textContent = navSummaryLine(record, { location: { lat: ll.lat, lng: ll.lng, accuracy: 0 } });
     }
   });
   arrowMarker.on("dragend", async () => {
@@ -3325,7 +4187,7 @@ function initMap(container, record) {
     handleMarker.setLatLng(getHandleLatLng(lmap, ll, record.heading));
     await runTransaction("readwrite", (store) => store.put(record));
     const card = container.closest(".photo-card");
-    if (card) renderLocationArea(card.querySelector(".photo-location-area"), record);
+    if (card) renderNavArea(card.querySelector(".photo-nav-area"), record);
     setStatus("Location updated by dragging.");
   });
 
@@ -3341,7 +4203,7 @@ function initMap(container, record) {
     arrowMarker.setIcon(makeArrowIcon(newH));
     await runTransaction("readwrite", (store) => store.put(record));
     const card = container.closest(".photo-card");
-    if (card) renderHeadingArea(card.querySelector(".photo-heading-area"), record);
+    if (card) renderNavArea(card.querySelector(".photo-nav-area"), record);
     setStatus(`Direction: ${newH}\u00b0 ${bearingLabel(newH)}.`);
   });
 
@@ -3675,6 +4537,7 @@ function initDepthCanvas() {
 
 async function startDepthMode() {
   initDepthCanvas();
+  updateDepthUiVisibility(true);
   depthCanvas.hidden = false;
   thermalFrame.classList.add("depth-on");
   if (!thermalStream) {
@@ -3710,6 +4573,7 @@ async function startDepthMode() {
 }
 
 function stopDepthMode() {
+  updateDepthUiVisibility(!!thermalStream);
   if (depthAnimId) { cancelAnimationFrame(depthAnimId); depthAnimId = null; }
   if (depthWs) { depthWs.close(); depthWs = null; }
   if (depthCanvas) depthCanvas.hidden = true;
@@ -3933,8 +4797,104 @@ function renderTagsArea(container, record) {
   });
 }
 
+function navSummaryLine(record, overrides = {}) {
+  const loc = overrides.location ?? record.location ?? null;
+  const heading = overrides.heading ?? record.heading ?? null;
+  const attitude = overrides.attitude ?? record.attitude ?? null;
+  const parts = [];
+  if (loc && isFinite(loc.lat) && isFinite(loc.lng)) parts.push(`📍 ${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}`);
+  if (heading != null && isFinite(heading)) parts.push(`🧭 ${Math.round(heading)}° ${bearingLabel(heading)}`);
+  if (attitude != null && isFinite(attitude)) parts.push(`📐 ${attitudeLabel(attitude)}`);
+  return parts.length ? parts.join(" · ") : "📍 — · 🧭 — · 📐 —";
+}
+
+function renderNavArea(container, record, overrides = {}) {
+  if (!container) return;
+  container.innerHTML = "";
+  const has = !!(record.location || (record.heading != null) || (record.attitude != null && isFinite(record.attitude)));
+  const hdr = makeAreaHeader("📍/🧭/📐 Navigation", has ? "Edit" : "Add");
+  const p = document.createElement("p"); p.className = "area-value photo-nav-line";
+  p.textContent = navSummaryLine(record, overrides);
+  container.append(hdr.div, p);
+  hdr.btn.addEventListener("click", () => {
+    container.innerHTML = "";
+    const latI = makeInput("number", record.location?.lat ?? "", "Latitude"); latI.step = "0.00001";
+    const lngI = makeInput("number", record.location?.lng ?? "", "Longitude"); lngI.step = "0.00001";
+    const accI = makeInput("number", record.location?.accuracy ?? "", "Accuracy (m)");
+    const degI = makeInput("number", record.heading ?? "", "Heading 0–360");
+    const sel = document.createElement("select");
+    sel.className = "meta-input";
+    for (const m of ["environment", "user"]) {
+      const o = document.createElement("option"); o.value = m; o.textContent = facingLabel(m); if ((record.facing || "environment") === m) o.selected = true;
+      sel.append(o);
+    }
+    const attI = makeInput("number", record.attitude ?? "", "-90 (down) to 90 (up)"); attI.min = -90; attI.max = 90;
+    const gpsBtn = makeButton("Re-acquire GPS", "secondary");
+    const hdgBtn = makeButton("Re-acquire compass", "secondary");
+    const attBtn = makeButton("Re-read tilt", "secondary");
+    const sensorRow = document.createElement("div"); sensorRow.className = "edit-row"; sensorRow.append(gpsBtn, hdgBtn, attBtn);
+    const row = document.createElement("div"); row.className = "edit-row";
+    const sv = makeButton("Save", ""), cn = makeButton("Cancel", "secondary"), cl = makeButton("Clear", "danger");
+    row.append(sv, cn, cl);
+    const sp = makeEditStatus();
+    container.append(
+      makeLabeledField("Latitude", latI),
+      makeLabeledField("Longitude", lngI),
+      makeLabeledField("Accuracy (m)", accI),
+      makeLabeledField("Heading (0–360)", degI),
+      makeLabeledField("Camera", sel),
+      makeLabeledField("Attitude (− down, + up)", attI),
+      sensorRow, row, sp
+    );
+
+    gpsBtn.addEventListener("click", () => {
+      sp.textContent = "Reading GPS…";
+      acquireLocationNow(
+        (loc) => { latI.value = loc.lat; lngI.value = loc.lng; accI.value = loc.accuracy; sp.textContent = "Got GPS — press Save."; },
+        (e) => { sp.textContent = `GPS failed: ${e.message || e}`; }
+      );
+    });
+    hdgBtn.addEventListener("click", () => {
+      sp.textContent = "Reading compass…";
+      acquireHeadingOnce(
+        (deg) => { degI.value = deg; sp.textContent = "Got heading — press Save."; },
+        (msg) => { sp.textContent = `Compass failed: ${msg}`; }
+      );
+    });
+    attBtn.addEventListener("click", () => {
+      sp.textContent = "Reading tilt…";
+      acquireOrientationOnce(
+        (o) => { if (o.attitude != null) { attI.value = o.attitude; sp.textContent = "Got attitude — press Save."; } else sp.textContent = "Tilt not available."; },
+        (msg) => { sp.textContent = `Tilt failed: ${msg}`; }
+      );
+    });
+    sv.addEventListener("click", async () => {
+      const lat = parseFloat(latI.value), lng = parseFloat(lngI.value), acc = parseFloat(accI.value);
+      record.location = (isFinite(lat) && isFinite(lng)) ? { lat, lng, accuracy: isFinite(acc) ? Math.max(0, Math.round(acc)) : 0 } : null;
+      const h = parseInt(degI.value);
+      record.heading = isNaN(h) ? null : (((h % 360) + 360) % 360);
+      record.facing = record.heading == null ? null : (sel.value || null);
+      const a = parseInt(attI.value);
+      record.attitude = isNaN(a) ? null : Math.max(-90, Math.min(90, a));
+      await runTransaction("readwrite", (s) => s.put(record));
+      syncMapToRecord(record.id, record);
+      renderNavArea(container, record);
+      setStatus("Location / direction / attitude updated.");
+    });
+    cl.addEventListener("click", async () => {
+      record.location = null; record.heading = null; record.facing = null; record.attitude = null;
+      await runTransaction("readwrite", (s) => s.put(record));
+      syncMapToRecord(record.id, record);
+      renderNavArea(container, record);
+      setStatus("Location / direction / attitude cleared.");
+    });
+    cn.addEventListener("click", () => renderNavArea(container, record));
+  });
+}
+
 // ── Location area ─────────────────────────────────────────────────────────────
 function renderLocationArea(container, record) {
+  if (!container) return;
   container.innerHTML = "";
   const hdr = makeAreaHeader("\ud83d\udccd Location", record.location ? "Edit" : "Add");
   container.append(hdr.div);
