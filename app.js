@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-08 14:22:00";
+const BUILD_STAMP = "2026-07-08 14:44:57";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -394,6 +394,8 @@ function registerEvents() {
   if (newBridgeBtn) newBridgeBtn.addEventListener("click", () => openBridgeEditor(null));
   const importNbiBtn = document.getElementById("importNbiButton");
   if (importNbiBtn) importNbiBtn.addEventListener("click", () => openNbiImport());
+  const nearMeBtn = document.getElementById("bridgesNearMeButton");
+  if (nearMeBtn) nearMeBtn.addEventListener("click", () => { void openNbiNearMe(); });
   const backBtn = document.getElementById("backToBridges");
   if (backBtn) backBtn.addEventListener("click", () => { closePeerTransferView(); showBridgesOverview(); });
   const zipBtn = document.getElementById("downloadBridgeZip");
@@ -3212,6 +3214,7 @@ async function saveBridgeFromEditor() {
 let nbiStatesCache = null;          // [{abbr,name,fips,count}]
 const nbiStateData = new Map();     // abbr -> {recs, idx}
 let nbiPreviewMatches = [];         // current found records awaiting import
+let nbiNearMatches = [];            // nearby records awaiting import
 
 // Location of the currently-open bridge (e.g. set from an NBI import), used as
 // a last-resort default when a captured photo has neither EXIF GPS nor a live fix.
@@ -3374,6 +3377,310 @@ function nbiTitle(m) {
   return carried || feat || `NBI ${m.struct}`;
 }
 
+function nbiDistanceMiles(lat1, lng1, lat2, lng2) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const Rm = 3958.7613;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * Rm * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function bridgeRecFromNbi(m) {
+  const descParts = [];
+  if (m.loc) descParts.push(m.loc);
+  if (m.year && m.year !== "0") descParts.push("Built " + m.year);
+  descParts.push("NBI " + m.struct);
+  const rec = {
+    id: createId(),
+    createdAt: new Date().toISOString(),
+    title: nbiTitle(m),
+    description: descParts.join(" · "),
+    kml: null,
+    reportConfig: null,
+    nbi: { struct: m.struct, feat: m.feat, carried: m.carried, loc: m.loc, year: m.year },
+  };
+  if (m.lat != null && m.lng != null) {
+    rec.location = { lat: m.lat, lng: m.lng, accuracy: 0 };
+  }
+  return rec;
+}
+
+async function openNbiNearMe() {
+  let overlay = document.getElementById("nbiNearMe");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "nbiNearMe";
+    overlay.className = "bridge-modal";
+    overlay.innerHTML = `
+      <div class="bridge-dialog">
+        <div class="bridge-dialog-head">
+          <span class="bridge-dialog-title">📍 Bridges Near Me</span>
+          <button type="button" class="bridge-dialog-close secondary">✕</button>
+        </div>
+        <div class="bridge-dialog-body">
+          <p id="nbiNearLoc" class="nbi-near-loc">Uses your current GPS location and NBI bridge coordinates.</p>
+          <div class="nbi-near-controls">
+            <label class="bridge-field">Radius (miles)
+              <input type="number" id="nbiNearRadius" min="1" max="100" step="1" value="15" />
+            </label>
+            <label class="bridge-field">Max results
+              <input type="number" id="nbiNearLimit" min="5" max="100" step="1" value="25" />
+            </label>
+            <label class="bridge-field">Scope
+              <select id="nbiNearState">
+                <option value="__auto__">Auto (detect my state)</option>
+                <option value="__all__">All states</option>
+              </select>
+            </label>
+            <button type="button" id="nbiNearDetectBtn" class="nbi-near-run">📍 Detect state</button>
+            <button type="button" id="nbiNearRunBtn" class="nbi-near-run">🔎 Find nearby bridges</button>
+          </div>
+          <div id="nbiNearPreview" class="nbi-preview" hidden></div>
+        </div>
+        <div class="bridge-dialog-foot">
+          <button type="button" class="bridge-dialog-cancel secondary">Cancel</button>
+          <button type="button" id="nbiNearImportBtn" disabled>➕ Import selected</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) closeNbiNearMe(); });
+    overlay.querySelector(".bridge-dialog-close").addEventListener("click", closeNbiNearMe);
+    overlay.querySelector(".bridge-dialog-cancel").addEventListener("click", closeNbiNearMe);
+    overlay.querySelector("#nbiNearDetectBtn").addEventListener("click", () => { void detectNbiNearState(); });
+    overlay.querySelector("#nbiNearRunBtn").addEventListener("click", () => { void runNbiNearMe(); });
+    overlay.querySelector("#nbiNearImportBtn").addEventListener("click", () => { void importNbiNearSelected(); });
+  }
+
+  const preview = overlay.querySelector("#nbiNearPreview");
+  preview.hidden = true;
+  preview.innerHTML = "";
+  overlay.querySelector("#nbiNearImportBtn").disabled = true;
+  overlay.querySelector("#nbiNearImportBtn").textContent = "➕ Import selected";
+  overlay.style.display = "flex";
+  nbiNearMatches = [];
+
+  const scopeSel = overlay.querySelector("#nbiNearState");
+  if (scopeSel && scopeSel.options.length <= 2) {
+    try {
+      const states = await loadNbiStates();
+      scopeSel.innerHTML = `
+        <option value="__auto__">Auto (detect my state)</option>
+        <option value="__all__">All states</option>
+        ${states.map((s) => `<option value="${s.abbr}">${s.name}</option>`).join("")}
+      `;
+    } catch (e) {
+      setStatus("⚠ NBI state list failed to load.");
+    }
+  }
+}
+
+function closeNbiNearMe() {
+  const overlay = document.getElementById("nbiNearMe");
+  if (overlay) overlay.style.display = "none";
+  nbiNearMatches = [];
+}
+
+async function detectStateFromLocation(loc, states) {
+  const byName = new Map(states.map((s) => [String(s.name || "").trim().toUpperCase(), s.abbr]));
+  const r = await fetch(
+    `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(loc.lat)}&lon=${encodeURIComponent(loc.lng)}&zoom=5&addressdetails=1`,
+    { cache: "no-store" }
+  );
+  if (!r.ok) throw new Error("reverse geocode " + r.status);
+  const data = await r.json();
+  const addr = data && data.address ? data.address : {};
+  const codeRaw = addr.state_code || addr["ISO3166-2-lvl4"] || "";
+  if (codeRaw) {
+    const tail = String(codeRaw).toUpperCase().split("-").pop();
+    if (tail && /^[A-Z]{2}$/.test(tail) && states.some((s) => s.abbr === tail)) return tail;
+  }
+  const stateName = String(addr.state || "").trim().toUpperCase();
+  if (stateName && byName.has(stateName)) return byName.get(stateName);
+  return null;
+}
+
+async function detectNbiNearState() {
+  const overlay = document.getElementById("nbiNearMe");
+  if (!overlay) return;
+  const locText = overlay.querySelector("#nbiNearLoc");
+  const detectBtn = overlay.querySelector("#nbiNearDetectBtn");
+  const scopeSel = overlay.querySelector("#nbiNearState");
+  detectBtn.disabled = true;
+  detectBtn.textContent = "Detecting…";
+  try {
+    const states = await loadNbiStates();
+    const loc = await getFreshLocation(10000) || currentLocation;
+    if (!loc) throw new Error("location unavailable");
+    currentLocation = loc;
+    const abbr = await detectStateFromLocation(loc, states);
+    if (abbr && scopeSel) scopeSel.value = abbr;
+    locText.textContent = `Using location: ${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)} (±${loc.accuracy || 0}m).` +
+      (abbr ? ` Detected state: ${abbr}.` : " Could not auto-detect state.");
+    setStatus(abbr ? `Detected your state as ${abbr}.` : "Could not detect state automatically; choose one manually.");
+  } catch (e) {
+    setStatus("⚠ State detection failed; choose a state manually or use All states.");
+  }
+  detectBtn.disabled = false;
+  detectBtn.textContent = "📍 Detect state";
+}
+
+async function runNbiNearMe() {
+  const overlay = document.getElementById("nbiNearMe");
+  if (!overlay) return;
+  const runBtn = overlay.querySelector("#nbiNearRunBtn");
+  const preview = overlay.querySelector("#nbiNearPreview");
+  const locText = overlay.querySelector("#nbiNearLoc");
+  const importBtn = overlay.querySelector("#nbiNearImportBtn");
+  const scopeSel = overlay.querySelector("#nbiNearState");
+  const radiusVal = parseFloat(overlay.querySelector("#nbiNearRadius").value);
+  const limitVal = parseInt(overlay.querySelector("#nbiNearLimit").value, 10);
+  const radiusMiles = isFinite(radiusVal) ? Math.max(1, Math.min(100, radiusVal)) : 15;
+  const limit = isFinite(limitVal) ? Math.max(5, Math.min(100, limitVal)) : 25;
+
+  runBtn.disabled = true;
+  runBtn.textContent = "Searching…";
+  importBtn.disabled = true;
+  importBtn.textContent = "➕ Import selected";
+  preview.hidden = true;
+  preview.innerHTML = "";
+  nbiNearMatches = [];
+
+  const loc = await getFreshLocation(10000) || currentLocation;
+  if (!loc) {
+    runBtn.disabled = false;
+    runBtn.textContent = "🔎 Find nearby bridges";
+    setStatus("⚠ Could not get your location. Enable location and try again.");
+    return;
+  }
+  currentLocation = loc;
+  locText.textContent = `Using location: ${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)} (±${loc.accuracy || 0}m).`;
+
+  let states;
+  try {
+    states = await loadNbiStates();
+  } catch (e) {
+    runBtn.disabled = false;
+    runBtn.textContent = "🔎 Find nearby bridges";
+    setStatus("⚠ NBI state index failed to load.");
+    return;
+  }
+
+  const scope = scopeSel ? scopeSel.value : "__auto__";
+  let searchStates = states;
+  let scopeLabel = "all states";
+  if (scope === "__auto__") {
+    try {
+      const detected = await detectStateFromLocation(loc, states);
+      if (detected) {
+        if (scopeSel) scopeSel.value = detected;
+        searchStates = states.filter((s) => s.abbr === detected);
+        scopeLabel = detected;
+      }
+    } catch (e) {
+      // keep all-states fallback
+    }
+  } else if (scope === "__all__") {
+    searchStates = states;
+    scopeLabel = "all states";
+  } else {
+    searchStates = states.filter((s) => s.abbr === scope);
+    scopeLabel = scope;
+  }
+
+  const found = [];
+  const seen = new Set();
+  for (let i = 0; i < searchStates.length; i++) {
+    const s = searchStates[i];
+    runBtn.textContent = `Scanning ${s.abbr} (${i + 1}/${searchStates.length})…`;
+    let data;
+    try {
+      data = await loadNbiState(s.abbr);
+    } catch (e) {
+      continue;
+    }
+    for (const rec of data.recs) {
+      const lat = rec[1];
+      const lng = rec[2];
+      if (!isFinite(lat) || !isFinite(lng)) continue;
+      const dist = nbiDistanceMiles(loc.lat, loc.lng, lat, lng);
+      if (dist > radiusMiles) continue;
+      const struct = rec[0];
+      if (!struct || seen.has(struct)) continue;
+      seen.add(struct);
+      found.push({
+        struct,
+        lat,
+        lng,
+        feat: rec[3],
+        carried: rec[4],
+        loc: rec[5],
+        year: rec[6],
+        miles: dist,
+      });
+    }
+  }
+
+  found.sort((a, b) => a.miles - b.miles);
+  nbiNearMatches = found.slice(0, limit);
+
+  let html = "";
+  if (nbiNearMatches.length) {
+    html += `<p class="nbi-preview-head">✅ ${nbiNearMatches.length} nearby bridge${nbiNearMatches.length === 1 ? "" : "s"} found (within ${radiusMiles.toFixed(0)} mi, scope: ${escapeHtml(scopeLabel)}).</p>`;
+    html += nbiNearMatches.map((m, i) => {
+      const title = nbiTitle(m);
+      return `<label class="nbi-hit-pick">
+        <input type="checkbox" class="nbi-near-pick" data-idx="${i}" checked />
+        <span class="nbi-hit"><strong>${escapeHtml(m.struct)}</strong> — ${escapeHtml(title)}
+          <span class="nbi-hit-sub">${escapeHtml(m.loc || "")} · ${m.lat.toFixed(5)}, ${m.lng.toFixed(5)} · ${m.miles.toFixed(2)} mi${m.year ? " · " + escapeHtml(m.year) : ""}</span>
+        </span>
+      </label>`;
+    }).join("");
+  } else {
+    html = `<p class="nbi-preview-head nbi-miss">⚠ No bridges found within ${radiusMiles.toFixed(0)} miles. Try a larger radius.</p>`;
+  }
+
+  preview.innerHTML = html;
+  preview.hidden = false;
+  importBtn.disabled = nbiNearMatches.length === 0;
+  importBtn.textContent = nbiNearMatches.length ? `➕ Import up to ${nbiNearMatches.length}` : "➕ Import selected";
+  runBtn.disabled = false;
+  runBtn.textContent = "🔎 Find nearby bridges";
+  setStatus(nbiNearMatches.length
+    ? `Found ${nbiNearMatches.length} nearby bridge${nbiNearMatches.length === 1 ? "" : "s"} (scope: ${scopeLabel}).`
+    : "No nearby NBI bridges found in that radius.");
+}
+
+async function importNbiNearSelected() {
+  if (!nbiNearMatches.length) return;
+  const overlay = document.getElementById("nbiNearMe");
+  if (!overlay) return;
+  const importBtn = overlay.querySelector("#nbiNearImportBtn");
+  const selected = new Set(
+    Array.from(overlay.querySelectorAll(".nbi-near-pick:checked"))
+      .map((el) => parseInt(el.dataset.idx, 10))
+      .filter((x) => Number.isInteger(x) && x >= 0 && x < nbiNearMatches.length)
+  );
+  if (!selected.size) {
+    setStatus("Select at least one nearby bridge to import.");
+    return;
+  }
+
+  importBtn.disabled = true;
+  importBtn.textContent = "Importing…";
+  let added = 0;
+  for (const idx of selected) {
+    const rec = bridgeRecFromNbi(nbiNearMatches[idx]);
+    await putBridgeRec(rec);
+    bridges.push(rec);
+    added++;
+  }
+  closeNbiNearMe();
+  renderBridgesList();
+  setStatus(`Imported ${added} nearby bridge${added === 1 ? "" : "s"} from the NBI.`);
+}
+
 async function importNbiSelected() {
   if (!nbiPreviewMatches.length) return;
   const overlay = document.getElementById("nbiImport");
@@ -3382,22 +3689,7 @@ async function importNbiSelected() {
 
   let added = 0;
   for (const m of nbiPreviewMatches) {
-    const descParts = [];
-    if (m.loc) descParts.push(m.loc);
-    if (m.year && m.year !== "0") descParts.push("Built " + m.year);
-    descParts.push("NBI " + m.struct);
-    const rec = {
-      id: createId(),
-      createdAt: new Date().toISOString(),
-      title: nbiTitle(m),
-      description: descParts.join(" · "),
-      kml: null,
-      reportConfig: null,
-      nbi: { struct: m.struct, feat: m.feat, carried: m.carried, loc: m.loc, year: m.year },
-    };
-    if (m.lat != null && m.lng != null) {
-      rec.location = { lat: m.lat, lng: m.lng, accuracy: 0 };
-    }
+    const rec = bridgeRecFromNbi(m);
     await putBridgeRec(rec);
     bridges.push(rec);
     added++;

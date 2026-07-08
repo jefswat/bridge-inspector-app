@@ -872,6 +872,26 @@ select {
 .nbi-preview-head.nbi-miss { color: #f59e0b; }
 .nbi-hit { font-size: .82rem; color: var(--text); line-height: 1.3; }
 .nbi-hit-sub { display: block; font-size: .72rem; color: var(--muted); }
+.nbi-hit-pick {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 6px 0; border-bottom: 1px solid rgba(148,163,184,.22);
+}
+.nbi-hit-pick:last-child { border-bottom: 0; }
+.nbi-hit-pick input[type=checkbox] { margin-top: 3px; }
+.nbi-near-controls {
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: end;
+}
+.nbi-near-controls .bridge-field { min-width: 140px; flex: 1; }
+.nbi-near-controls .bridge-field input[type=number] { width: 100%; }
+.nbi-near-run {
+  align-self: flex-end; background: var(--surface2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 7px; padding: 8px 14px; cursor: pointer;
+}
+.nbi-near-loc {
+  margin: 0;
+  font-size: .75rem;
+  color: var(--muted);
+}
 .bridge-loc-pin {
   font-size: 26px; line-height: 30px; text-align: center; width: 30px; height: 30px;
   filter: drop-shadow(0 1px 2px rgba(0,0,0,.6));
@@ -886,11 +906,11 @@ select {
   display: flex; gap: 8px; justify-content: flex-end;
   padding: 12px 16px; border-top: 1px solid var(--border);
 }
-.bridge-dialog-save, #nbiImportBtn {
+.bridge-dialog-save, #nbiImportBtn, #nbiNearImportBtn {
   background: var(--accent); color: #08131f; font-weight: 700;
   border: none; border-radius: 8px; padding: 8px 16px; cursor: pointer;
 }
-#nbiImportBtn:disabled { opacity: .5; cursor: not-allowed; }
+#nbiImportBtn:disabled, #nbiNearImportBtn:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ── Guided pier scan ─────────────────────────────────────────────────────── */
 .scan-panel {
