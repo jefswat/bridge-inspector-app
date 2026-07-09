@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-08 14:44:57";
+const BUILD_STAMP = "2026-07-08 16:10:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -155,6 +155,7 @@ const peerLocalSdp       = document.getElementById("peerLocalSdp");
 const peerRemoteSdp      = document.getElementById("peerRemoteSdp");
 const peerQrBox          = document.getElementById("peerQrBox");
 const peerQrCode         = document.getElementById("peerQrCode");
+const peerQrHint         = document.getElementById("peerQrHint");
 const peerQrScannerModal = document.getElementById("peerQrScannerModal");
 const peerQrScannerVideo = document.getElementById("peerQrScannerVideo");
 const peerQrScannerStatus= document.getElementById("peerQrScannerStatus");
@@ -505,6 +506,12 @@ function appendPeerLog(line) {
 
 function setPeerConnState(text) {
   if (peerConnState) peerConnState.textContent = text;
+  // Reflect live connection state on the always-visible header button
+  if (openPeerTransferViewTopBtn) {
+    const connected = text.includes("connected");
+    openPeerTransferViewTopBtn.textContent = connected ? "🔁 Transfer ●" : "🔁 Transfer";
+    openPeerTransferViewTopBtn.classList.toggle("peer-link-active", connected);
+  }
 }
 
 function resetPeerSession(keepSdp = false) {
@@ -637,26 +644,56 @@ function clearPeerQr() {
   if (peerQrBox) peerQrBox.hidden = true;
 }
 
-function renderPeerLocalQr() {
-  const text = (peerLocalSdp?.value || "").trim();
+// Strips extra ICE candidates from an SDP JSON string to reduce QR size.
+// Keeps 1 host + 1 srflx candidate. Falls back to keeping the first candidate.
+function makeCompactSdp(sdpJson) {
+  const obj = JSON.parse(sdpJson);
+  const lines = obj.sdp.split(/\r?\n/).filter(l => l.trim());
+  const body = lines.filter(l => !l.startsWith("a=candidate:") && !l.startsWith("a=end-of-candidates"));
+  const cands = lines.filter(l => l.startsWith("a=candidate:"));
+  const keep = [];
+  const host  = cands.find(l => l.includes("typ host"));
+  const srflx = cands.find(l => l.includes("typ srflx"));
+  if (host)  keep.push(host);
+  if (srflx) keep.push(srflx);
+  if (!keep.length && cands.length) keep.push(cands[0]); // at least one candidate
+  return JSON.stringify({ type: obj.type, sdp: [...body, ...keep, "a=end-of-candidates"].join("\r\n") + "\r\n" });
+}
+
+function renderPeerLocalQr(useCompact = false) {
+  let text = (peerLocalSdp?.value || "").trim();
   if (!text) { setStatus("No Local SDP yet."); return; }
   if (typeof QRCode !== "function") { setStatus("QR generator not loaded."); return; }
   if (!peerQrCode || !peerQrBox) return;
+  if (useCompact) {
+    try { text = makeCompactSdp(text); } catch (e) { /* keep original if parse fails */ }
+  }
   try {
     peerQrCode.innerHTML = "";
     new QRCode(peerQrCode, {
       text,
-      width: 240,
-      height: 240,
+      width: 400,
+      height: 400,
       colorDark: "#0f172a",
       colorLight: "#ffffff",
-      correctLevel: QRCode.CorrectLevel.M
+      correctLevel: QRCode.CorrectLevel.L
     });
     peerQrBox.hidden = false;
-    appendPeerLog("Rendered local SDP as QR.");
-    setStatus("QR ready. Scan it on the other device.");
+    if (peerQrHint) {
+      peerQrHint.textContent = useCompact
+        ? "⚠ Compact QR (essential fields only — full SDP too long). Scan on other device."
+        : "Scan this QR from the other device to fill its Remote SDP box.";
+    }
+    appendPeerLog(useCompact ? "Rendered compact SDP as QR (essential fields only)." : "Rendered local SDP as QR.");
+    setStatus(useCompact ? "Compact QR ready. Scan on other device." : "QR ready. Scan on other device.");
   } catch (e) {
-    setStatus("QR generation failed: " + e.message);
+    if (!useCompact) {
+      appendPeerLog("Full SDP too large for QR — retrying with compact SDP…");
+      renderPeerLocalQr(true);
+    } else {
+      setStatus("QR failed even with compact SDP. Use 📋 Copy to paste manually.");
+      appendPeerLog("QR generation failed. Use copy-paste instead.");
+    }
   }
 }
 
@@ -880,7 +917,10 @@ async function sendBlobOverDataChannel(blob, name, mime, dc) {
 function queueAutoSendCapture(blob) {
   if (peerState.role !== "rover" || !peerState.autoSend) return;
   const dc = peerState.dc;
-  if (!dc || dc.readyState !== "open") return;
+  if (!dc || dc.readyState !== "open") {
+    setStatus("⚠ Auto-send skipped — transfer link not connected. Open 🔁 Transfer to reconnect.");
+    return;
+  }
   peerSendQueue = peerSendQueue.then(async () => {
     if (peerState.sending) return;
     peerState.sending = true;
@@ -3215,6 +3255,10 @@ let nbiStatesCache = null;          // [{abbr,name,fips,count}]
 const nbiStateData = new Map();     // abbr -> {recs, idx}
 let nbiPreviewMatches = [];         // current found records awaiting import
 let nbiNearMatches = [];            // nearby records awaiting import
+let nbiNearSelectedIdx = -1;
+let nbiNearMap = null;
+let nbiNearMapLayer = null;
+let nbiNearMarkers = [];            // [{idx, marker}]
 
 // Location of the currently-open bridge (e.g. set from an NBI import), used as
 // a last-resort default when a captured photo has neither EXIF GPS nor a live fix.
@@ -3407,6 +3451,82 @@ function bridgeRecFromNbi(m) {
   return rec;
 }
 
+function nbiNearMarkerStyle(active) {
+  return {
+    radius: active ? 8 : 6,
+    color: active ? "#22c55e" : "#38bdf8",
+    weight: active ? 3 : 2,
+    fillColor: active ? "#22c55e" : "#38bdf8",
+    fillOpacity: active ? 0.92 : 0.68,
+  };
+}
+
+function ensureNbiNearMap() {
+  const mapEl = document.getElementById("nbiNearMap");
+  if (!mapEl || !window.L) return null;
+  if (!nbiNearMap) {
+    nbiNearMap = L.map(mapEl, { zoomControl: true, attributionControl: true });
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors",
+    }).addTo(nbiNearMap);
+  }
+  setTimeout(() => nbiNearMap && nbiNearMap.invalidateSize(), 0);
+  return nbiNearMap;
+}
+
+function setNbiNearSelectedIndex(idx, focus = false) {
+  const valid = Number.isInteger(idx) && idx >= 0 && idx < nbiNearMatches.length;
+  nbiNearSelectedIdx = valid ? idx : -1;
+  const overlay = document.getElementById("nbiNearMe");
+  if (overlay) {
+    overlay.querySelectorAll(".nbi-near-pick").forEach((el) => {
+      const i = parseInt(el.value, 10);
+      el.checked = i === nbiNearSelectedIdx;
+    });
+    overlay.querySelectorAll(".nbi-hit-pick").forEach((el) => {
+      const i = parseInt(el.dataset.idx, 10);
+      el.classList.toggle("active", i === nbiNearSelectedIdx);
+    });
+    const importBtn = overlay.querySelector("#nbiNearImportBtn");
+    if (importBtn) {
+      importBtn.disabled = nbiNearSelectedIdx < 0;
+      importBtn.textContent = nbiNearSelectedIdx >= 0 ? "➕ Import selected" : "➕ Select one on map/list";
+    }
+  }
+  nbiNearMarkers.forEach(({ idx: i, marker }) => marker.setStyle(nbiNearMarkerStyle(i === nbiNearSelectedIdx)));
+  if (focus && nbiNearMap && nbiNearSelectedIdx >= 0) {
+    const hit = nbiNearMarkers.find((x) => x.idx === nbiNearSelectedIdx);
+    if (hit) {
+      nbiNearMap.panTo(hit.marker.getLatLng(), { animate: true });
+      hit.marker.openPopup();
+    }
+  }
+}
+
+function renderNbiNearMap(matches) {
+  const map = ensureNbiNearMap();
+  if (!map) return;
+  if (!nbiNearMapLayer) nbiNearMapLayer = L.layerGroup().addTo(map);
+  nbiNearMapLayer.clearLayers();
+  nbiNearMarkers = [];
+  const bounds = [];
+  matches.forEach((m, i) => {
+    if (!isFinite(m.lat) || !isFinite(m.lng)) return;
+    const marker = L.circleMarker([m.lat, m.lng], nbiNearMarkerStyle(false));
+    const popupTitle = escapeHtml(nbiTitle(m));
+    marker.bindPopup(`<strong>${popupTitle}</strong><br>${m.miles.toFixed(2)} mi · ${escapeHtml(m.struct)}`);
+    marker.on("click", () => setNbiNearSelectedIndex(i, true));
+    marker.addTo(nbiNearMapLayer);
+    nbiNearMarkers.push({ idx: i, marker });
+    bounds.push([m.lat, m.lng]);
+  });
+  if (bounds.length) {
+    map.fitBounds(bounds, { padding: [24, 24], maxZoom: 13 });
+  }
+  setTimeout(() => map.invalidateSize(), 0);
+}
+
 async function openNbiNearMe() {
   let overlay = document.getElementById("nbiNearMe");
   if (!overlay) {
@@ -3437,11 +3557,12 @@ async function openNbiNearMe() {
             <button type="button" id="nbiNearDetectBtn" class="nbi-near-run">📍 Detect state</button>
             <button type="button" id="nbiNearRunBtn" class="nbi-near-run">🔎 Find nearby bridges</button>
           </div>
+          <div id="nbiNearMap" class="nbi-near-map" hidden></div>
           <div id="nbiNearPreview" class="nbi-preview" hidden></div>
         </div>
         <div class="bridge-dialog-foot">
           <button type="button" class="bridge-dialog-cancel secondary">Cancel</button>
-          <button type="button" id="nbiNearImportBtn" disabled>➕ Import selected</button>
+          <button type="button" id="nbiNearImportBtn" disabled>➕ Select one on map/list</button>
         </div>
       </div>`;
     document.body.appendChild(overlay);
@@ -3451,15 +3572,24 @@ async function openNbiNearMe() {
     overlay.querySelector("#nbiNearDetectBtn").addEventListener("click", () => { void detectNbiNearState(); });
     overlay.querySelector("#nbiNearRunBtn").addEventListener("click", () => { void runNbiNearMe(); });
     overlay.querySelector("#nbiNearImportBtn").addEventListener("click", () => { void importNbiNearSelected(); });
+    overlay.querySelector("#nbiNearPreview").addEventListener("change", (e) => {
+      const pick = e.target && e.target.closest ? e.target.closest(".nbi-near-pick") : null;
+      if (!pick) return;
+      const idx = parseInt(pick.value, 10);
+      if (Number.isInteger(idx)) setNbiNearSelectedIndex(idx, true);
+    });
   }
 
+  const mapBox = overlay.querySelector("#nbiNearMap");
   const preview = overlay.querySelector("#nbiNearPreview");
+  mapBox.hidden = true;
   preview.hidden = true;
   preview.innerHTML = "";
   overlay.querySelector("#nbiNearImportBtn").disabled = true;
-  overlay.querySelector("#nbiNearImportBtn").textContent = "➕ Import selected";
+  overlay.querySelector("#nbiNearImportBtn").textContent = "➕ Select one on map/list";
   overlay.style.display = "flex";
   nbiNearMatches = [];
+  nbiNearSelectedIdx = -1;
 
   const scopeSel = overlay.querySelector("#nbiNearState");
   if (scopeSel && scopeSel.options.length <= 2) {
@@ -3480,6 +3610,7 @@ function closeNbiNearMe() {
   const overlay = document.getElementById("nbiNearMe");
   if (overlay) overlay.style.display = "none";
   nbiNearMatches = [];
+  nbiNearSelectedIdx = -1;
 }
 
 async function detectStateFromLocation(loc, states) {
@@ -3534,6 +3665,7 @@ async function runNbiNearMe() {
   const locText = overlay.querySelector("#nbiNearLoc");
   const importBtn = overlay.querySelector("#nbiNearImportBtn");
   const scopeSel = overlay.querySelector("#nbiNearState");
+  const mapBox = overlay.querySelector("#nbiNearMap");
   const radiusVal = parseFloat(overlay.querySelector("#nbiNearRadius").value);
   const limitVal = parseInt(overlay.querySelector("#nbiNearLimit").value, 10);
   const radiusMiles = isFinite(radiusVal) ? Math.max(1, Math.min(100, radiusVal)) : 15;
@@ -3542,10 +3674,12 @@ async function runNbiNearMe() {
   runBtn.disabled = true;
   runBtn.textContent = "Searching…";
   importBtn.disabled = true;
-  importBtn.textContent = "➕ Import selected";
+  importBtn.textContent = "➕ Select one on map/list";
+  mapBox.hidden = true;
   preview.hidden = true;
   preview.innerHTML = "";
   nbiNearMatches = [];
+  nbiNearSelectedIdx = -1;
 
   const loc = await getFreshLocation(10000) || currentLocation;
   if (!loc) {
@@ -3630,8 +3764,8 @@ async function runNbiNearMe() {
     html += `<p class="nbi-preview-head">✅ ${nbiNearMatches.length} nearby bridge${nbiNearMatches.length === 1 ? "" : "s"} found (within ${radiusMiles.toFixed(0)} mi, scope: ${escapeHtml(scopeLabel)}).</p>`;
     html += nbiNearMatches.map((m, i) => {
       const title = nbiTitle(m);
-      return `<label class="nbi-hit-pick">
-        <input type="checkbox" class="nbi-near-pick" data-idx="${i}" checked />
+      return `<label class="nbi-hit-pick" data-idx="${i}">
+        <input type="radio" class="nbi-near-pick" name="nbiNearPick" value="${i}" />
         <span class="nbi-hit"><strong>${escapeHtml(m.struct)}</strong> — ${escapeHtml(title)}
           <span class="nbi-hit-sub">${escapeHtml(m.loc || "")} · ${m.lat.toFixed(5)}, ${m.lng.toFixed(5)} · ${m.miles.toFixed(2)} mi${m.year ? " · " + escapeHtml(m.year) : ""}</span>
         </span>
@@ -3641,10 +3775,11 @@ async function runNbiNearMe() {
     html = `<p class="nbi-preview-head nbi-miss">⚠ No bridges found within ${radiusMiles.toFixed(0)} miles. Try a larger radius.</p>`;
   }
 
+  renderNbiNearMap(nbiNearMatches);
+  mapBox.hidden = nbiNearMatches.length === 0;
   preview.innerHTML = html;
   preview.hidden = false;
-  importBtn.disabled = nbiNearMatches.length === 0;
-  importBtn.textContent = nbiNearMatches.length ? `➕ Import up to ${nbiNearMatches.length}` : "➕ Import selected";
+  setNbiNearSelectedIndex(-1, false);
   runBtn.disabled = false;
   runBtn.textContent = "🔎 Find nearby bridges";
   setStatus(nbiNearMatches.length
@@ -3657,28 +3792,19 @@ async function importNbiNearSelected() {
   const overlay = document.getElementById("nbiNearMe");
   if (!overlay) return;
   const importBtn = overlay.querySelector("#nbiNearImportBtn");
-  const selected = new Set(
-    Array.from(overlay.querySelectorAll(".nbi-near-pick:checked"))
-      .map((el) => parseInt(el.dataset.idx, 10))
-      .filter((x) => Number.isInteger(x) && x >= 0 && x < nbiNearMatches.length)
-  );
-  if (!selected.size) {
-    setStatus("Select at least one nearby bridge to import.");
+  if (!(Number.isInteger(nbiNearSelectedIdx) && nbiNearSelectedIdx >= 0 && nbiNearSelectedIdx < nbiNearMatches.length)) {
+    setStatus("Select one nearby bridge on the map or list first.");
     return;
   }
 
   importBtn.disabled = true;
   importBtn.textContent = "Importing…";
-  let added = 0;
-  for (const idx of selected) {
-    const rec = bridgeRecFromNbi(nbiNearMatches[idx]);
-    await putBridgeRec(rec);
-    bridges.push(rec);
-    added++;
-  }
+  const rec = bridgeRecFromNbi(nbiNearMatches[nbiNearSelectedIdx]);
+  await putBridgeRec(rec);
+  bridges.push(rec);
   closeNbiNearMe();
   renderBridgesList();
-  setStatus(`Imported ${added} nearby bridge${added === 1 ? "" : "s"} from the NBI.`);
+  setStatus("Imported 1 nearby bridge from the NBI.");
 }
 
 async function importNbiSelected() {
@@ -4443,6 +4569,15 @@ function makeHandleIcon() {
   });
 }
 
+function makeBridgePinIcon(title = "Bridge") {
+  return L.divIcon({
+    className: "",
+    html: `<div class="bridge-loc-pin" title="${escapeHtml(title)}">🌉</div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 30],
+  });
+}
+
 function getHandleLatLng(lmap, mainLL, headingDeg, px = 55) {
   const deg = headingDeg ?? 0;
   const mp  = lmap.latLngToContainerPoint(mainLL);
@@ -4460,6 +4595,16 @@ function initMap(container, record) {
   lmap.invalidateSize();
 
   const mainLL       = L.latLng(lat, lng);
+  const bridgeLoc    = activeBridgeLocation();
+  if (bridgeLoc && isFinite(bridgeLoc.lat) && isFinite(bridgeLoc.lng)) {
+    const b = activeBridge();
+    L.marker([bridgeLoc.lat, bridgeLoc.lng], {
+      icon: makeBridgePinIcon((b && b.title) ? b.title : "Bridge"),
+      zIndexOffset: 50,
+      interactive: false,
+      keyboard: false,
+    }).addTo(lmap);
+  }
   const arrowMarker  = L.marker(mainLL, { draggable: true, icon: makeArrowIcon(record.heading), zIndexOffset: 100 }).addTo(lmap);
   const handleMarker = L.marker(getHandleLatLng(lmap, mainLL, record.heading), { draggable: true, icon: makeHandleIcon(), zIndexOffset: 200 }).addTo(lmap);
 
