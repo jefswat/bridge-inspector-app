@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-09 16:57:00";
+const BUILD_STAMP = "2026-07-09 17:05:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -458,6 +458,17 @@ function registerEvents() {
   if (peerShowQrBtn) peerShowQrBtn.addEventListener("click", () => renderPeerLocalQr());
   if (peerScanQrBtn) peerScanQrBtn.addEventListener("click", () => { void startPeerQrScan(); });
   if (peerClearSessionBtn) peerClearSessionBtn.addEventListener("click", () => resetPeerSession(false));
+  const peerClearCacheBtn = document.getElementById("peerClearCacheBtn");
+  if (peerClearCacheBtn) peerClearCacheBtn.addEventListener("click", async () => {
+    if (!confirm("Clear app cache and reload? The page will refresh.")) return;
+    try {
+      const regs = await navigator.serviceWorker?.getRegistrations() || [];
+      await Promise.all(regs.map(r => r.unregister()));
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    } catch (e) { console.warn("cache clear:", e); }
+    location.reload(true);
+  });
   if (peerQrScannerClose) peerQrScannerClose.addEventListener("click", () => stopPeerQrScan("QR scan closed."));
   if (peerQrFlipBtn) peerQrFlipBtn.addEventListener("click", () => flipPeerQrCamera());
   if (peerQrScannerModal) peerQrScannerModal.addEventListener("click", (e) => {
@@ -647,36 +658,45 @@ function clearPeerQr() {
   if (peerQrBox) peerQrBox.hidden = true;
 }
 
-// Strips extra ICE candidates from an SDP JSON string to reduce QR size.
-// Keeps 1 host + 1 srflx candidate. Falls back to keeping the first candidate.
+// Aggressively strips an SDP JSON string down to the bare minimum needed for a
+// same-LAN WebRTC data channel — roughly 12-15 lines vs 50+ in the full SDP.
+// This keeps the QR payload small enough to scan comfortably on a phone.
 function makeCompactSdp(sdpJson) {
   const obj = JSON.parse(sdpJson);
-  const lines = obj.sdp.split(/\r?\n/).filter(l => l.trim());
-  const body = lines.filter(l => !l.startsWith("a=candidate:") && !l.startsWith("a=end-of-candidates"));
+  const lines = obj.sdp.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+  // Essential session-level lines
+  const SESSION_KEEP = /^(v=|o=|s=|t=|a=group:|a=msid-semantic)/;
+  // Essential media/transport lines
+  const MEDIA_KEEP = /^(m=|c=|a=ice-ufrag:|a=ice-pwd:|a=fingerprint:|a=setup:|a=mid:|a=sctp-port:|a=sctpmap:|a=max-message-size:)/;
+
+  const essential = lines.filter(l => SESSION_KEEP.test(l) || MEDIA_KEEP.test(l));
+
+  // Pick ONE candidate: prefer a private-IP host, else any host, else first candidate
   const cands = lines.filter(l => l.startsWith("a=candidate:"));
-  const keep = [];
-  const host  = cands.find(l => l.includes("typ host"));
-  const srflx = cands.find(l => l.includes("typ srflx"));
-  if (host)  keep.push(host);
-  if (srflx) keep.push(srflx);
-  if (!keep.length && cands.length) keep.push(cands[0]); // at least one candidate
-  return JSON.stringify({ type: obj.type, sdp: [...body, ...keep, "a=end-of-candidates"].join("\r\n") + "\r\n" });
+  const privateCand = cands.find(l => l.includes("typ host") && /192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\./.test(l));
+  const anyCand     = cands.find(l => l.includes("typ host"));
+  const chosen      = privateCand || anyCand || cands[0];
+  if (chosen) essential.push(chosen);
+  essential.push("a=end-of-candidates");
+
+  return JSON.stringify({ type: obj.type, sdp: essential.join("\r\n") + "\r\n" });
 }
 
-function renderPeerLocalQr(useCompact = false) {
+function renderPeerLocalQr() {
   let text = (peerLocalSdp?.value || "").trim();
   if (!text) { setStatus("No Local SDP yet."); return; }
   if (typeof QRCode !== "function") { setStatus("QR generator not loaded."); return; }
   if (!peerQrCode || !peerQrBox) return;
-  if (useCompact) {
-    try { text = makeCompactSdp(text); } catch (e) { /* keep original if parse fails */ }
-  }
-  // Responsive size: fits within phone viewport minus modal padding (~64px each side)
+  // Always use compact SDP for QR — full SDP is too large to scan reliably
+  let compact = text;
+  try { compact = makeCompactSdp(text); } catch (e) { /* fall back to full text */ }
+  // Responsive: fits within phone viewport minus modal padding
   const qrSize = Math.max(180, Math.min(400, (window.innerWidth || 400) - 64));
   try {
     peerQrCode.innerHTML = "";
     new QRCode(peerQrCode, {
-      text,
+      text: compact,
       width: qrSize,
       height: qrSize,
       colorDark: "#0f172a",
@@ -684,21 +704,12 @@ function renderPeerLocalQr(useCompact = false) {
       correctLevel: QRCode.CorrectLevel.L
     });
     peerQrBox.hidden = false;
-    if (peerQrHint) {
-      peerQrHint.textContent = useCompact
-        ? "⚠ Compact QR (essential fields only — full SDP too long). Scan on other device."
-        : "Scan this QR from the other device to fill its Remote SDP box.";
-    }
-    appendPeerLog(useCompact ? "Rendered compact SDP as QR (essential fields only)." : "Rendered local SDP as QR.");
-    setStatus(useCompact ? "Compact QR ready. Scan on other device." : "QR ready. Scan on other device.");
+    if (peerQrHint) peerQrHint.textContent = "Scan this QR from the other device to fill its Remote SDP box.";
+    appendPeerLog("Rendered compact SDP as QR.");
+    setStatus("QR ready. Scan on other device.");
   } catch (e) {
-    if (!useCompact) {
-      appendPeerLog("Full SDP too large for QR — retrying with compact SDP…");
-      renderPeerLocalQr(true);
-    } else {
-      setStatus("QR failed even with compact SDP. Use 📋 Copy to paste manually.");
-      appendPeerLog("QR generation failed. Use copy-paste instead.");
-    }
+    setStatus("QR failed — use 📋 Copy to paste SDP manually.");
+    appendPeerLog("QR generation failed: " + e.message);
   }
 }
 
