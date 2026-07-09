@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-09 17:05:00";
+const BUILD_STAMP = "2026-07-09 17:10:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -1082,15 +1082,15 @@ function queueAutoSendCapture(blob) {
     } finally {
       peerState.sending = false;
     }
-
-    async function sha256HexFromBlob(blob) {
-      if (!crypto?.subtle) throw new Error("WebCrypto not available.");
-      const buf = await blob.arrayBuffer();
-      const hashBuf = await crypto.subtle.digest("SHA-256", buf);
-      const arr = Array.from(new Uint8Array(hashBuf));
-      return arr.map((b) => b.toString(16).padStart(2, "0")).join("");
-    }
   }).catch((e) => console.warn("auto-send queue:", e));
+}
+
+async function sha256HexFromBlob(blob) {
+  if (!crypto?.subtle) throw new Error("WebCrypto not available.");
+  const buf = await blob.arrayBuffer();
+  const hashBuf = await crypto.subtle.digest("SHA-256", buf);
+  const arr = Array.from(new Uint8Array(hashBuf));
+  return arr.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 async function openPeerSavedPickerModal() {
