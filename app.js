@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-09 17:10:00";
+const BUILD_STAMP = "2026-07-09 17:20:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -458,6 +458,17 @@ function registerEvents() {
   if (peerShowQrBtn) peerShowQrBtn.addEventListener("click", () => renderPeerLocalQr());
   if (peerScanQrBtn) peerScanQrBtn.addEventListener("click", () => { void startPeerQrScan(); });
   if (peerClearSessionBtn) peerClearSessionBtn.addEventListener("click", () => resetPeerSession(false));
+  const peerSyncBridgeBtn = document.getElementById("peerSyncBridgeBtn");
+  if (peerSyncBridgeBtn) peerSyncBridgeBtn.addEventListener("click", () => {
+    const dc = peerState.dc;
+    if (!dc || dc.readyState !== "open") { setStatus("Connect the transfer link first."); return; }
+    if (!activeBridgeId) { setStatus("Open a bridge first, then sync."); return; }
+    const b = activeBridge();
+    if (!b) { setStatus("No active bridge found."); return; }
+    dc.send(JSON.stringify({ t: "bridge-sync", id: b.id, title: b.title || "", description: b.description || "", createdAt: b.createdAt || new Date().toISOString() }));
+    appendPeerLog(`Re-sent bridge sync: "${b.title || b.id}"`);
+    setStatus(`Bridge "${b.title || b.id}" synced to rover.`);
+  });
   const peerClearCacheBtn = document.getElementById("peerClearCacheBtn");
   if (peerClearCacheBtn) peerClearCacheBtn.addEventListener("click", async () => {
     if (!confirm("Clear app cache and reload? The page will refresh.")) return;
@@ -471,6 +482,8 @@ function registerEvents() {
   });
   if (peerQrScannerClose) peerQrScannerClose.addEventListener("click", () => stopPeerQrScan("QR scan closed."));
   if (peerQrFlipBtn) peerQrFlipBtn.addEventListener("click", () => flipPeerQrCamera());
+  const peerQrRetryBtn = document.getElementById("peerQrRetryBtn");
+  if (peerQrRetryBtn) peerQrRetryBtn.addEventListener("click", () => { void startPeerQrScan(); });
   if (peerQrScannerModal) peerQrScannerModal.addEventListener("click", (e) => {
     if (e.target === peerQrScannerModal) stopPeerQrScan("QR scan closed.");
   });
@@ -722,6 +735,8 @@ async function startPeerQrScan(facingMode) {
       for (const t of peerQrScanStream.getTracks()) t.stop();
       peerQrScanStream = null;
     }
+    peerQrScannerModal.hidden = false; // show modal first so Retry button is visible
+    if (peerQrScannerStatus) peerQrScannerStatus.textContent = "Starting camera…";
     peerQrScanStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: peerQrFacingMode }, width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: false
@@ -729,19 +744,26 @@ async function startPeerQrScan(facingMode) {
     peerQrScannerVideo.srcObject = peerQrScanStream;
     peerQrScannerVideo.hidden = false;
     await peerQrScannerVideo.play();
-    peerQrScannerModal.hidden = false;
     if (peerQrScannerStatus) peerQrScannerStatus.textContent = "Point camera at the QR code.";
     if (peerQrFlipBtn) peerQrFlipBtn.hidden = false;
     // Re-start the scan loop (cancel existing one first)
     if (peerQrScanLoopId) { cancelAnimationFrame(peerQrScanLoopId); peerQrScanLoopId = null; }
     runPeerQrScanLoop();
   } catch (e) {
-    stopPeerQrScan();
+    // Don't close the modal — leave it open so user can retry or upload a file
+    peerQrScannerModal.hidden = false;
+    peerQrScannerVideo.hidden = true;
     if (e.name === "NotAllowedError") {
       appendPeerLog("Camera permission denied — use photo upload to scan QR.");
+      if (peerQrScannerStatus) peerQrScannerStatus.textContent = "⚠ Camera permission denied. Upload a photo below, or tap ↺ Retry after granting access.";
       showPeerScanFallback("Camera permission denied. Take a photo of the QR code with your camera app, then upload it below.");
+    } else if (e.name === "NotReadableError" || e.name === "AbortError") {
+      appendPeerLog("Camera busy/unavailable: " + e.message);
+      if (peerQrScannerStatus) peerQrScannerStatus.textContent = "⚠ Camera is busy (another app may be using it). Close the camera app, then tap ↺ Retry.";
+      showPeerScanFallback("Camera is busy. Close any other app using it, tap ↺ Retry, or upload a photo instead.");
     } else {
       appendPeerLog("Live scan failed: " + e.message);
+      if (peerQrScannerStatus) peerQrScannerStatus.textContent = "⚠ Camera error: " + e.message + ". Tap ↺ Retry or upload below.";
       showPeerScanFallback("Live camera unavailable (" + e.message + "). Upload a photo of the QR code instead.");
     }
   }
@@ -917,6 +939,20 @@ function attachPeerDataChannel(dc) {
     appendPeerLog("Data channel open.");
     if (peerSendFilesBtn) peerSendFilesBtn.disabled = peerState.role !== "rover";
     setStatus("Transfer link connected.");
+    // Base immediately tells the rover which bridge is active so rover auto-opens it
+    if (peerState.role === "base" && activeBridgeId) {
+      const b = activeBridge();
+      if (b) {
+        dc.send(JSON.stringify({
+          t: "bridge-sync",
+          id: b.id,
+          title: b.title || "",
+          description: b.description || "",
+          createdAt: b.createdAt || new Date().toISOString()
+        }));
+        appendPeerLog(`Sent bridge sync: "${b.title || b.id}" to rover.`);
+      }
+    }
   };
   dc.onclose = () => {
     appendPeerLog("Data channel closed.");
@@ -926,10 +962,38 @@ function attachPeerDataChannel(dc) {
   dc.onmessage = (evt) => { void handlePeerMessage(evt.data); };
 }
 
+// Rover receives bridge info from base and opens/creates the matching bridge.
+async function handlePeerBridgeSync(msg) {
+  if (peerState.role !== "rover") return; // base doesn't need to act on this
+  const { id, title, description, createdAt } = msg;
+  if (!id) return;
+  appendPeerLog(`Bridge sync received: "${title || id}"`);
+  // If already on this bridge, nothing to do
+  if (activeBridgeId === id) {
+    setStatus(`Already on bridge "${title || id}".`);
+    return;
+  }
+  // Check if it exists locally; if not, create it
+  let b = bridges.find((x) => x.id === id) || await getBridgeRec(id);
+  if (!b) {
+    b = { id, title: title || "Synced bridge", description: description || "", createdAt: createdAt || new Date().toISOString(), kml: null, reportConfig: null };
+    await putBridgeRec(b);
+    bridges.push(b);
+    appendPeerLog(`Created bridge "${b.title}" from sync.`);
+  }
+  // Open it — this sets activeBridgeId and shows the camera/gallery UI
+  await openBridge(id);
+  setStatus(`📡 Bridge synced from base: "${b.title || id}". Ready to capture.`);
+}
+
 async function handlePeerMessage(data) {
   if (typeof data === "string") {
     let msg;
     try { msg = JSON.parse(data); } catch (e) { console.warn("peer msg parse:", e); return; }
+    if (msg.t === "bridge-sync") {
+      await handlePeerBridgeSync(msg);
+      return;
+    }
     if (msg.t === "file-start") {
       peerState.incoming = {
         id: msg.id,

@@ -18,7 +18,7 @@
   <script src="vendor/togeojson.umd.min.js"></script>
   <!-- docx (Word report generation) -->
   <script src="vendor/docx.umd.js"></script>
-  <link rel="stylesheet" href="styles.css?v=20260709-170500" />
+  <link rel="stylesheet" href="styles.css?v=20260709-172000" />
 </head>
 <body>
 
@@ -274,6 +274,7 @@
       <button id="peerCopyLocalSdpBtn" type="button" class="secondary">📋 Copy local SDP</button>
       <button id="peerShowQrBtn" type="button" class="secondary">▦ Show local as QR</button>
       <button id="peerScanQrBtn" type="button" class="secondary">📷 Scan QR to remote</button>
+      <button id="peerSyncBridgeBtn" type="button" class="secondary" title="Send active bridge to rover so it opens automatically">📡 Sync bridge to rover</button>
       <button id="peerClearSessionBtn" type="button" class="secondary">♻ Reset transfer session</button>
       <button id="peerClearCacheBtn" type="button" class="secondary" title="Force-reload the app if the UI looks outdated">🔄 Clear cache &amp; reload</button>
     </div>
@@ -302,7 +303,8 @@
   <div class="peer-qr-scanner-dialog">
     <div class="peer-qr-scanner-head">
       <strong>Scan QR</strong>
-      <button id="peerQrFlipBtn" type="button" class="secondary" title="Switch camera">🔄 Flip camera</button>
+      <button id="peerQrFlipBtn" type="button" class="secondary" title="Switch camera">🔄 Flip</button>
+      <button id="peerQrRetryBtn" type="button" class="secondary" title="Retry camera">↺ Retry</button>
       <button id="peerQrScannerClose" type="button" class="secondary">✕ Close</button>
     </div>
     <video id="peerQrScannerVideo" playsinline muted autoplay></video>
@@ -346,6 +348,7 @@
 <script src="basemap.js?v=20260708-145436"></script>
 <script src="vendor/qrcode.min.js?v=20260708-145436"></script>
 <script src="vendor/jsqr.min.js?v=20260709-165000"></script>
-<script src="app.js?v=20260709-171000"></script>
+<script src="app.js?v=20260709-172000"></script>
 </body>
 </html>
+
