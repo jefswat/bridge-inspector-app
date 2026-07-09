@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-09 16:50:00";
+const BUILD_STAMP = "2026-07-09 16:57:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -160,6 +160,7 @@ const peerQrScannerModal = document.getElementById("peerQrScannerModal");
 const peerQrScannerVideo = document.getElementById("peerQrScannerVideo");
 const peerQrScannerStatus= document.getElementById("peerQrScannerStatus");
 const peerQrScannerClose = document.getElementById("peerQrScannerClose");
+const peerQrFlipBtn      = document.getElementById("peerQrFlipBtn");
 const peerSendRow        = document.getElementById("peerSendRow");
 const peerPickSavedBtn   = document.getElementById("peerPickSavedBtn");
 const peerFileInput      = document.getElementById("peerFileInput");
@@ -190,6 +191,7 @@ let peerSendQueue          = Promise.resolve();
 let peerQrDetector         = null;
 let peerQrScanStream       = null;
 let peerQrScanLoopId       = null;
+let peerQrFacingMode       = "environment"; // preferred facing for QR scanner; toggled by flip button
 
 // ── Guided scan (photogrammetry burst) state ──────────────────────────────────
 let scanActive     = false;
@@ -457,6 +459,7 @@ function registerEvents() {
   if (peerScanQrBtn) peerScanQrBtn.addEventListener("click", () => { void startPeerQrScan(); });
   if (peerClearSessionBtn) peerClearSessionBtn.addEventListener("click", () => resetPeerSession(false));
   if (peerQrScannerClose) peerQrScannerClose.addEventListener("click", () => stopPeerQrScan("QR scan closed."));
+  if (peerQrFlipBtn) peerQrFlipBtn.addEventListener("click", () => flipPeerQrCamera());
   if (peerQrScannerModal) peerQrScannerModal.addEventListener("click", (e) => {
     if (e.target === peerQrScannerModal) stopPeerQrScan("QR scan closed.");
   });
@@ -699,11 +702,17 @@ function renderPeerLocalQr(useCompact = false) {
   }
 }
 
-async function startPeerQrScan() {
+async function startPeerQrScan(facingMode) {
   if (!peerQrScannerModal || !peerQrScannerVideo || !peerRemoteSdp) return;
+  if (facingMode) peerQrFacingMode = facingMode;
   try {
+    // Stop any existing stream before (re)starting with a different camera
+    if (peerQrScanStream) {
+      for (const t of peerQrScanStream.getTracks()) t.stop();
+      peerQrScanStream = null;
+    }
     peerQrScanStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      video: { facingMode: { ideal: peerQrFacingMode }, width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: false
     });
     peerQrScannerVideo.srcObject = peerQrScanStream;
@@ -711,6 +720,9 @@ async function startPeerQrScan() {
     await peerQrScannerVideo.play();
     peerQrScannerModal.hidden = false;
     if (peerQrScannerStatus) peerQrScannerStatus.textContent = "Point camera at the QR code.";
+    if (peerQrFlipBtn) peerQrFlipBtn.hidden = false;
+    // Re-start the scan loop (cancel existing one first)
+    if (peerQrScanLoopId) { cancelAnimationFrame(peerQrScanLoopId); peerQrScanLoopId = null; }
     runPeerQrScanLoop();
   } catch (e) {
     stopPeerQrScan();
@@ -722,6 +734,12 @@ async function startPeerQrScan() {
       showPeerScanFallback("Live camera unavailable (" + e.message + "). Upload a photo of the QR code instead.");
     }
   }
+}
+
+async function flipPeerQrCamera() {
+  peerQrFacingMode = peerQrFacingMode === "environment" ? "user" : "environment";
+  if (peerQrScannerStatus) peerQrScannerStatus.textContent = "Switching camera…";
+  await startPeerQrScan();
 }
 
 // Hidden canvas used to grab video frames for jsQR decoding
@@ -866,6 +884,7 @@ function stopPeerQrScan(statusText) {
     peerQrScannerVideo.srcObject = null;
     peerQrScannerVideo.hidden = false;
   }
+  if (peerQrFlipBtn) peerQrFlipBtn.hidden = false; // always visible when modal is open
   if (peerQrScanStream) {
     for (const t of peerQrScanStream.getTracks()) t.stop();
     peerQrScanStream = null;
