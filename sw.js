@@ -1,4 +1,4 @@
-const CACHE_NAME = "photo-vault-v60";
+const CACHE_NAME = "photo-vault-v61";
 const ASSETS = [
   "./",
   "./index.html",
@@ -17,7 +17,8 @@ const ASSETS = [
   "./vendor/jszip.min.js",
   "./vendor/togeojson.umd.min.js",
   "./vendor/docx.umd.js",
-  "./vendor/qrcode.min.js"
+  "./vendor/qrcode.min.js",
+  "./vendor/jsqr.min.js"
 ];
 
 self.addEventListener("install", (e) => {

@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-09 16:45:00";
+const BUILD_STAMP = "2026-07-09 16:50:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -701,19 +701,13 @@ function renderPeerLocalQr(useCompact = false) {
 
 async function startPeerQrScan() {
   if (!peerQrScannerModal || !peerQrScannerVideo || !peerRemoteSdp) return;
-  const hasDetector = "BarcodeDetector" in window;
-  if (!hasDetector) {
-    // No BarcodeDetector → offer photo-file fallback instead of silently failing
-    showPeerScanFallback();
-    return;
-  }
   try {
-    if (!peerQrDetector) peerQrDetector = new BarcodeDetector({ formats: ["qr_code"] });
     peerQrScanStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: false
     });
     peerQrScannerVideo.srcObject = peerQrScanStream;
+    peerQrScannerVideo.hidden = false;
     await peerQrScannerVideo.play();
     peerQrScannerModal.hidden = false;
     if (peerQrScannerStatus) peerQrScannerStatus.textContent = "Point camera at the QR code.";
@@ -724,92 +718,142 @@ async function startPeerQrScan() {
       appendPeerLog("Camera permission denied — use photo upload to scan QR.");
       showPeerScanFallback("Camera permission denied. Take a photo of the QR code with your camera app, then upload it below.");
     } else {
-      setStatus("QR scan start failed: " + e.message);
-      showPeerScanFallback("Live scan failed (" + e.message + "). Upload a photo of the QR code instead.");
+      appendPeerLog("Live scan failed: " + e.message);
+      showPeerScanFallback("Live camera unavailable (" + e.message + "). Upload a photo of the QR code instead.");
     }
   }
 }
 
-// Shows a file-upload fallback inside the scanner modal for devices where live scanning fails.
+// Hidden canvas used to grab video frames for jsQR decoding
+let peerQrCanvas = null;
+let peerQrCanvasCtx = null;
+
+function runPeerQrScanLoop() {
+  if (!peerQrScannerVideo) return;
+  const useNative = "BarcodeDetector" in window;
+  if (useNative && !peerQrDetector) {
+    try { peerQrDetector = new BarcodeDetector({ formats: ["qr_code"] }); } catch (e) { /* fall through to jsQR */ }
+  }
+  const tick = async () => {
+    if (!peerQrScanStream) return;
+    let hit = "";
+    try {
+      if (useNative && peerQrDetector) {
+        // Native BarcodeDetector path (Android Chrome, ChromeOS)
+        const barcodes = await peerQrDetector.detect(peerQrScannerVideo);
+        hit = barcodes && barcodes[0] ? barcodes[0].rawValue.trim() : "";
+      } else if (typeof jsQR === "function") {
+        // jsQR path (desktop Chrome, Firefox, Safari)
+        const v = peerQrScannerVideo;
+        if (v.videoWidth > 0 && v.videoHeight > 0) {
+          if (!peerQrCanvas) {
+            peerQrCanvas = document.createElement("canvas");
+            peerQrCanvasCtx = peerQrCanvas.getContext("2d");
+          }
+          peerQrCanvas.width  = v.videoWidth;
+          peerQrCanvas.height = v.videoHeight;
+          peerQrCanvasCtx.drawImage(v, 0, 0);
+          const imgData = peerQrCanvasCtx.getImageData(0, 0, peerQrCanvas.width, peerQrCanvas.height);
+          const result = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: "dontInvert" });
+          hit = result ? result.data.trim() : "";
+        }
+      }
+    } catch (e) {
+      console.warn("QR detect frame error:", e);
+    }
+    if (hit) {
+      if (peerRemoteSdp) peerRemoteSdp.value = hit;
+      stopPeerQrScan();
+      appendPeerLog("Scanned QR into Remote SDP.");
+      setStatus("QR scanned. Apply offer/answer now.");
+      return;
+    }
+    peerQrScanLoopId = requestAnimationFrame(tick);
+  };
+  peerQrScanLoopId = requestAnimationFrame(tick);
+}
+
+// Shows a file-upload fallback inside the scanner modal when live camera fails.
 function showPeerScanFallback(reason) {
   if (!peerQrScannerModal) return;
-  const msg = reason || "Your browser doesn't support live QR scanning. Take a screenshot of the QR code, then upload it below.";
-  // Reuse the scanner modal but replace the video with an upload prompt
+  const canDecode = ("BarcodeDetector" in window) || (typeof jsQR === "function");
+  const msg = reason || (canDecode
+    ? "Live camera unavailable. Take a photo of the QR code and upload it below."
+    : "Your browser can't scan QR codes live or from a file. Copy the SDP text from the other device and paste it into the Remote SDP box.");
   if (peerQrScannerVideo) peerQrScannerVideo.hidden = true;
   const existing = peerQrScannerModal.querySelector(".peer-qr-fallback");
   if (!existing) {
     const wrap = document.createElement("div");
     wrap.className = "peer-qr-fallback";
-    wrap.innerHTML = `
-      <p class="scan-hint" id="peerQrFallbackMsg"></p>
-      <label class="peer-qr-fallback-label">
-        📷 Open camera / choose photo
-        <input type="file" accept="image/*" capture="environment" id="peerQrFallbackInput" hidden />
-      </label>
-      <p class="scan-hint" style="font-size:.7rem;color:#94a3b8;">Or copy the SDP text from the other device and paste it into the Remote SDP box directly.</p>`;
+    wrap.innerHTML = canDecode
+      ? `<p class="scan-hint" id="peerQrFallbackMsg"></p>
+         <label class="peer-qr-fallback-label">
+           📷 Open camera / choose photo of QR
+           <input type="file" accept="image/*" id="peerQrFallbackInput" hidden />
+         </label>
+         <p class="scan-hint" style="font-size:.7rem;color:#94a3b8;">Or paste the SDP text into the Remote SDP box directly.</p>`
+      : `<p class="scan-hint" id="peerQrFallbackMsg"></p>
+         <p class="scan-hint" style="font-size:.7rem;color:#94a3b8;">Use <strong>📋 Copy local SDP</strong> on the other device, then paste into Remote SDP.</p>`;
     peerQrScannerModal.querySelector(".peer-qr-scanner-dialog").insertBefore(
       wrap,
-      peerQrScannerModal.querySelector(".peer-qr-scanner-dialog").querySelector("#peerQrScannerStatus")
+      peerQrScannerModal.querySelector("#peerQrScannerStatus")
     );
-    wrap.querySelector("#peerQrFallbackInput").addEventListener("change", (e) => {
-      const file = e.target.files && e.target.files[0];
-      if (!file) return;
-      void decodePeerQrFromFile(file);
-    });
+    if (canDecode) {
+      wrap.querySelector("#peerQrFallbackInput").addEventListener("change", (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        void decodePeerQrFromFile(file);
+      });
+    }
   }
-  peerQrScannerModal.querySelector("#peerQrFallbackMsg").textContent = msg;
+  const msgEl = peerQrScannerModal.querySelector("#peerQrFallbackMsg");
+  if (msgEl) msgEl.textContent = msg;
   peerQrScannerModal.hidden = false;
   if (peerQrScannerStatus) peerQrScannerStatus.textContent = "";
 }
 
 async function decodePeerQrFromFile(file) {
   if (!peerRemoteSdp) return;
-  if (!("BarcodeDetector" in window)) {
-    setStatus("QR decode not supported in this browser. Paste the SDP text manually.");
-    stopPeerQrScan("BarcodeDetector not available — paste SDP manually.");
-    return;
-  }
+  if (peerQrScannerStatus) peerQrScannerStatus.textContent = "Decoding image…";
   try {
-    if (peerQrScannerStatus) peerQrScannerStatus.textContent = "Decoding image…";
-    if (!peerQrDetector) peerQrDetector = new BarcodeDetector({ formats: ["qr_code"] });
-    const bitmap = await createImageBitmap(file);
-    const barcodes = await peerQrDetector.detect(bitmap);
-    bitmap.close();
-    const hit = barcodes && barcodes[0] ? barcodes[0].rawValue.trim() : "";
+    let hit = "";
+    if ("BarcodeDetector" in window) {
+      // Native path
+      if (!peerQrDetector) peerQrDetector = new BarcodeDetector({ formats: ["qr_code"] });
+      const bitmap = await createImageBitmap(file);
+      const barcodes = await peerQrDetector.detect(bitmap);
+      bitmap.close();
+      hit = barcodes && barcodes[0] ? barcodes[0].rawValue.trim() : "";
+    } else if (typeof jsQR === "function") {
+      // jsQR path — draw to canvas, decode
+      const url = URL.createObjectURL(file);
+      const img = await new Promise((res, rej) => {
+        const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url;
+      });
+      const cvs = document.createElement("canvas");
+      cvs.width = img.naturalWidth; cvs.height = img.naturalHeight;
+      const ctx = cvs.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      const imgData = ctx.getImageData(0, 0, cvs.width, cvs.height);
+      const result = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: "attemptBoth" });
+      hit = result ? result.data.trim() : "";
+    } else {
+      if (peerQrScannerStatus) peerQrScannerStatus.textContent = "QR decode unavailable. Paste SDP manually.";
+      return;
+    }
     if (hit) {
       peerRemoteSdp.value = hit;
       stopPeerQrScan("QR decoded from photo. Apply offer/answer now.");
       appendPeerLog("Decoded QR from uploaded photo.");
       setStatus("QR decoded. Apply offer/answer now.");
     } else {
-      if (peerQrScannerStatus) peerQrScannerStatus.textContent = "No QR code found in photo. Try again.";
+      if (peerQrScannerStatus) peerQrScannerStatus.textContent = "No QR found in photo — try a clearer image.";
     }
   } catch (e) {
     if (peerQrScannerStatus) peerQrScannerStatus.textContent = "Decode failed: " + e.message;
+    console.warn("decodePeerQrFromFile:", e);
   }
-}
-
-function runPeerQrScanLoop() {
-  if (!peerQrScannerVideo || !peerQrDetector) return;
-  const tick = async () => {
-    if (!peerQrScanStream || !peerQrDetector) return;
-    try {
-      const barcodes = await peerQrDetector.detect(peerQrScannerVideo);
-      const hit = barcodes && barcodes[0] && typeof barcodes[0].rawValue === "string" ? barcodes[0].rawValue.trim() : "";
-      if (hit) {
-        if (peerRemoteSdp) peerRemoteSdp.value = hit;
-        stopPeerQrScan();
-        appendPeerLog("Scanned QR into Remote SDP.");
-        setStatus("QR scanned. Apply offer/answer now.");
-        return;
-      }
-    } catch (e) {
-      if (peerQrScannerStatus) peerQrScannerStatus.textContent = "Scanning…";
-      console.warn("QR detect frame error:", e);
-    }
-    peerQrScanLoopId = requestAnimationFrame(tick);
-  };
-  peerQrScanLoopId = requestAnimationFrame(tick);
 }
 
 function stopPeerQrScan(statusText) {
@@ -820,7 +864,7 @@ function stopPeerQrScan(statusText) {
   if (peerQrScannerVideo) {
     try { peerQrScannerVideo.pause(); } catch (e) { console.warn("QR video pause:", e); }
     peerQrScannerVideo.srcObject = null;
-    peerQrScannerVideo.hidden = false; // restore in case fallback hid it
+    peerQrScannerVideo.hidden = false;
   }
   if (peerQrScanStream) {
     for (const t of peerQrScanStream.getTracks()) t.stop();
