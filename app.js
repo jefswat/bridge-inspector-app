@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-16 22:29:00";
+const BUILD_STAMP = "2026-07-16 22:35:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -5962,83 +5962,39 @@ function invert3x3(m) {
   return [A / det, B / det, C / det, D / det, E / det, F / det, G / det, H / det, I / det];
 }
 
-function inferDeskewQuadFromDetections(detections, width, height) {
-  const pts = [];
+function normalizeDeskewAxisAngle(theta) {
+  let t = Number(theta) || 0;
+  while (t <= -Math.PI / 2) t += Math.PI;
+  while (t > Math.PI / 2) t -= Math.PI;
+  return t;
+}
+
+function dominantDeskewAngleFromDetections(detections, width, height) {
+  let sumCos2 = 0;
+  let sumSin2 = 0;
+  let weightSum = 0;
   for (const d of detections || []) {
     const cn = Array.isArray(d?.cornersNormalized) ? d.cornersNormalized : [];
     if (cn.length !== 4) continue;
-    for (const p of cn) {
-      const x = Number(p?.x) * width;
-      const y = Number(p?.y) * height;
-      if (Number.isFinite(x) && Number.isFinite(y)) pts.push({ x, y });
+    const pts = cn
+      .map((p) => ({ x: Number(p?.x) * width, y: Number(p?.y) * height }))
+      .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+    if (pts.length !== 4) continue;
+    for (let i = 0; i < 4; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % 4];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len = Math.hypot(dx, dy);
+      if (!(len > 1e-3)) continue;
+      const t = normalizeDeskewAxisAngle(Math.atan2(dy, dx));
+      sumCos2 += Math.cos(2 * t) * len;
+      sumSin2 += Math.sin(2 * t) * len;
+      weightSum += len;
     }
   }
-  if (pts.length < 4) return null;
-  let tl = pts[0], tr = pts[0], br = pts[0], bl = pts[0];
-  for (const p of pts) {
-    if ((p.x + p.y) < (tl.x + tl.y)) tl = p;
-    if ((p.x - p.y) > (tr.x - tr.y)) tr = p;
-    if ((p.x + p.y) > (br.x + br.y)) br = p;
-    if ((p.x - p.y) < (bl.x - bl.y)) bl = p;
-  }
-  return [tl, tr, br, bl];
-}
-
-function homographyQuadToRect(srcQuad, outW, outH) {
-  const dst = [
-    { x: 0, y: 0 },
-    { x: outW - 1, y: 0 },
-    { x: outW - 1, y: outH - 1 },
-    { x: 0, y: outH - 1 },
-  ];
-  const a = [];
-  const b = [];
-  for (let i = 0; i < 4; i++) {
-    const x = srcQuad[i].x;
-    const y = srcQuad[i].y;
-    const u = dst[i].x;
-    const v = dst[i].y;
-    a.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
-    a.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
-  }
-  const h = solveLinearSystem(a, b);
-  if (!h) return null;
-  return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
-}
-
-function warpImageDataProjective(srcImageData, outW, outH, hInv) {
-  const sw = srcImageData.width;
-  const sh = srcImageData.height;
-  const src = srcImageData.data;
-  const tmpCanvas = document.createElement("canvas");
-  tmpCanvas.width = outW;
-  tmpCanvas.height = outH;
-  const tmpCtx = tmpCanvas.getContext("2d");
-  if (!tmpCtx) throw new Error("Could not allocate deskew image buffer.");
-  const out = tmpCtx.createImageData(outW, outH);
-  const dst = out.data;
-  const [h0, h1, h2, h3, h4, h5, h6, h7, h8] = hInv;
-  let di = 0;
-  for (let y = 0; y < outH; y++) {
-    for (let x = 0; x < outW; x++) {
-      const w = h6 * x + h7 * y + h8;
-      if (Math.abs(w) < 1e-9) { di += 4; continue; }
-      const sx = (h0 * x + h1 * y + h2) / w;
-      const sy = (h3 * x + h4 * y + h5) / w;
-      if (sx < 0 || sy < 0 || sx >= (sw - 1) || sy >= (sh - 1)) { di += 4; continue; }
-      const x0 = Math.floor(sx), y0 = Math.floor(sy);
-      const x1 = x0 + 1, y1 = y0 + 1;
-      const dx = sx - x0, dy = sy - y0;
-      const w00 = (1 - dx) * (1 - dy), w10 = dx * (1 - dy), w01 = (1 - dx) * dy, w11 = dx * dy;
-      const i00 = (y0 * sw + x0) * 4, i10 = (y0 * sw + x1) * 4, i01 = (y1 * sw + x0) * 4, i11 = (y1 * sw + x1) * 4;
-      dst[di] = Math.round(src[i00] * w00 + src[i10] * w10 + src[i01] * w01 + src[i11] * w11);
-      dst[di + 1] = Math.round(src[i00 + 1] * w00 + src[i10 + 1] * w10 + src[i01 + 1] * w01 + src[i11 + 1] * w11);
-      dst[di + 2] = Math.round(src[i00 + 2] * w00 + src[i10 + 2] * w10 + src[i01 + 2] * w01 + src[i11 + 2] * w11);
-      dst[di + 3] = Math.round(src[i00 + 3] * w00 + src[i10 + 3] * w10 + src[i01 + 3] * w01 + src[i11 + 3] * w11);
-      di += 4;
-    }
-  }
-  return out;
+  if (!(weightSum > 0)) return null;
+  return 0.5 * Math.atan2(sumSin2, sumCos2);
 }
 
 function canvasToJpegBlob(canvas, quality = 0.92) {
@@ -6064,29 +6020,24 @@ async function requestDeskewFromOpenCv(blob, existingDetections = []) {
     const detected = (Array.isArray(existingDetections) && existingDetections.length)
       ? existingDetections
       : findAprilTagsInCanvas(srcCanvas, 960).detections;
-    const quad = inferDeskewQuadFromDetections(detected, sw, sh);
-    if (!quad) throw new Error("No AprilTag corners available for deskew.");
-
-    const top = Math.hypot(quad[1].x - quad[0].x, quad[1].y - quad[0].y);
-    const bot = Math.hypot(quad[2].x - quad[3].x, quad[2].y - quad[3].y);
-    const left = Math.hypot(quad[3].x - quad[0].x, quad[3].y - quad[0].y);
-    const right = Math.hypot(quad[2].x - quad[1].x, quad[2].y - quad[1].y);
-    const outW = Math.max(128, Math.min(2200, Math.round((top + bot) / 2)));
-    const outH = Math.max(128, Math.min(2200, Math.round((left + right) / 2)));
-    const h = homographyQuadToRect(quad, outW, outH);
-    if (!h) throw new Error("Could not compute deskew transform.");
-    const hInv = invert3x3(h);
-    if (!hInv) throw new Error("Deskew transform was singular.");
-
-    const srcImageData = srcCtx.getImageData(0, 0, sw, sh);
-    const warped = warpImageDataProjective(srcImageData, outW, outH, hInv);
+    const angle = dominantDeskewAngleFromDetections(detected, sw, sh);
+    if (!Number.isFinite(angle)) throw new Error("No AprilTag corners available for deskew.");
     const outCanvas = document.createElement("canvas");
-    outCanvas.width = outW;
-    outCanvas.height = outH;
+    outCanvas.width = sw;
+    outCanvas.height = sh;
     const outCtx = outCanvas.getContext("2d");
     if (!outCtx) throw new Error("Could not render deskew output.");
-    outCtx.putImageData(warped, 0, 0);
-    return { blob: await canvasToJpegBlob(outCanvas), markerCount: detected.length };
+    outCtx.fillStyle = "#000";
+    outCtx.fillRect(0, 0, sw, sh);
+    outCtx.translate(sw / 2, sh / 2);
+    outCtx.rotate(-angle);
+    outCtx.drawImage(srcCanvas, -sw / 2, -sh / 2);
+    outCtx.setTransform(1, 0, 0, 1, 0, 0);
+    return {
+      blob: await canvasToJpegBlob(outCanvas),
+      markerCount: detected.length,
+      angleDeg: (-angle * 180) / Math.PI,
+    };
   } finally {
     bmp.close?.();
   }
@@ -6109,7 +6060,8 @@ async function deskewCapturedPhotoOpenCv(record) {
     record.aprilTagDetectionsDeskew = april.detections.map((d) => ({ id: d.id, cornersNormalized: d.cornersNormalized, hammingDistance: d.hammingDistance }));
     await runTransaction("readwrite", (s) => s.put(record));
     await renderSavedPhotos();
-    setStatus(`Deskew view ready (${result.markerCount} marker${result.markerCount === 1 ? "" : "s"} used). Original retained.`);
+    const ang = Number.isFinite(result.angleDeg) ? `, ${result.angleDeg.toFixed(1)}°` : "";
+    setStatus(`Deskew view ready (${result.markerCount} marker${result.markerCount === 1 ? "" : "s"} used${ang}). Original retained.`);
   } catch (e) {
     setStatus("Deskew failed: " + e.message);
   }
