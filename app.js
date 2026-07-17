@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-16 22:38:00";
+const BUILD_STAMP = "2026-07-16 22:43:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -5990,24 +5990,50 @@ function dominantDeskewAngleFromDetections(detections, width, height) {
       .map((p) => ({ x: Number(p?.x) * width, y: Number(p?.y) * height }))
       .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
     if (pts.length !== 4) continue;
-    // Use the same edge family only (0->1 and 3->2). Mixing horizontal+vertical
-    // families cancels out for square tags and produces unstable angles.
-    const pairs = [[0, 1], [3, 2]];
-    for (const [i0, i1] of pairs) {
-      const a = pts[i0];
-      const b = pts[i1];
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const len = Math.hypot(dx, dy);
-      if (!(len > 1e-3)) continue;
-      const t = normalizeDeskewAxisAngle(Math.atan2(dy, dx));
-      sumCos2 += Math.cos(2 * t) * len;
-      sumSin2 += Math.sin(2 * t) * len;
-      weightSum += len;
+    // Corner start index can rotate per tag. Evaluate both opposite-edge families
+    // and keep the family that implies the smaller correction magnitude.
+    const families = [
+      [[0, 1], [2, 3]],
+      [[1, 2], [3, 0]],
+    ];
+    let bestAngle = null;
+    let bestAbs = Infinity;
+    let bestWeight = 0;
+    for (const fam of families) {
+      let famCos2 = 0;
+      let famSin2 = 0;
+      let famWeight = 0;
+      for (const [i0, i1] of fam) {
+        const a = pts[i0];
+        const b = pts[i1];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len = Math.hypot(dx, dy);
+        if (!(len > 1e-3)) continue;
+        const t = normalizeDeskewAxisAngle(Math.atan2(dy, dx));
+        famCos2 += Math.cos(2 * t) * len;
+        famSin2 += Math.sin(2 * t) * len;
+        famWeight += len;
+      }
+      if (!(famWeight > 0)) continue;
+      const famAngle = closestSmallDeskewAngle(0.5 * Math.atan2(famSin2, famCos2));
+      const famAbs = Math.abs(famAngle);
+      if (famAbs < bestAbs) {
+        bestAbs = famAbs;
+        bestAngle = famAngle;
+        bestWeight = famWeight;
+      }
+    }
+    if (Number.isFinite(bestAngle) && bestWeight > 0) {
+      sumCos2 += Math.cos(2 * bestAngle) * bestWeight;
+      sumSin2 += Math.sin(2 * bestAngle) * bestWeight;
+      weightSum += bestWeight;
     }
   }
   if (!(weightSum > 0)) return null;
-  return closestSmallDeskewAngle(0.5 * Math.atan2(sumSin2, sumCos2));
+  const angle = closestSmallDeskewAngle(0.5 * Math.atan2(sumSin2, sumCos2));
+  const maxAbs = 25 * Math.PI / 180;
+  return Math.max(-maxAbs, Math.min(maxAbs, angle));
 }
 
 function canvasToJpegBlob(canvas, quality = 0.92) {
