@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-16 21:52:00";
+const BUILD_STAMP = "2026-07-16 22:13:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -76,7 +76,9 @@ function buildTagSummary(tags) {
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const cameraPreview      = document.getElementById("cameraPreview");
+const apriltagPreviewOverlay = document.getElementById("apriltagPreviewOverlay");
 const cameraFallback     = document.getElementById("cameraFallback");
+const apriltagPreviewStatus = document.getElementById("apriltagPreviewStatus");
 const snapshotCanvas     = document.getElementById("snapshotCanvas");
 const statusMessage      = document.getElementById("statusMessage");
 const installButton      = document.getElementById("installButton");
@@ -192,6 +194,14 @@ let peerQrDetector         = null;
 let peerQrScanStream       = null;
 let peerQrScanLoopId       = null;
 let peerQrFacingMode       = "environment"; // preferred facing for QR scanner; toggled by flip button
+let aprilDetector          = null;
+let aprilPreviewCanvas     = null;
+let aprilPreviewCtx        = null;
+let aprilPreviewLoopId     = null;
+let aprilPreviewBusy       = false;
+const APRIL_PREVIEW_MAX_DIM = 420;
+const APRIL_PREVIEW_INTERVAL_MS = 1200;
+const DESKEW_API_URL = "http://localhost:8766/deskew";
 
 // ── Guided scan (photogrammetry burst) state ──────────────────────────────────
 let scanActive     = false;
@@ -289,6 +299,9 @@ async function init() {
   await ensureBridges();
   registerEvents();
   await registerServiceWorker();
+  if (apriltagPreviewStatus && !aprilTagDetectorReady()) {
+    apriltagPreviewStatus.textContent = "AprilTag 36h11: detector library not loaded.";
+  }
 
   const last = localStorage.getItem(ACTIVE_BRIDGE_KEY);
   if (last && bridges.some((b) => b.id === last)) {
@@ -1303,7 +1316,12 @@ async function startMainCamera() {
     // Sync the active device id (in case facingMode/fallback picked it).
     const activeId = stream.getVideoTracks()?.[0]?.getSettings()?.deviceId;
     if (activeId) mainCameraId = activeId;
+    // Mirror preview only for front-facing camera.
+    const trackFacing = stream.getVideoTracks()?.[0]?.getSettings()?.facingMode;
+    const isFront = (trackFacing ?? facingMode) === "user";
+    cameraPreview.closest(".camera-preview-wrap")?.classList.toggle("front-facing", isFront);
     setStatus(`Camera ready (${facingLabel(facingMode)} lens).`);
+    startAprilTagPreviewLoop();
     await populateMainSelector();
     await populateThermalSelector();
   } catch (err) { revealFallback(`Camera access failed: ${err.message}`); }
@@ -1432,10 +1450,201 @@ function stopThermalCamera() {
 function stopMainCamera() {
   if (scanActive) finishScanSession();
   if (scanToggleBtn) scanToggleBtn.disabled = true;
+  stopAprilTagPreviewLoop();
+  cameraPreview.closest(".camera-preview-wrap")?.classList.remove("front-facing");
   if (!stream) return;
   for (const t of stream.getTracks()) t.stop();
   stream = undefined;
   cameraPreview.srcObject = null;
+}
+
+function aprilTagDetectorReady() {
+  return !!(window.AR && typeof window.AR.Detector === "function" && window.AR.DICTIONARIES?.APRILTAG_36h11);
+}
+
+function ensureAprilTagDetector() {
+  if (!aprilTagDetectorReady()) return null;
+  if (!aprilDetector) aprilDetector = new AR.Detector({ dictionaryName: "APRILTAG_36h11", maxHammingDistance: 11 });
+  return aprilDetector;
+}
+
+function detectAprilTagsInImageData(imageData) {
+  const detector = ensureAprilTagDetector();
+  if (!detector || !imageData) return [];
+  try {
+    const markers = detector.detect(imageData) || [];
+    const w = Math.max(1, Number(imageData.width) || 1);
+    const h = Math.max(1, Number(imageData.height) || 1);
+    return markers
+      .map((m) => {
+        const corners = (m.corners || [])
+          .map((p) => ({ x: Number(p.x), y: Number(p.y) }))
+          .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+        if (!Number.isFinite(m.id) || corners.length !== 4) return null;
+        return {
+          id: Number(m.id),
+          hammingDistance: Number.isFinite(m.hammingDistance) ? Number(m.hammingDistance) : null,
+          corners,
+          cornersNormalized: corners.map((p) => ({
+            x: Math.max(0, Math.min(1, p.x / w)),
+            y: Math.max(0, Math.min(1, p.y / h)),
+          })),
+        };
+      })
+      .filter(Boolean);
+  } catch (e) {
+    console.warn("AprilTag detect failed:", e);
+    return [];
+  }
+}
+
+function aprilTagResultFromDetections(detections) {
+  const ids = [...new Set((detections || []).map((d) => d.id).filter((id) => Number.isFinite(id)))].sort((a, b) => a - b);
+  return { ids, detections: detections || [] };
+}
+
+function findAprilTagsInCanvas(sourceCanvas, maxDim = 960) {
+  const detector = ensureAprilTagDetector();
+  if (!detector || !sourceCanvas?.width || !sourceCanvas?.height) return { ids: [], detections: [] };
+  const w = sourceCanvas.width;
+  const h = sourceCanvas.height;
+  const scale = Math.min(1, maxDim / Math.max(w, h));
+  const tw = Math.max(1, Math.round(w * scale));
+  const th = Math.max(1, Math.round(h * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = tw;
+  canvas.height = th;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return { ids: [], detections: [] };
+  ctx.drawImage(sourceCanvas, 0, 0, tw, th);
+  return aprilTagResultFromDetections(detectAprilTagsInImageData(ctx.getImageData(0, 0, tw, th)));
+}
+
+async function findAprilTagsInBlob(blob, maxDim = 960) {
+  const detector = ensureAprilTagDetector();
+  if (!detector || !(blob instanceof Blob)) return { ids: [], detections: [] };
+  try {
+    const bmp = await createImageBitmap(blob);
+    try {
+      const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+      const tw = Math.max(1, Math.round(bmp.width * scale));
+      const th = Math.max(1, Math.round(bmp.height * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = tw;
+      canvas.height = th;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctx) return { ids: [], detections: [] };
+      ctx.drawImage(bmp, 0, 0, tw, th);
+      return aprilTagResultFromDetections(detectAprilTagsInImageData(ctx.getImageData(0, 0, tw, th)));
+    } finally {
+      bmp.close?.();
+    }
+  } catch (e) {
+    console.warn("AprilTag blob decode failed:", e);
+    return { ids: [], detections: [] };
+  }
+}
+
+function formatAprilTagSummary(ids) {
+  if (!ids || !ids.length) return "AprilTag 36h11: none";
+  return `AprilTag 36h11: id${ids.length > 1 ? "s" : ""} ${ids.join(", ")}`;
+}
+
+function drawDetections(ctx, detections, mapPoint) {
+  if (!ctx || !detections?.length) return;
+  ctx.lineWidth = 2;
+  ctx.font = "600 12px system-ui, sans-serif";
+  for (const d of detections) {
+    const pts = (d.corners || []).map((p) => mapPoint(p));
+    if (pts.length !== 4) continue;
+    ctx.strokeStyle = "#22d3ee";
+    ctx.fillStyle = "rgba(34, 211, 238, 0.14)";
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    const lx = pts[0].x + 4;
+    const ly = pts[0].y - 6;
+    const label = `ID ${d.id}`;
+    const tw = ctx.measureText(label).width + 10;
+    ctx.fillStyle = "rgba(2, 132, 199, 0.88)";
+    ctx.fillRect(lx - 4, ly - 13, tw, 16);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(label, lx, ly - 2);
+  }
+}
+
+function drawAprilTagPreviewOverlay(detections, srcW, srcH) {
+  if (!apriltagPreviewOverlay) return;
+  const displayW = apriltagPreviewOverlay.clientWidth;
+  const displayH = apriltagPreviewOverlay.clientHeight;
+  if (!displayW || !displayH) return;
+  apriltagPreviewOverlay.width = displayW;
+  apriltagPreviewOverlay.height = displayH;
+  const ctx = apriltagPreviewOverlay.getContext("2d");
+  if (!ctx) return;
+  ctx.clearRect(0, 0, displayW, displayH);
+  if (!detections?.length || !srcW || !srcH) return;
+  const scale = Math.max(displayW / srcW, displayH / srcH);
+  const drawnW = srcW * scale;
+  const drawnH = srcH * scale;
+  const offX = (displayW - drawnW) / 2;
+  const offY = (displayH - drawnH) / 2;
+  drawDetections(ctx, detections, (p) => ({ x: offX + p.x * scale, y: offY + p.y * scale }));
+}
+
+function stopAprilTagPreviewLoop() {
+  if (aprilPreviewLoopId) {
+    clearInterval(aprilPreviewLoopId);
+    aprilPreviewLoopId = null;
+  }
+  if (apriltagPreviewOverlay) {
+    const ctx = apriltagPreviewOverlay.getContext("2d");
+    if (ctx) ctx.clearRect(0, 0, apriltagPreviewOverlay.width, apriltagPreviewOverlay.height);
+  }
+  aprilPreviewBusy = false;
+}
+
+function startAprilTagPreviewLoop() {
+  stopAprilTagPreviewLoop();
+  if (!apriltagPreviewStatus) return;
+  if (!ensureAprilTagDetector()) {
+    apriltagPreviewStatus.textContent = "AprilTag 36h11: detector unavailable.";
+    return;
+  }
+  if (!stream) {
+    apriltagPreviewStatus.textContent = "AprilTag 36h11: waiting for camera…";
+    return;
+  }
+  if (!aprilPreviewCanvas) {
+    aprilPreviewCanvas = document.createElement("canvas");
+    aprilPreviewCtx = aprilPreviewCanvas.getContext("2d", { willReadFrequently: true });
+  }
+  apriltagPreviewStatus.textContent = "AprilTag 36h11: scanning…";
+  aprilPreviewLoopId = setInterval(() => {
+    if (document.hidden) return;
+    if (appView()?.hidden) return;
+    if (aprilPreviewBusy || !stream || !cameraPreview?.videoWidth || !cameraPreview?.videoHeight || !aprilPreviewCtx) return;
+    aprilPreviewBusy = true;
+    try {
+      const srcW = cameraPreview.videoWidth;
+      const srcH = cameraPreview.videoHeight;
+      const scale = Math.min(1, APRIL_PREVIEW_MAX_DIM / Math.max(srcW, srcH));
+      const w = Math.max(1, Math.round(srcW * scale));
+      const h = Math.max(1, Math.round(srcH * scale));
+      aprilPreviewCanvas.width = w;
+      aprilPreviewCanvas.height = h;
+      aprilPreviewCtx.drawImage(cameraPreview, 0, 0, w, h);
+      const detections = detectAprilTagsInImageData(aprilPreviewCtx.getImageData(0, 0, w, h));
+      const ids = aprilTagResultFromDetections(detections).ids;
+      apriltagPreviewStatus.textContent = formatAprilTagSummary(ids);
+      drawAprilTagPreviewOverlay(detections, w, h);
+    } finally {
+      aprilPreviewBusy = false;
+    }
+  }, APRIL_PREVIEW_INTERVAL_MS);
 }
 
 // ── Location + Heading + Attitude ─────────────────────────────────────────────
@@ -1554,6 +1763,7 @@ async function capturePhoto() {
   snapshotCanvas.width = w; snapshotCanvas.height = h;
   snapshotCanvas.getContext("2d").drawImage(cameraPreview, 0, 0, w, h);
   const mainBlob = await canvasToBlob(snapshotCanvas);
+  const aprilTagResult = findAprilTagsInCanvas(snapshotCanvas);
 
   let thermalBlob = null;
   if (thermalStream) {
@@ -1600,7 +1810,11 @@ async function capturePhoto() {
       if (freshOri.attitude != null) currentAttitude = freshOri.attitude;
       headingText.textContent = orientationSummary();
     }
-    await savePhoto(mainBlob, thermalBlob, commentInput.value.trim(), captureLoc, currentHeading, facingMode, depthBlob, plyText, normalizeTags(captureTags), { attitude: currentAttitude });
+    await savePhoto(mainBlob, thermalBlob, commentInput.value.trim(), captureLoc, currentHeading, facingMode, depthBlob, plyText, normalizeTags(captureTags), {
+      attitude: currentAttitude,
+      aprilTags: aprilTagResult.ids,
+      aprilTagDetections: aprilTagResult.detections.map((d) => ({ id: d.id, cornersNormalized: d.cornersNormalized, hammingDistance: d.hammingDistance })),
+    });
     queueAutoSendCapture(mainBlob);
   } catch (e) {
     console.error("[capture] savePhoto FAILED:", e);
@@ -1624,13 +1838,17 @@ async function saveFiles(files) {
   for (const f of files) {
     if (!f.type.startsWith("image/")) continue;
     const exifData = await readExifFromBlob(f);
+    const aprilTagResult = await findAprilTagsInBlob(f);
     // EXIF GPS takes priority over current location; fall back to current
     // location, then to the active bridge's own location (e.g. NBI import).
     const location = exifData.location ?? currentLocation ?? activeBridgeLocation();
     const heading  = exifData.heading  ?? currentHeading;
     // Manual comment wins; otherwise use EXIF description
     const comment  = manualComment || exifData.comment || "";
-    await savePhoto(f, null, comment, location, heading, null, null, null, importTags);
+    await savePhoto(f, null, comment, location, heading, null, null, null, importTags, {
+      aprilTags: aprilTagResult.ids,
+      aprilTagDetections: aprilTagResult.detections.map((d) => ({ id: d.id, cornersNormalized: d.cornersNormalized, hammingDistance: d.hammingDistance })),
+    });
     saved++;
   }
   commentInput.value = "";
@@ -2502,6 +2720,8 @@ function openPhotoAnnotator(record) {
         <div class="sketch-toolbar">
           <button type="button" id="annotPenTool" class="secondary active">✍ Pen</button>
           <button type="button" id="annotCalloutTool" class="secondary">🗨 Text callout</button>
+          <button type="button" id="annotMeasureLineTool" class="secondary">📏 Measure line</button>
+          <button type="button" id="annotMeasureCurveTool" class="secondary">〰 Measure curve</button>
           <div class="sketch-swatches annot-swatches"></div>
           <label class="sketch-custom">Color <input type="color" id="annotColor" value="#ef4444"></label>
           <label class="sketch-size">Size <input type="range" id="annotSize" min="1" max="24" value="3"></label>
@@ -2511,6 +2731,14 @@ function openPhotoAnnotator(record) {
               <option value="none">No fill</option>
             </select>
           </label>
+          <label class="sketch-size">Tag width
+            <input id="annotTagWidth" class="meta-input" type="number" min="0.0001" step="any" value="6">
+          </label>
+          <label class="sketch-size">Units
+            <input id="annotTagUnits" class="meta-input" type="text" value="in" style="width:64px;">
+          </label>
+          <button type="button" id="annotSetScaleFromTag" class="secondary">Set scale from tag</button>
+          <span id="annotScaleInfo" class="sketch-hint"></span>
           <button type="button" id="annotEraser" class="secondary">🩹 Eraser</button>
           <button type="button" id="annotEditCallout" class="secondary">✎ Edit text</button>
           <button type="button" id="annotDeleteCallout" class="secondary">🗑 Delete callout</button>
@@ -2524,7 +2752,7 @@ function openPhotoAnnotator(record) {
           </div>
         </div>
         <div class="sketch-footer">
-          <span class="sketch-hint">Overlay is stored separately from the photo. Use Pen for freehand stylus marks, or Text callout to place a leader + text box.</span>
+          <span class="sketch-hint">Overlay is stored separately from the photo. Use AprilTag width + Set scale from tag, then Measure line/curve for physical dimensions.</span>
           <div class="sketch-footer-btns">
             <button type="button" class="annot-cancel secondary">Cancel</button>
             <button type="button" class="annot-remove secondary">Remove overlay</button>
@@ -2555,6 +2783,9 @@ function openPhotoAnnotator(record) {
     overlay.querySelector("#annotCalloutFill").addEventListener("change", (e) => setAnnotCalloutFill(e.target.value));
     overlay.querySelector("#annotPenTool").addEventListener("click", () => setAnnotTool("pen"));
     overlay.querySelector("#annotCalloutTool").addEventListener("click", () => setAnnotTool("callout"));
+    overlay.querySelector("#annotMeasureLineTool").addEventListener("click", () => setAnnotTool("measure-line"));
+    overlay.querySelector("#annotMeasureCurveTool").addEventListener("click", () => setAnnotTool("measure-curve"));
+    overlay.querySelector("#annotSetScaleFromTag").addEventListener("click", () => setAnnotScaleFromTag());
     overlay.querySelector("#annotEditCallout").addEventListener("click", () => editSelectedCalloutText());
     overlay.querySelector("#annotDeleteCallout").addEventListener("click", () => deleteSelectedCallout());
     overlay.querySelector("#annotEraser").addEventListener("click", (e) => {
@@ -2577,10 +2808,12 @@ function openPhotoAnnotator(record) {
 
   const baseImg = overlay.querySelector("#annotBaseImage");
   const canvas = overlay.querySelector("#annotCanvas");
-  const prior = record.annotationData || { w: null, h: null, ops: [] };
+  const displayBlob = getDisplayPhotoBlob(record);
+  const prior = getDisplayAnnotationData(record) || { w: null, h: null, ops: [], scale: null };
   const priorOps = Array.isArray(prior.ops) ? prior.ops : [];
   annotState = {
     record,
+    deskewView: isDeskewActive(record),
     baseImg,
     canvas,
     ctx: canvas.getContext("2d"),
@@ -2595,16 +2828,25 @@ function openPhotoAnnotator(record) {
     size: 3,
     calloutFill: "white",
     erasing: false,
+    scale: (prior.scale && Number.isFinite(prior.scale.pxPerUnit) && prior.scale.pxPerUnit > 0)
+      ? {
+          pxPerUnit: Number(prior.scale.pxPerUnit),
+          units: String(prior.scale.units || "in"),
+          tagWidth: Number(prior.scale.tagWidth) || null,
+        }
+      : null,
   };
   overlay.querySelector("#annotColor").value = "#ef4444";
   overlay.querySelector("#annotSize").value = 3;
   overlay.querySelector("#annotCalloutFill").value = "white";
   overlay.querySelector("#annotEraser").classList.remove("active");
+  overlay.querySelector("#annotTagWidth").value = String((annotState.scale && Number.isFinite(annotState.scale.tagWidth)) ? annotState.scale.tagWidth : 6);
+  overlay.querySelector("#annotTagUnits").value = (annotState.scale && annotState.scale.units) ? annotState.scale.units : "in";
   setAnnotTool("pen");
   setAnnotColor("#ef4444");
   syncAnnotControls();
 
-  const url = URL.createObjectURL(record.blob);
+  const url = URL.createObjectURL(displayBlob);
   baseImg.src = url;
   baseImg.onload = () => {
     URL.revokeObjectURL(url);
@@ -2623,7 +2865,9 @@ function setAnnotTool(tool) {
   const modal = document.getElementById("photoAnnotatorModal");
   modal.querySelector("#annotPenTool").classList.toggle("active", tool === "pen");
   modal.querySelector("#annotCalloutTool").classList.toggle("active", tool === "callout");
-  if (tool === "pen") annotState.calloutStart = null;
+  modal.querySelector("#annotMeasureLineTool").classList.toggle("active", tool === "measure-line");
+  modal.querySelector("#annotMeasureCurveTool").classList.toggle("active", tool === "measure-curve");
+  if (tool === "pen" || tool === "measure-line" || tool === "measure-curve") annotState.calloutStart = null;
 }
 
 function setAnnotColor(c) {
@@ -2666,6 +2910,55 @@ function syncAnnotControls() {
     modal.querySelector("#annotSize").value = String(annotState.size);
     modal.querySelector("#annotCalloutFill").value = annotState.calloutFill;
   }
+  const units = annotState.scale?.units || "units";
+  const pxPerUnit = annotState.scale?.pxPerUnit;
+  const scaleInfo = modal.querySelector("#annotScaleInfo");
+  if (scaleInfo) {
+    scaleInfo.textContent = Number.isFinite(pxPerUnit) && pxPerUnit > 0
+      ? `Scale: ${(1 / pxPerUnit).toFixed(4)} ${units}/px`
+      : "Scale: unset";
+  }
+}
+
+function averageAprilTagSidePx(detections, widthPx, heightPx) {
+  if (!Array.isArray(detections) || !detections.length || !widthPx || !heightPx) return null;
+  let sum = 0;
+  let count = 0;
+  for (const d of detections) {
+    const corners = Array.isArray(d?.cornersNormalized) ? d.cornersNormalized : [];
+    if (corners.length !== 4) continue;
+    const pts = corners.map((p) => [Number(p.x) * widthPx, Number(p.y) * heightPx]);
+    if (pts.some((p) => !Number.isFinite(p[0]) || !Number.isFinite(p[1]))) continue;
+    for (let i = 0; i < 4; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % 4];
+      sum += Math.hypot(b[0] - a[0], b[1] - a[1]);
+      count += 1;
+    }
+  }
+  return count ? (sum / count) : null;
+}
+
+function setAnnotScaleFromTag() {
+  if (!annotState) return;
+  const modal = document.getElementById("photoAnnotatorModal");
+  const tagWidth = Number(modal.querySelector("#annotTagWidth").value);
+  const unitsRaw = String(modal.querySelector("#annotTagUnits").value || "").trim();
+  const units = unitsRaw || "in";
+  if (!Number.isFinite(tagWidth) || tagWidth <= 0) {
+    setStatus("Enter a valid AprilTag width before setting scale.");
+    return;
+  }
+  const detections = getDisplayAprilTagDetections(annotState.record);
+  const sidePx = averageAprilTagSidePx(detections, annotState.canvas.width, annotState.canvas.height);
+  if (!Number.isFinite(sidePx) || sidePx <= 0) {
+    setStatus("No AprilTag detections available for scale calibration.");
+    return;
+  }
+  annotState.scale = { pxPerUnit: sidePx / tagWidth, units, tagWidth };
+  syncAnnotControls();
+  redrawPhotoOverlay();
+  setStatus(`Scale set from AprilTags: ${tagWidth} ${units} per tag width.`);
 }
 
 function applyAnnotStyleToSelectedCallout() {
@@ -2753,8 +3046,18 @@ function findAnnotOpHit(p) {
   };
   for (let i = annotState.ops.length - 1; i >= 0; i--) {
     const op = annotState.ops[i];
-    if (!op || op.type !== "stroke") continue;
-    const pts = op.points || [];
+    if (!op) continue;
+    if (op.type === "measureLine") {
+      const p1 = Array.isArray(op.p1) ? op.p1 : null;
+      const p2 = Array.isArray(op.p2) ? op.p2 : null;
+      if (!p1 || !p2) continue;
+      if (distSeg(p.x, p.y, p1[0], p1[1], p2[0], p2[1]) <= 10) {
+        return { idx: i, mode: "measureLine", type: "measureLine" };
+      }
+      continue;
+    }
+    const pts = (op.type === "measureCurve") ? (op.points || []) : (op.type === "stroke" ? (op.points || []) : null);
+    if (!pts) continue;
     const r = Math.max(8, (op.size || 3) * 1.3);
     if (pts.length === 1) {
       const dx = p.x - pts[0][0], dy = p.y - pts[0][1];
@@ -2763,7 +3066,7 @@ function findAnnotOpHit(p) {
     }
     for (let j = 1; j < pts.length; j++) {
       if (distSeg(p.x, p.y, pts[j - 1][0], pts[j - 1][1], pts[j][0], pts[j][1]) <= r) {
-        return { idx: i, mode: "stroke", type: "stroke" };
+        return { idx: i, mode: op.type, type: op.type };
       }
     }
   }
@@ -2823,6 +3126,22 @@ function setupPhotoAnnotatorCanvas(canvas) {
       redrawPhotoOverlay();
       return;
     }
+    if (annotState.tool === "measure-line") {
+      annotState.drawing = true;
+      annotState.selectedCalloutIdx = -1;
+      annotState.current = { type: "measureLine", p1: [p.x, p.y], p2: [p.x, p.y] };
+      annotState.ops.push(annotState.current);
+      redrawPhotoOverlay();
+      return;
+    }
+    if (annotState.tool === "measure-curve") {
+      annotState.drawing = true;
+      annotState.selectedCalloutIdx = -1;
+      annotState.current = { type: "measureCurve", points: [[p.x, p.y]] };
+      annotState.ops.push(annotState.current);
+      redrawPhotoOverlay();
+      return;
+    }
     annotState.drawing = true;
     annotState.selectedCalloutIdx = -1;
     annotState.current = {
@@ -2848,7 +3167,11 @@ function setupPhotoAnnotatorCanvas(canvas) {
       return;
     }
     if (!annotState || !annotState.drawing || !annotState.current) return;
-    annotState.current.points.push([p.x, p.y]);
+    if (annotState.current.type === "measureLine") {
+      annotState.current.p2 = [p.x, p.y];
+    } else {
+      annotState.current.points.push([p.x, p.y]);
+    }
     redrawPhotoOverlay();
   });
   canvas.addEventListener("pointerup", (e) => {
@@ -2883,7 +3206,16 @@ function setupPhotoAnnotatorCanvas(canvas) {
       return;
     }
     annotState.drawing = false;
+    if (annotState.current?.type === "measureLine") {
+      const p1 = annotState.current.p1;
+      const p2 = annotState.current.p2;
+      if (!p1 || !p2 || Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) < 2) annotState.ops.pop();
+    } else if (annotState.current?.type === "measureCurve") {
+      const pts = annotState.current.points || [];
+      if (pts.length < 2) annotState.ops.pop();
+    }
     annotState.current = null;
+    redrawPhotoOverlay();
   });
   canvas.addEventListener("pointercancel", () => {
     if (!annotState) return;
@@ -2892,6 +3224,30 @@ function setupPhotoAnnotatorCanvas(canvas) {
     annotState.calloutStart = null;
     annotState.dragCallout = null;
   });
+}
+
+function formatMeasureLabel(pxLength) {
+  if (!annotState?.scale || !Number.isFinite(annotState.scale.pxPerUnit) || annotState.scale.pxPerUnit <= 0) {
+    return `${pxLength.toFixed(1)} px`;
+  }
+  const units = annotState.scale.units || "units";
+  const value = pxLength / annotState.scale.pxPerUnit;
+  return `${value.toFixed(3)} ${units}`;
+}
+
+function drawMeasureLabel(ctx, x, y, text) {
+  ctx.save();
+  ctx.font = "14px Arial, sans-serif";
+  const w = Math.ceil(ctx.measureText(text).width + 10);
+  const h = 22;
+  const bx = Math.max(2, Math.min(ctx.canvas.width - w - 2, x + 8));
+  const by = Math.max(2, Math.min(ctx.canvas.height - h - 2, y + 8));
+  ctx.fillStyle = "rgba(17,24,39,0.8)";
+  ctx.fillRect(bx, by, w, h);
+  ctx.fillStyle = "#f9fafb";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, bx + 5, by + h * 0.5);
+  ctx.restore();
 }
 
 function redrawPhotoOverlay() {
@@ -2977,6 +3333,42 @@ function redrawPhotoOverlay() {
         ctx.fillRect(x - 4, y - 4, 8, 8);
       }
       ctx.restore();
+      continue;
+    }
+    if (op.type === "measureLine") {
+      const p1 = Array.isArray(op.p1) ? op.p1 : null;
+      const p2 = Array.isArray(op.p2) ? op.p2 : null;
+      if (!p1 || !p2) continue;
+      const lenPx = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+      ctx.save();
+      ctx.strokeStyle = "#22d3ee";
+      ctx.fillStyle = "#22d3ee";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(p1[0], p1[1]);
+      ctx.lineTo(p2[0], p2[1]);
+      ctx.stroke();
+      ctx.beginPath(); ctx.arc(p1[0], p1[1], 3, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(p2[0], p2[1], 3, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+      drawMeasureLabel(ctx, (p1[0] + p2[0]) * 0.5, (p1[1] + p2[1]) * 0.5, formatMeasureLabel(lenPx));
+      continue;
+    }
+    if (op.type === "measureCurve") {
+      const pts = op.points || [];
+      if (pts.length < 2) continue;
+      let lenPx = 0;
+      for (let i = 1; i < pts.length; i++) lenPx += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+      ctx.save();
+      ctx.strokeStyle = "#34d399";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.stroke();
+      ctx.restore();
+      const end = pts[pts.length - 1];
+      drawMeasureLabel(ctx, end[0], end[1], formatMeasureLabel(lenPx));
     }
   }
   if (annotState.tool === "callout" && annotState.calloutStart) {
@@ -3001,13 +3393,16 @@ function closePhotoAnnotator() {
 async function savePhotoOverlay() {
   if (!annotState) return;
   const rec = annotState.record;
+  const usingDeskew = !!annotState.deskewView;
   const hasOps = annotState.ops.length > 0;
   let overlayBlob = null;
   if (hasOps) overlayBlob = await canvasToBlob(annotState.canvas, "image/png");
+  const data = hasOps ? { w: annotState.canvas.width, h: annotState.canvas.height, ops: annotState.ops, scale: annotState.scale || null } : null;
   const updated = {
     ...rec,
-    annotationData: hasOps ? { w: annotState.canvas.width, h: annotState.canvas.height, ops: annotState.ops } : null,
-    annotationOverlayBlob: overlayBlob,
+    ...(usingDeskew
+      ? { annotationDataDeskew: data, annotationOverlayBlobDeskew: overlayBlob }
+      : { annotationData: data, annotationOverlayBlob: overlayBlob }),
   };
   await runTransaction("readwrite", (store) => store.put(updated));
   await renderSavedPhotos();
@@ -3050,7 +3445,9 @@ function editSelectedCalloutText() {
 async function removePhotoOverlay() {
   if (!annotState) return;
   const rec = annotState.record;
-  const updated = { ...rec, annotationData: null, annotationOverlayBlob: null };
+  const updated = annotState.deskewView
+    ? { ...rec, annotationDataDeskew: null, annotationOverlayBlobDeskew: null }
+    : { ...rec, annotationData: null, annotationOverlayBlob: null };
   await runTransaction("readwrite", (store) => store.put(updated));
   await renderSavedPhotos();
   closePhotoAnnotator();
@@ -3336,6 +3733,7 @@ async function openBridge(id) {
 
   await loadSavedKml();
   await renderSavedPhotos();
+  if (!stream) void startMainCamera();
   setStatus(`Opened “${b.title || "bridge"}”.`);
 }
 
@@ -4221,25 +4619,55 @@ async function downloadBridgeZip(id) {
   setStatus(`✅ Downloaded “${b.title}” ZIP (${photos.length} item(s)).`);
 }
 
+function isDeskewActive(record) {
+  return !!(record && record.deskewActive && record.deskewBlob);
+}
+
+function getDisplayPhotoBlob(record) {
+  return isDeskewActive(record) ? record.deskewBlob : record.blob;
+}
+
+function getDisplayAnnotationOverlayBlob(record) {
+  return isDeskewActive(record) ? (record.annotationOverlayBlobDeskew || null) : (record.annotationOverlayBlob || null);
+}
+
+function getDisplayAnnotationData(record) {
+  return isDeskewActive(record) ? (record.annotationDataDeskew || null) : (record.annotationData || null);
+}
+
+function getDisplayAprilTags(record) {
+  return isDeskewActive(record) ? (record.aprilTagsDeskew || []) : (record.aprilTags || []);
+}
+
+function getDisplayAprilTagDetections(record) {
+  return isDeskewActive(record) ? (record.aprilTagDetectionsDeskew || []) : (record.aprilTagDetections || []);
+}
+
 // ── Card builder ──────────────────────────────────────────────────────────────
 function buildCard(record, photoNo) {
   const card = photoCardTemplate.content.firstElementChild.cloneNode(true);
   const labels = photoNo || { main: "photo", thermal: "stereo", overlay: "photo-overlay", depth: "depth", ply: "pointcloud" };
+  const displayBlob = getDisplayPhotoBlob(record);
+  const displayOverlayBlob = getDisplayAnnotationOverlayBlob(record);
 
   const mainImg = card.querySelector(".main-img");
-  const mainUrl = URL.createObjectURL(record.blob);
+  const mainWrap = card.querySelector(".photo-img-wrap");
+  const mainUrl = URL.createObjectURL(displayBlob);
   mainImg.src = mainUrl;
-  mainImg.addEventListener("load", () => URL.revokeObjectURL(mainUrl), { once: true });
+  mainImg.addEventListener("load", () => {
+    URL.revokeObjectURL(mainUrl);
+    renderPhotoAprilTagOverlay(mainImg, mainWrap, record);
+  }, { once: true });
 
   const mainBadge = card.querySelector(".photo-img-wrap .img-badge");
   if (mainBadge) {
-    mainBadge.textContent = labels.main;
+    mainBadge.textContent = isDeskewActive(record) ? `${labels.main} (deskewed)` : labels.main;
     if (record.isSketch) mainBadge.style.background = "rgba(124,58,237,.75)";
   }
-  if (record.annotationOverlayBlob) {
+  if (displayOverlayBlob) {
     const overlayImg = document.createElement("img");
     overlayImg.className = "photo-annotation-overlay";
-    const ovUrl = URL.createObjectURL(record.annotationOverlayBlob);
+    const ovUrl = URL.createObjectURL(displayOverlayBlob);
     overlayImg.src = ovUrl;
     overlayImg.alt = "Annotation overlay";
     overlayImg.addEventListener("load", () => URL.revokeObjectURL(ovUrl), { once: true });
@@ -4273,20 +4701,42 @@ function buildCard(record, photoNo) {
   time.textContent = `${labels.main} · ${new Date(record.createdAt).toLocaleString()}`;
 
   renderComment(card.querySelector(".photo-comment-area"), record);
+  renderAprilTagArea(card.querySelector(".photo-apriltag-area"), record);
   renderTagsArea(card.querySelector(".photo-tags-area"), record);
   renderNavArea(card.querySelector(".photo-nav-area"), record);
 
   const dlBtn = card.querySelector(".download-btn");
-  if (record.annotationOverlayBlob) dlBtn.textContent = "⬇ Photo only";
-  dlBtn.addEventListener("click", () => downloadPhoto(record, record.blob, labels.main));
+  if (displayOverlayBlob) dlBtn.textContent = "⬇ Photo only";
+  dlBtn.addEventListener("click", () => downloadPhoto(record, displayBlob, labels.main));
 
   if (!record.isSketch) {
+    const sourceHasTags = Array.isArray(record.aprilTags) && record.aprilTags.length > 0;
+    if (!record.deskewBlob && sourceHasTags) {
+      const deskewBtn = makeButton("📐 Deskew (OpenCV)", "secondary");
+      deskewBtn.addEventListener("click", async () => {
+        await deskewCapturedPhotoOpenCv(record);
+      });
+      card.querySelector(".photo-actions").insertBefore(deskewBtn, card.querySelector(".download-btn"));
+    } else if (record.deskewBlob) {
+      const toggleDeskewBtn = makeButton(isDeskewActive(record) ? "↩ Show original" : "📐 Show deskewed", "secondary");
+      toggleDeskewBtn.addEventListener("click", async () => {
+        await setDeskewView(record, !isDeskewActive(record));
+      });
+      card.querySelector(".photo-actions").insertBefore(toggleDeskewBtn, card.querySelector(".download-btn"));
+
+      const removeDeskewBtn = makeButton("🗑 Remove deskew", "secondary");
+      removeDeskewBtn.addEventListener("click", async () => {
+        await clearDeskewView(record);
+      });
+      card.querySelector(".photo-actions").insertBefore(removeDeskewBtn, card.querySelector(".download-btn"));
+    }
+
     const annotateBtn = makeButton("🖊 Annotate", "secondary");
     annotateBtn.addEventListener("click", () => openPhotoAnnotator(record));
     card.querySelector(".photo-actions").insertBefore(annotateBtn, card.querySelector(".download-btn"));
-    if (record.annotationOverlayBlob) {
+    if (displayOverlayBlob) {
       const dlOverlay = makeButton("⬇ Photo+overlay", "secondary");
-      dlOverlay.addEventListener("click", () => downloadPhoto(record, record.blob, labels.overlay, true, true));
+      dlOverlay.addEventListener("click", () => downloadPhoto(record, displayBlob, labels.overlay, true, true, displayOverlayBlob));
       card.querySelector(".photo-actions").insertBefore(dlOverlay, dlBtn.nextSibling);
     }
     attachCrackTool(card, record);
@@ -4322,11 +4772,12 @@ function buildCard(record, photoNo) {
     setStatus("Photo deleted.");
   });
 
+  if (mainImg.complete) renderPhotoAprilTagOverlay(mainImg, mainWrap, record);
   return card;
 }
 
 // ── Download with EXIF + metadata burn-in ────────────────────────────────────
-async function downloadPhoto(record, blob, stem, burnMeta = true, includeOverlay = false) {
+async function downloadPhoto(record, blob, stem, burnMeta = true, includeOverlay = false, overlayBlob = null) {
   // Stereo/depth images must stay pixel-identical for OpenCV: skip the
   // burned-in footer bar (and EXIF re-encode) entirely for those.
   if (!burnMeta) {
@@ -4337,7 +4788,7 @@ async function downloadPhoto(record, blob, stem, burnMeta = true, includeOverlay
     URL.revokeObjectURL(a.href);
     return;
   }
-  const finalBlob = await annotatePhotoBlob(record, blob, { includeOverlay });
+  const finalBlob = await annotatePhotoBlob(record, blob, { includeOverlay, overlayBlob });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(finalBlob);
   a.download = `${safeStem(stem)}.jpg`;
@@ -4349,15 +4800,16 @@ async function downloadPhoto(record, blob, stem, burnMeta = true, includeOverlay
 // embedded as EXIF. Reused by both single-photo download and the bridge ZIP export.
 async function annotatePhotoBlob(record, blob, opts = {}) {
   const includeOverlay = !!opts.includeOverlay;
+  const overlayBlob = opts.overlayBlob || record.annotationOverlayBlob || null;
   const img    = await loadImage(blob);
   const canvas = document.createElement("canvas");
   canvas.width  = img.naturalWidth;
   canvas.height = img.naturalHeight;
   const ctx = canvas.getContext("2d");
   ctx.drawImage(img, 0, 0);
-  if (includeOverlay && record.annotationOverlayBlob) {
+  if (includeOverlay && overlayBlob) {
     try {
-      const ov = await loadImage(record.annotationOverlayBlob);
+      const ov = await loadImage(overlayBlob);
       ctx.drawImage(ov, 0, 0, canvas.width, canvas.height);
     } catch (e) { console.warn("overlay compose failed:", e); }
   }
@@ -4708,7 +5160,7 @@ function attachCrackTool(card, record) {
 
   async function run() {
     statEl.textContent = "Analyzing\u2026";
-    if (!srcCanvas) srcCanvas = await _blobToAnalysisCanvas(record.blob);
+    if (!srcCanvas) srcCanvas = await _blobToAnalysisCanvas(getDisplayPhotoBlob(record));
     lastResult = detectCracksOnCanvas(srcCanvas, sensitivity, suppressVertical);
     if (overlayEl) overlayEl.remove();
     overlayEl = lastResult.overlay;
@@ -4739,7 +5191,7 @@ function attachCrackTool(card, record) {
 // Composite the red crack overlay onto the full-res photo and download it.
 async function saveCrackOverlay(record, srcCanvas, result) {
   if (!result) return;
-  const img = await loadImage(record.blob);
+  const img = await loadImage(getDisplayPhotoBlob(record));
   const cnv = document.createElement("canvas");
   cnv.width = img.naturalWidth; cnv.height = img.naturalHeight;
   const ctx = cnv.getContext("2d");
@@ -5422,6 +5874,164 @@ function renderComment(container, record) {
   });
 }
 
+function renderPhotoAprilTagOverlay(mainImg, wrap, record) {
+  if (!mainImg || !wrap) return;
+  const raw = getDisplayAprilTagDetections(record);
+  const detections = raw
+    .map((d) => {
+      const cn = Array.isArray(d?.cornersNormalized) ? d.cornersNormalized : [];
+      if (!Number.isFinite(d?.id) || cn.length !== 4) return null;
+      const corners = cn
+        .map((p) => ({ x: Number(p.x), y: Number(p.y) }))
+        .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+      if (corners.length !== 4) return null;
+      return { id: Number(d.id), corners };
+    })
+    .filter(Boolean);
+  let overlay = wrap.querySelector(".photo-apriltag-overlay");
+  if (!detections.length) {
+    if (overlay) overlay.remove();
+    return;
+  }
+  if (!overlay) {
+    overlay = document.createElement("canvas");
+    overlay.className = "photo-apriltag-overlay";
+    wrap.appendChild(overlay);
+  }
+  const w = Math.max(1, mainImg.clientWidth);
+  const h = Math.max(1, mainImg.clientHeight);
+  overlay.width = w;
+  overlay.height = h;
+  overlay.style.left = `${mainImg.offsetLeft}px`;
+  overlay.style.top = `${mainImg.offsetTop}px`;
+  overlay.style.width = `${w}px`;
+  overlay.style.height = `${h}px`;
+  const ctx = overlay.getContext("2d");
+  if (!ctx) return;
+  ctx.clearRect(0, 0, w, h);
+  drawDetections(ctx, detections, (p) => ({ x: p.x * w, y: p.y * h }));
+}
+
+function blobToBase64NoPrefix(blob) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const result = String(fr.result || "");
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    fr.onerror = () => reject(fr.error || new Error("Failed to read blob."));
+    fr.readAsDataURL(blob);
+  });
+}
+
+async function requestDeskewFromOpenCv(blob) {
+  const imgB64 = await blobToBase64NoPrefix(blob);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const resp = await fetch(DESKEW_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageBase64: imgB64 }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) throw new Error(`Deskew service error (${resp.status})`);
+    const out = await resp.json();
+    if (!out || out.ok !== true || !out.imageBase64) {
+      throw new Error(out?.error || "Deskew failed.");
+    }
+    return {
+      blob: base64ToBlob(out.imageBase64, out.mime || "image/jpeg"),
+      markerCount: Number(out.markerCount) || 0,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function deskewCapturedPhotoOpenCv(record) {
+  if (!record?.blob) return;
+  if (!Array.isArray(record.aprilTags) || record.aprilTags.length === 0) {
+    setStatus("Deskew is available only when AprilTags are detected.");
+    return;
+  }
+  try {
+    setStatus("Deskewing photo with OpenCV…");
+    const result = await requestDeskewFromOpenCv(record.blob);
+    const april = await findAprilTagsInBlob(result.blob);
+    record.deskewBlob = result.blob;
+    record.deskewActive = true;
+    record.aprilTagsDeskew = april.ids;
+    record.aprilTagDetectionsDeskew = april.detections.map((d) => ({ id: d.id, cornersNormalized: d.cornersNormalized, hammingDistance: d.hammingDistance }));
+    await runTransaction("readwrite", (s) => s.put(record));
+    await renderSavedPhotos();
+    setStatus(`Deskew view ready (OpenCV, ${result.markerCount} marker${result.markerCount === 1 ? "" : "s"} used). Original retained.`);
+  } catch (e) {
+    if (String(e?.name) === "AbortError") {
+      setStatus("Deskew timed out. Ensure deskew_server.py is running.");
+      return;
+    }
+    setStatus("Deskew failed: " + e.message + " (Run start_servers.bat to start deskew server.)");
+  }
+}
+
+async function setDeskewView(record, active) {
+  if (!record?.id || !record.deskewBlob) return;
+  record.deskewActive = !!active;
+  await runTransaction("readwrite", (s) => s.put(record));
+  await renderSavedPhotos();
+  setStatus(record.deskewActive ? "Showing deskewed view." : "Reverted to original view.");
+}
+
+async function clearDeskewView(record) {
+  if (!record?.id) return;
+  record.deskewBlob = null;
+  record.deskewActive = false;
+  record.aprilTagsDeskew = [];
+  record.aprilTagDetectionsDeskew = [];
+  record.annotationOverlayBlobDeskew = null;
+  record.annotationDataDeskew = null;
+  await runTransaction("readwrite", (s) => s.put(record));
+  await renderSavedPhotos();
+  setStatus("Deskew view removed.");
+}
+
+function renderAprilTagArea(container, record) {
+  if (!container) return;
+  container.innerHTML = "";
+  const ids = [...new Set(getDisplayAprilTags(record).filter((id) => Number.isFinite(id)))].sort((a, b) => a - b);
+  const hdr = makeAreaHeader("🎯 AprilTag", "Re-scan");
+  container.append(hdr.div);
+  if (ids.length) {
+    const p = document.createElement("p");
+    p.className = "area-value";
+    p.textContent = `Tag36h11 id${ids.length > 1 ? "s" : ""}: ${ids.join(", ")}${isDeskewActive(record) ? " (deskewed view)" : ""}`;
+    container.append(p);
+  } else {
+    container.append(makeMuted("No AprilTag detected"));
+  }
+  hdr.btn.addEventListener("click", async () => {
+    try {
+      const scanBlob = getDisplayPhotoBlob(record);
+      const rescan = await findAprilTagsInBlob(scanBlob);
+      const det = rescan.detections.map((d) => ({ id: d.id, cornersNormalized: d.cornersNormalized, hammingDistance: d.hammingDistance }));
+      if (isDeskewActive(record)) {
+        record.aprilTagsDeskew = rescan.ids;
+        record.aprilTagDetectionsDeskew = det;
+      } else {
+        record.aprilTags = rescan.ids;
+        record.aprilTagDetections = det;
+      }
+      await runTransaction("readwrite", (s) => s.put(record));
+      await renderSavedPhotos();
+      setStatus(rescan.ids.length ? `AprilTag updated: ${rescan.ids.join(", ")}` : "No AprilTag found.");
+    } catch (e) {
+      setStatus("AprilTag scan failed: " + e.message);
+    }
+  });
+}
+
 // ── Tags ──────────────────────────────────────────────────────────────────────
 function renderTagsArea(container, record) {
   container.innerHTML = "";
@@ -5711,7 +6321,14 @@ function makeAreaHeader(labelText, btnText) { const d = document.createElement("
 function makeMuted(text) { const p = document.createElement("p"); p.className = "area-value muted"; p.textContent = text; return p; }
 function makeEditStatus() { const p = document.createElement("p"); p.className = "edit-status"; return p; }
 function setStatus(msg) { statusMessage.textContent = msg; }
-function revealFallback(msg) { cameraFallback.hidden = false; captureButton.disabled = true; switchCameraButton.disabled = true; setStatus(msg); }
+function revealFallback(msg) {
+  stopAprilTagPreviewLoop();
+  cameraFallback.hidden = false;
+  captureButton.disabled = true;
+  switchCameraButton.disabled = true;
+  if (apriltagPreviewStatus) apriltagPreviewStatus.textContent = "AprilTag 36h11: camera unavailable.";
+  setStatus(msg);
+}
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 function createId() {

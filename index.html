@@ -18,7 +18,7 @@
   <script src="vendor/togeojson.umd.min.js"></script>
   <!-- docx (Word report generation) -->
   <script src="vendor/docx.umd.js"></script>
-  <link rel="stylesheet" href="styles.css?v=20260716-215200" />
+  <link rel="stylesheet" href="styles.css?v=20260716-221300" />
 </head>
 <body>
 
@@ -71,7 +71,9 @@
       <div class="camera-preview-wrap">
         <span class="camera-label-badge">Main</span>
         <video id="cameraPreview" autoplay playsinline muted></video>
+        <canvas id="apriltagPreviewOverlay"></canvas>
         <div id="cameraFallback">📷 Camera preview will appear here after you start the camera.</div>
+        <div id="apriltagPreviewStatus" class="apriltag-preview-status">AprilTag 36h11: waiting for camera…</div>
       </div>
       <div id="thermalFrame" class="camera-preview-wrap" hidden>
         <span class="camera-label-badge" style="background:rgba(180,60,0,.7);">Thermal / 2nd</span>
@@ -81,6 +83,18 @@
       </div>
     </div>
     <canvas id="snapshotCanvas" hidden></canvas>
+
+    <!-- Camera action buttons -->
+    <div class="actions-row">
+      <button id="startCameraButton">▶ Start Camera</button>
+      <button id="captureButton" disabled>📸 Capture</button>
+      <button id="switchCameraButton" class="secondary" disabled>🔄 Flip</button>
+      <button id="sketchButton" class="secondary">✏ Sketch</button>
+      <label class="secondary" style="padding:7px 14px;border-radius:8px;border:1px solid #334155;background:#273449;font-size:.85rem;font-weight:600;cursor:pointer;">
+        📂 Import
+        <input id="filePicker" type="file" accept="image/*" multiple hidden />
+      </label>
+    </div>
 
     <!-- Main-camera selector (choose which device is the main camera) -->
     <div id="mainCameraSelector" class="camera-selector" hidden>
@@ -157,18 +171,6 @@
         <span id="captureTagsSummary" class="tags-field-hint">No tags selected</span>
       </div>
       <div id="captureTags" hidden></div>
-    </div>
-
-    <!-- Camera action buttons -->
-    <div class="actions-row">
-      <button id="startCameraButton">▶ Start Camera</button>
-      <button id="captureButton" disabled>📸 Capture</button>
-      <button id="switchCameraButton" class="secondary" disabled>🔄 Flip</button>
-      <button id="sketchButton" class="secondary">✏ Sketch</button>
-      <label class="secondary" style="padding:7px 14px;border-radius:8px;border:1px solid #334155;background:#273449;font-size:.85rem;font-weight:600;cursor:pointer;">
-        📂 Import
-        <input id="filePicker" type="file" accept="image/*" multiple hidden />
-      </label>
     </div>
 
     <!-- ── Guided pier scan (photogrammetry burst) ── -->
@@ -332,6 +334,7 @@
     <div class="card-body">
       <time class="card-time"></time>
       <div class="photo-comment-area"></div>
+      <div class="photo-apriltag-area"></div>
       <div class="photo-tags-area"></div>
       <div class="photo-nav-area"></div>
     </div>
@@ -348,6 +351,9 @@
 <script src="basemap.js?v=20260708-145436"></script>
 <script src="vendor/qrcode.min.js?v=20260708-145436"></script>
 <script src="vendor/jsqr.min.js?v=20260709-165000"></script>
-<script src="app.js?v=20260716-215200"></script>
+<script src="vendor/cv.js?v=20260716-211500"></script>
+<script src="vendor/aruco.js?v=20260716-211500"></script>
+<script src="vendor/apriltag_36h11.js?v=20260716-211500"></script>
+<script src="app.js?v=20260716-221300"></script>
 </body>
 </html>

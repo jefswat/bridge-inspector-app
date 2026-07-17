@@ -1,4 +1,4 @@
-const CACHE_NAME = "photo-vault-v66";
+const CACHE_NAME = "photo-vault-v73";
 const ASSETS = [
   "./",
   "./index.html",
@@ -18,7 +18,10 @@ const ASSETS = [
   "./vendor/togeojson.umd.min.js",
   "./vendor/docx.umd.js",
   "./vendor/qrcode.min.js",
-  "./vendor/jsqr.min.js"
+  "./vendor/jsqr.min.js",
+  "./vendor/cv.js",
+  "./vendor/aruco.js",
+  "./vendor/apriltag_36h11.js"
 ];
 
 self.addEventListener("install", (e) => {
@@ -46,17 +49,36 @@ self.addEventListener("fetch", (e) => {
         const clone = r.clone();
         caches.open(CACHE_NAME).then((c) => c.put(e.request, clone));
         return r;
-      }).catch(() => caches.match(e.request))
+      }).catch(async () => {
+        const cached = await caches.match(e.request, { ignoreSearch: true });
+        return cached || Response.error();
+      })
     );
     return;
   }
   // Local assets: cache-first
   e.respondWith(
-    caches.match(e.request).then((cached) =>
-      cached ?? fetch(e.request).then((r) => {
+    (async () => {
+      // ignoreSearch lets styles.css?v=... resolve to cached ./styles.css
+      const cached =
+        (await caches.match(e.request, { ignoreSearch: true })) ||
+        (await caches.match(url.pathname, { ignoreSearch: true })) ||
+        (await caches.match("." + url.pathname, { ignoreSearch: true }));
+      if (cached) return cached;
+      try {
+        const r = await fetch(e.request);
         caches.open(CACHE_NAME).then((c) => c.put(e.request, r.clone()));
         return r;
-      })
-    )
+      } catch {
+        if (e.request.mode === "navigate") {
+          return (
+            (await caches.match("./index.html", { ignoreSearch: true })) ||
+            (await caches.match("./", { ignoreSearch: true })) ||
+            Response.error()
+          );
+        }
+        return new Response("", { status: 503, statusText: "Offline (asset not cached)" });
+      }
+    })()
   );
 });
