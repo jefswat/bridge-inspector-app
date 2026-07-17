@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-16 22:43:00";
+const BUILD_STAMP = "2026-07-16 22:46:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -6042,6 +6042,23 @@ function canvasToJpegBlob(canvas, quality = 0.92) {
   });
 }
 
+function rotateCanvasImage(srcCanvas, angleRad, bg = "#000") {
+  const w = srcCanvas.width;
+  const h = srcCanvas.height;
+  const outCanvas = document.createElement("canvas");
+  outCanvas.width = w;
+  outCanvas.height = h;
+  const ctx = outCanvas.getContext("2d");
+  if (!ctx) throw new Error("Could not render deskew output.");
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, w, h);
+  ctx.translate(w / 2, h / 2);
+  ctx.rotate(angleRad);
+  ctx.drawImage(srcCanvas, -w / 2, -h / 2);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  return outCanvas;
+}
+
 async function requestDeskewFromOpenCv(blob, existingDetections = []) {
   const bmp = await createImageBitmap(blob);
   try {
@@ -6059,23 +6076,25 @@ async function requestDeskewFromOpenCv(blob, existingDetections = []) {
     const detected = (Array.isArray(existingDetections) && existingDetections.length)
       ? existingDetections
       : findAprilTagsInCanvas(srcCanvas, 960).detections;
-    const angle = dominantDeskewAngleFromDetections(detected, sw, sh);
-    if (!Number.isFinite(angle)) throw new Error("No AprilTag corners available for deskew.");
-    const outCanvas = document.createElement("canvas");
-    outCanvas.width = sw;
-    outCanvas.height = sh;
-    const outCtx = outCanvas.getContext("2d");
-    if (!outCtx) throw new Error("Could not render deskew output.");
-    outCtx.fillStyle = "#000";
-    outCtx.fillRect(0, 0, sw, sh);
-    outCtx.translate(sw / 2, sh / 2);
-    outCtx.rotate(-angle);
-    outCtx.drawImage(srcCanvas, -sw / 2, -sh / 2);
-    outCtx.setTransform(1, 0, 0, 1, 0, 0);
+    const baseAngle = dominantDeskewAngleFromDetections(detected, sw, sh);
+    if (!Number.isFinite(baseAngle)) throw new Error("No AprilTag corners available for deskew.");
+    const candidates = [
+      { correction: -baseAngle, canvas: rotateCanvasImage(srcCanvas, -baseAngle) },
+      { correction: baseAngle, canvas: rotateCanvasImage(srcCanvas, baseAngle) },
+    ];
+    let best = null;
+    for (const c of candidates) {
+      const redetected = findAprilTagsInCanvas(c.canvas, 960).detections;
+      const residual = dominantDeskewAngleFromDetections(redetected, c.canvas.width, c.canvas.height);
+      const score = Number.isFinite(residual) ? Math.abs(residual) : 999;
+      if (!best || score < best.score) best = { ...c, score, residual, markerCount: redetected.length || detected.length };
+    }
+    const outCanvas = best?.canvas || candidates[0].canvas;
+    const used = Number.isFinite(best?.correction) ? best.correction : (-baseAngle);
     return {
       blob: await canvasToJpegBlob(outCanvas),
-      markerCount: detected.length,
-      angleDeg: (-angle * 180) / Math.PI,
+      markerCount: Number(best?.markerCount) || detected.length,
+      angleDeg: (used * 180) / Math.PI,
     };
   } finally {
     bmp.close?.();
