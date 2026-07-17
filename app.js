@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-17 09:37:00";
+const BUILD_STAMP = "2026-07-17 09:50:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -4541,6 +4541,7 @@ async function downloadBridgeZip(id) {
   const root = zip.folder(safe(b.title));
 
   const manifest = {
+    bridgeId: b.id,
     title: b.title,
     description: b.description || "",
     reportConfig: b.reportConfig || null,
@@ -4689,15 +4690,36 @@ async function importBridgeZipFile(file) {
     const prefix = metadataEntry.name.slice(0, Math.max(0, metadataEntry.name.lastIndexOf("/") + 1));
     const nowIso = new Date().toISOString();
     const bridgeTitle = String(manifest?.title || "Imported bridge").trim() || "Imported bridge";
-    const bridgeId = createId();
-    const bridgeRec = {
-      id: bridgeId,
-      title: bridgeTitle,
-      description: String(manifest?.description || ""),
-      createdAt: String(manifest?.createdAt || nowIso),
-      reportConfig: manifest?.reportConfig || null,
-      kml: null,
-    };
+    const sourceBridgeId = typeof manifest?.bridgeId === "string" && manifest.bridgeId.trim()
+      ? manifest.bridgeId.trim()
+      : null;
+    const allBridges = (await getAllBridges()) || [];
+    let bridgeRec = null;
+    let mergeMode = false;
+    if (sourceBridgeId) {
+      bridgeRec = await getBridgeRec(sourceBridgeId);
+      mergeMode = !!bridgeRec;
+    }
+    if (!bridgeRec) {
+      const titleNorm = bridgeTitle.toLowerCase();
+      bridgeRec = allBridges.find((b) => String(b?.title || "").trim().toLowerCase() === titleNorm) || null;
+      mergeMode = !!bridgeRec;
+    }
+    if (!bridgeRec) {
+      bridgeRec = {
+        id: sourceBridgeId || createId(),
+        title: bridgeTitle,
+        description: String(manifest?.description || ""),
+        createdAt: String(manifest?.createdAt || nowIso),
+        reportConfig: manifest?.reportConfig || null,
+        kml: null,
+      };
+    } else {
+      if (!bridgeRec.title) bridgeRec.title = bridgeTitle;
+      if (!bridgeRec.description && manifest?.description) bridgeRec.description = String(manifest.description);
+      if (!bridgeRec.createdAt) bridgeRec.createdAt = String(manifest?.createdAt || nowIso);
+      if (!bridgeRec.reportConfig && manifest?.reportConfig) bridgeRec.reportConfig = manifest.reportConfig;
+    }
 
     const overlayEntry = Object.values(zip.files).find((e) =>
       !e.dir &&
@@ -4709,18 +4731,34 @@ async function importBridgeZipFile(file) {
         const overlayBlob = await overlayEntry.async("blob");
         const overlayName = overlayEntry.name.split("/").pop() || "overlay.kmz";
         const overlayFile = new File([overlayBlob], overlayName, { type: /\.kmz$/i.test(overlayName) ? "application/vnd.google-earth.kmz" : "application/vnd.google-earth.kml+xml" });
-        bridgeRec.kml = await parseKmzToOverlay(overlayFile);
+        const parsed = await parseKmzToOverlay(overlayFile);
+        if (!bridgeRec.kml) bridgeRec.kml = parsed;
       } catch (e) {
         console.warn("overlay parse on import failed:", e);
       }
     }
 
     await putBridgeRec(bridgeRec);
+    const existingForBridge = (await runTransaction("readonly", (s) => s.getAll()))
+      .filter((r) => r && r.bridgeId === bridgeRec.id && !r.isScanFrame && !r.isScanSession);
+    const existingIds = new Set(existingForBridge.map((r) => String(r.id)));
+    const existingSourceKeys = new Set(
+      existingForBridge
+        .map((r) => (r.sourceBridgeId && r.sourcePhotoId) ? `${r.sourceBridgeId}::${r.sourcePhotoId}` : null)
+        .filter(Boolean)
+    );
     const importedPhotos = Array.isArray(manifest?.photos) ? manifest.photos.slice() : [];
     importedPhotos.sort((a, b) => (Number(a?.seq) || 0) - (Number(b?.seq) || 0));
     let importedCount = 0;
+    let skippedCount = 0;
 
     for (const p of importedPhotos) {
+      const sourcePhotoId = typeof p?.id === "string" && p.id.trim() ? p.id.trim() : null;
+      const sourceKey = (sourceBridgeId && sourcePhotoId) ? `${sourceBridgeId}::${sourcePhotoId}` : null;
+      if (mergeMode) {
+        if (sourcePhotoId && existingIds.has(sourcePhotoId)) { skippedCount += 1; continue; }
+        if (sourceKey && existingSourceKeys.has(sourceKey)) { skippedCount += 1; continue; }
+      }
       const files = Array.isArray(p?.files) ? p.files.filter((x) => typeof x === "string") : [];
       const imageFiles = files.filter((f) => /^images\//i.test(f));
       const mainPath = imageFiles.find((f) => !/-deskew\.jpg$/i.test(f) && !/-overlay(-deskew)?\.png$/i.test(f) && !/-depth\./i.test(f) && !/-b\./i.test(f))
@@ -4748,8 +4786,10 @@ async function importBridgeZipFile(file) {
         : null;
 
       const rec = {
-        id: createId(),
-        bridgeId,
+        id: (mergeMode && sourcePhotoId && !existingIds.has(sourcePhotoId)) ? sourcePhotoId : createId(),
+        bridgeId: bridgeRec.id,
+        sourceBridgeId: sourceBridgeId || null,
+        sourcePhotoId,
         createdAt: String(p?.capturedAt || nowIso),
         comment: String(p?.comment || ""),
         location: loc,
@@ -4774,11 +4814,15 @@ async function importBridgeZipFile(file) {
         annotationOverlayBlobDeskew: annotationOverlayBlobDeskew || null,
       };
       await runTransaction("readwrite", (s) => s.put(rec));
+      existingIds.add(String(rec.id));
+      if (sourceKey) existingSourceKeys.add(sourceKey);
       importedCount += 1;
     }
 
     showBridgesOverview();
-    setStatus(`✅ Imported ZIP: “${bridgeRec.title}” (${importedCount} item(s)).`);
+    const op = mergeMode ? "Merged ZIP into" : "Imported ZIP as";
+    const skippedMsg = skippedCount ? `, ${skippedCount} duplicate${skippedCount === 1 ? "" : "s"} skipped` : "";
+    setStatus(`✅ ${op} “${bridgeRec.title}” (${importedCount} item(s) added${skippedMsg}).`);
   } catch (e) {
     console.warn("bridge ZIP import failed:", e);
     setStatus("ZIP import failed: " + (e?.message || e));
