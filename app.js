@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-09 17:20:00";
+const BUILD_STAMP = "2026-07-16 21:52:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
