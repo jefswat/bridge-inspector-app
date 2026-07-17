@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-16 22:13:00";
+const BUILD_STAMP = "2026-07-16 22:29:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -201,7 +201,6 @@ let aprilPreviewLoopId     = null;
 let aprilPreviewBusy       = false;
 const APRIL_PREVIEW_MAX_DIM = 420;
 const APRIL_PREVIEW_INTERVAL_MS = 1200;
-const DESKEW_API_URL = "http://localhost:8766/deskew";
 
 // ── Guided scan (photogrammetry burst) state ──────────────────────────────────
 let scanActive     = false;
@@ -5925,28 +5924,171 @@ function blobToBase64NoPrefix(blob) {
   });
 }
 
-async function requestDeskewFromOpenCv(blob) {
-  const imgB64 = await blobToBase64NoPrefix(blob);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30000);
-  try {
-    const resp = await fetch(DESKEW_API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ imageBase64: imgB64 }),
-      signal: controller.signal,
-    });
-    if (!resp.ok) throw new Error(`Deskew service error (${resp.status})`);
-    const out = await resp.json();
-    if (!out || out.ok !== true || !out.imageBase64) {
-      throw new Error(out?.error || "Deskew failed.");
+function solveLinearSystem(a, b) {
+  const n = b.length;
+  const m = a.map((row, i) => [...row, b[i]]);
+  for (let col = 0; col < n; col++) {
+    let pivot = col;
+    for (let row = col + 1; row < n; row++) {
+      if (Math.abs(m[row][col]) > Math.abs(m[pivot][col])) pivot = row;
     }
-    return {
-      blob: base64ToBlob(out.imageBase64, out.mime || "image/jpeg"),
-      markerCount: Number(out.markerCount) || 0,
-    };
+    if (Math.abs(m[pivot][col]) < 1e-10) return null;
+    if (pivot !== col) [m[col], m[pivot]] = [m[pivot], m[col]];
+    const div = m[col][col];
+    for (let j = col; j <= n; j++) m[col][j] /= div;
+    for (let row = 0; row < n; row++) {
+      if (row === col) continue;
+      const f = m[row][col];
+      if (!f) continue;
+      for (let j = col; j <= n; j++) m[row][j] -= f * m[col][j];
+    }
+  }
+  return m.map((row) => row[n]);
+}
+
+function invert3x3(m) {
+  const [a, b, c, d, e, f, g, h, i] = m;
+  const A = e * i - f * h;
+  const B = c * h - b * i;
+  const C = b * f - c * e;
+  const D = f * g - d * i;
+  const E = a * i - c * g;
+  const F = c * d - a * f;
+  const G = d * h - e * g;
+  const H = b * g - a * h;
+  const I = a * e - b * d;
+  const det = a * A + b * D + c * G;
+  if (Math.abs(det) < 1e-10) return null;
+  return [A / det, B / det, C / det, D / det, E / det, F / det, G / det, H / det, I / det];
+}
+
+function inferDeskewQuadFromDetections(detections, width, height) {
+  const pts = [];
+  for (const d of detections || []) {
+    const cn = Array.isArray(d?.cornersNormalized) ? d.cornersNormalized : [];
+    if (cn.length !== 4) continue;
+    for (const p of cn) {
+      const x = Number(p?.x) * width;
+      const y = Number(p?.y) * height;
+      if (Number.isFinite(x) && Number.isFinite(y)) pts.push({ x, y });
+    }
+  }
+  if (pts.length < 4) return null;
+  let tl = pts[0], tr = pts[0], br = pts[0], bl = pts[0];
+  for (const p of pts) {
+    if ((p.x + p.y) < (tl.x + tl.y)) tl = p;
+    if ((p.x - p.y) > (tr.x - tr.y)) tr = p;
+    if ((p.x + p.y) > (br.x + br.y)) br = p;
+    if ((p.x - p.y) < (bl.x - bl.y)) bl = p;
+  }
+  return [tl, tr, br, bl];
+}
+
+function homographyQuadToRect(srcQuad, outW, outH) {
+  const dst = [
+    { x: 0, y: 0 },
+    { x: outW - 1, y: 0 },
+    { x: outW - 1, y: outH - 1 },
+    { x: 0, y: outH - 1 },
+  ];
+  const a = [];
+  const b = [];
+  for (let i = 0; i < 4; i++) {
+    const x = srcQuad[i].x;
+    const y = srcQuad[i].y;
+    const u = dst[i].x;
+    const v = dst[i].y;
+    a.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+    a.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+  }
+  const h = solveLinearSystem(a, b);
+  if (!h) return null;
+  return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+}
+
+function warpImageDataProjective(srcImageData, outW, outH, hInv) {
+  const sw = srcImageData.width;
+  const sh = srcImageData.height;
+  const src = srcImageData.data;
+  const tmpCanvas = document.createElement("canvas");
+  tmpCanvas.width = outW;
+  tmpCanvas.height = outH;
+  const tmpCtx = tmpCanvas.getContext("2d");
+  if (!tmpCtx) throw new Error("Could not allocate deskew image buffer.");
+  const out = tmpCtx.createImageData(outW, outH);
+  const dst = out.data;
+  const [h0, h1, h2, h3, h4, h5, h6, h7, h8] = hInv;
+  let di = 0;
+  for (let y = 0; y < outH; y++) {
+    for (let x = 0; x < outW; x++) {
+      const w = h6 * x + h7 * y + h8;
+      if (Math.abs(w) < 1e-9) { di += 4; continue; }
+      const sx = (h0 * x + h1 * y + h2) / w;
+      const sy = (h3 * x + h4 * y + h5) / w;
+      if (sx < 0 || sy < 0 || sx >= (sw - 1) || sy >= (sh - 1)) { di += 4; continue; }
+      const x0 = Math.floor(sx), y0 = Math.floor(sy);
+      const x1 = x0 + 1, y1 = y0 + 1;
+      const dx = sx - x0, dy = sy - y0;
+      const w00 = (1 - dx) * (1 - dy), w10 = dx * (1 - dy), w01 = (1 - dx) * dy, w11 = dx * dy;
+      const i00 = (y0 * sw + x0) * 4, i10 = (y0 * sw + x1) * 4, i01 = (y1 * sw + x0) * 4, i11 = (y1 * sw + x1) * 4;
+      dst[di] = Math.round(src[i00] * w00 + src[i10] * w10 + src[i01] * w01 + src[i11] * w11);
+      dst[di + 1] = Math.round(src[i00 + 1] * w00 + src[i10 + 1] * w10 + src[i01 + 1] * w01 + src[i11 + 1] * w11);
+      dst[di + 2] = Math.round(src[i00 + 2] * w00 + src[i10 + 2] * w10 + src[i01 + 2] * w01 + src[i11 + 2] * w11);
+      dst[di + 3] = Math.round(src[i00 + 3] * w00 + src[i10 + 3] * w10 + src[i01 + 3] * w01 + src[i11 + 3] * w11);
+      di += 4;
+    }
+  }
+  return out;
+}
+
+function canvasToJpegBlob(canvas, quality = 0.92) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Failed to encode deskewed image."))), "image/jpeg", quality);
+  });
+}
+
+async function requestDeskewFromOpenCv(blob, existingDetections = []) {
+  const bmp = await createImageBitmap(blob);
+  try {
+    const maxDim = 1600;
+    const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+    const sw = Math.max(1, Math.round(bmp.width * scale));
+    const sh = Math.max(1, Math.round(bmp.height * scale));
+    const srcCanvas = document.createElement("canvas");
+    srcCanvas.width = sw;
+    srcCanvas.height = sh;
+    const srcCtx = srcCanvas.getContext("2d", { willReadFrequently: true });
+    if (!srcCtx) throw new Error("Could not access image data for deskew.");
+    srcCtx.drawImage(bmp, 0, 0, sw, sh);
+
+    const detected = (Array.isArray(existingDetections) && existingDetections.length)
+      ? existingDetections
+      : findAprilTagsInCanvas(srcCanvas, 960).detections;
+    const quad = inferDeskewQuadFromDetections(detected, sw, sh);
+    if (!quad) throw new Error("No AprilTag corners available for deskew.");
+
+    const top = Math.hypot(quad[1].x - quad[0].x, quad[1].y - quad[0].y);
+    const bot = Math.hypot(quad[2].x - quad[3].x, quad[2].y - quad[3].y);
+    const left = Math.hypot(quad[3].x - quad[0].x, quad[3].y - quad[0].y);
+    const right = Math.hypot(quad[2].x - quad[1].x, quad[2].y - quad[1].y);
+    const outW = Math.max(128, Math.min(2200, Math.round((top + bot) / 2)));
+    const outH = Math.max(128, Math.min(2200, Math.round((left + right) / 2)));
+    const h = homographyQuadToRect(quad, outW, outH);
+    if (!h) throw new Error("Could not compute deskew transform.");
+    const hInv = invert3x3(h);
+    if (!hInv) throw new Error("Deskew transform was singular.");
+
+    const srcImageData = srcCtx.getImageData(0, 0, sw, sh);
+    const warped = warpImageDataProjective(srcImageData, outW, outH, hInv);
+    const outCanvas = document.createElement("canvas");
+    outCanvas.width = outW;
+    outCanvas.height = outH;
+    const outCtx = outCanvas.getContext("2d");
+    if (!outCtx) throw new Error("Could not render deskew output.");
+    outCtx.putImageData(warped, 0, 0);
+    return { blob: await canvasToJpegBlob(outCanvas), markerCount: detected.length };
   } finally {
-    clearTimeout(timer);
+    bmp.close?.();
   }
 }
 
@@ -5957,8 +6099,9 @@ async function deskewCapturedPhotoOpenCv(record) {
     return;
   }
   try {
-    setStatus("Deskewing photo with OpenCV…");
-    const result = await requestDeskewFromOpenCv(record.blob);
+    setStatus("Deskewing photo…");
+    const existingDetections = Array.isArray(record.aprilTagDetections) ? record.aprilTagDetections : [];
+    const result = await requestDeskewFromOpenCv(record.blob, existingDetections);
     const april = await findAprilTagsInBlob(result.blob);
     record.deskewBlob = result.blob;
     record.deskewActive = true;
@@ -5966,13 +6109,9 @@ async function deskewCapturedPhotoOpenCv(record) {
     record.aprilTagDetectionsDeskew = april.detections.map((d) => ({ id: d.id, cornersNormalized: d.cornersNormalized, hammingDistance: d.hammingDistance }));
     await runTransaction("readwrite", (s) => s.put(record));
     await renderSavedPhotos();
-    setStatus(`Deskew view ready (OpenCV, ${result.markerCount} marker${result.markerCount === 1 ? "" : "s"} used). Original retained.`);
+    setStatus(`Deskew view ready (${result.markerCount} marker${result.markerCount === 1 ? "" : "s"} used). Original retained.`);
   } catch (e) {
-    if (String(e?.name) === "AbortError") {
-      setStatus("Deskew timed out. Ensure deskew_server.py is running.");
-      return;
-    }
-    setStatus("Deskew failed: " + e.message + " (Run start_servers.bat to start deskew server.)");
+    setStatus("Deskew failed: " + e.message);
   }
 }
 
