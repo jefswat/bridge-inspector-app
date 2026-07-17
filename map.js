@@ -1,4 +1,5 @@
-const BUILD_STAMP = "2026-07-06 09:30:00";
+const BUILD_VERSION = "v94";
+const BUILD_STAMP = "2026-07-17 12:13:00";
 
 // ── Photo tags (mirror of app.js) ─────────────────────────────────────────────
 const TAG_CATEGORIES = [
@@ -45,7 +46,7 @@ init().catch((e) => { summaryStatus.textContent = "Startup failed: " + e.message
 
 async function init() {
   const bs = document.getElementById("buildStamp");
-  if (bs) bs.textContent = "build " + BUILD_STAMP;
+  if (bs) bs.textContent = `build ${BUILD_VERSION} · ${BUILD_STAMP}`;
 
   summaryMap = L.map("summaryMap", { scrollWheelZoom: true, maxZoom: 22 });
   addEsriBasemap(summaryMap);

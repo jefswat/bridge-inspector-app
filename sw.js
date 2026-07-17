@@ -1,4 +1,4 @@
-const CACHE_NAME = "photo-vault-v80";
+const CACHE_NAME = "photo-vault-v94";
 const ASSETS = [
   "./",
   "./index.html",
@@ -56,6 +56,27 @@ self.addEventListener("fetch", (e) => {
     );
     return;
   }
+  // HTML navigations: network-first to avoid stale page/app mismatches.
+  if (e.request.mode === "navigate") {
+    e.respondWith(
+      (async () => {
+        try {
+          const r = await fetch(e.request);
+          const clone = r.clone();
+          caches.open(CACHE_NAME).then((c) => c.put(e.request, clone));
+          return r;
+        } catch {
+          return (
+            (await caches.match(e.request, { ignoreSearch: true })) ||
+            (await caches.match("./index.html", { ignoreSearch: true })) ||
+            (await caches.match("./", { ignoreSearch: true })) ||
+            Response.error()
+          );
+        }
+      })()
+    );
+    return;
+  }
   // Local assets: cache-first
   e.respondWith(
     (async () => {
@@ -67,16 +88,10 @@ self.addEventListener("fetch", (e) => {
       if (cached) return cached;
       try {
         const r = await fetch(e.request);
-        caches.open(CACHE_NAME).then((c) => c.put(e.request, r.clone()));
+        const clone = r.clone();
+        caches.open(CACHE_NAME).then((c) => c.put(e.request, clone));
         return r;
       } catch {
-        if (e.request.mode === "navigate") {
-          return (
-            (await caches.match("./index.html", { ignoreSearch: true })) ||
-            (await caches.match("./", { ignoreSearch: true })) ||
-            Response.error()
-          );
-        }
         return new Response("", { status: 503, statusText: "Offline (asset not cached)" });
       }
     })()

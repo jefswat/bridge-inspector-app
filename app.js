@@ -1,4 +1,5 @@
-const BUILD_STAMP = "2026-07-17 09:50:00";
+const BUILD_VERSION = "v94";
+const BUILD_STAMP = "2026-07-17 12:13:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -82,6 +83,15 @@ const apriltagPreviewStatus = document.getElementById("apriltagPreviewStatus");
 const snapshotCanvas     = document.getElementById("snapshotCanvas");
 const statusMessage      = document.getElementById("statusMessage");
 const installButton      = document.getElementById("installButton");
+const openSettingsButton = document.getElementById("openSettingsButton");
+const closeSettingsButton= document.getElementById("closeSettingsButton");
+const settingsModal      = document.getElementById("settingsModal");
+const settingsClearCacheBtn = document.getElementById("settingsClearCacheBtn");
+const newImageButton     = document.getElementById("newImageButton");
+const captureModal       = document.getElementById("captureModal");
+const captureModalTitle  = document.getElementById("captureModalTitle");
+const cancelCaptureButton= document.getElementById("cancelCaptureButton");
+const scanViewerPanel    = document.getElementById("scanViewerPanel");
 const startCameraButton  = document.getElementById("startCameraButton");
 const captureButton      = document.getElementById("captureButton");
 const switchCameraButton = document.getElementById("switchCameraButton");
@@ -226,10 +236,19 @@ const _scanSmallCanvas = document.createElement("canvas");
 const _scanMedCanvas   = document.createElement("canvas");
 
 function renderCaptureTags() {
-  if (captureTagsSummary) {
-    const flat = tagsToFlatString(captureTags);
-    captureTagsSummary.textContent = flat || "No tags selected";
-  }
+  if (!captureTagsSummary) return;
+  const flat = tagsToFlatString(captureTags);
+  captureTagsSummary.textContent = flat || "No tags selected";
+}
+
+function getCaptureComment() {
+  return (commentInput?.value || "").trim();
+}
+
+function clearCaptureDraft() {
+  if (commentInput) commentInput.value = "";
+  captureTags = emptyTags();
+  renderCaptureTags();
 }
 
 function openCaptureTagsModal() {
@@ -281,17 +300,21 @@ function openCaptureTagsModal() {
 const leafletInstances = new Map();
 
 captureButton.disabled      = true;
-switchCameraButton.disabled = true;
+if (switchCameraButton) switchCameraButton.disabled = true;
 clearAllButton.disabled     = true;
 if (wordReportButton) wordReportButton.disabled = true;
 
-init().catch((err) => setStatus(`Startup failed: ${err.message}`));
+init().catch((err) => {
+  console.error("Startup failed:", err);
+  try { showBridgesOverview(); } catch (e) { console.warn("Recovery failed:", e); }
+  setStatus(`Startup failed: ${err.message}`);
+});
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
   const bs = document.getElementById('buildStamp');
-  if (bs) bs.textContent = 'build ' + BUILD_STAMP;
-  console.log('Photo Vault build', BUILD_STAMP);
+  if (bs) bs.textContent = `build ${BUILD_VERSION} · ${BUILD_STAMP}`;
+  console.log("Photo Vault build", BUILD_VERSION, BUILD_STAMP);
   renderCaptureTags();
   updatePeerTransferUi();
   db = await openDatabase();
@@ -302,13 +325,26 @@ async function init() {
     apriltagPreviewStatus.textContent = "AprilTag 36h11: detector library not loaded.";
   }
 
+  await recoverPrimaryView();
+  setStatus("Ready.");
+}
+
+async function recoverPrimaryView() {
+  if (!db) db = await openDatabase();
+  try {
+    bridges = (await getAllBridges()) || [];
+  } catch (e) {
+    console.warn("Reopening database after restore:", e);
+    db = await openDatabase();
+    bridges = (await getAllBridges()) || [];
+  }
   const last = localStorage.getItem(ACTIVE_BRIDGE_KEY);
   if (last && bridges.some((b) => b.id === last)) {
     await openBridge(last);
-  } else {
-    showBridgesOverview();
+    return;
   }
-  setStatus("Ready.");
+  showBridgesOverview();
+  await renderBridgesList();
 }
 
 // Load bridges; migrate any pre-existing photos/overlay into a default bridge.
@@ -339,11 +375,80 @@ async function ensureBridges() {
 
 function activeBridge() { return bridges.find((b) => b.id === activeBridgeId) || null; }
 
+function openSettingsModal() {
+  if (!settingsModal) return;
+  settingsModal.hidden = false;
+}
+
+function closeSettingsModal() {
+  if (!settingsModal) return;
+  settingsModal.hidden = true;
+}
+
+function setCaptureModalMode(scanMode) {
+  const isScan = !!scanMode;
+  if (captureModalTitle) captureModalTitle.textContent = isScan ? "🎞 Guided scan" : "📸 New image";
+  if (captureButton) captureButton.hidden = isScan;
+  if (scanViewerPanel) scanViewerPanel.hidden = !isScan;
+  const dialog = captureModal?.querySelector(".capture-dialog");
+  if (dialog) dialog.classList.toggle("scan-mode", isScan);
+}
+
+async function openCaptureModal(opts = {}) {
+  const scanMode = !!opts.scanMode;
+  if (!captureModal) return;
+  setCaptureModalMode(scanMode);
+  captureModal.hidden = false;
+  if (!stream) await startMainCamera();
+  if (!scanMode) void acquireGeoAndHeading();
+}
+
+function closeCaptureModal() {
+  if (!captureModal) return;
+  captureModal.hidden = true;
+  setCaptureModalMode(false);
+}
+
+async function clearCacheAndReloadFlow() {
+  if (!confirm("Clear app cache and reload?")) return;
+  if (confirm("Export active bridge ZIP before reload so you can re-import after update?")) {
+    if (activeBridgeId) {
+      await downloadBridgeZip(activeBridgeId);
+    } else {
+      setStatus("Open a bridge first if you want a ZIP export before reload.");
+    }
+  }
+  try {
+    const regs = await navigator.serviceWorker?.getRegistrations() || [];
+    await Promise.all(regs.map((r) => r.unregister()));
+    const keys = await caches.keys();
+    await Promise.all(keys.map((k) => caches.delete(k)));
+  } catch (e) {
+    console.warn("cache clear:", e);
+  }
+  location.reload(true);
+}
+
 // ── Events ────────────────────────────────────────────────────────────────────
 function registerEvents() {
-  startCameraButton.addEventListener("click",  () => startMainCamera());
+  if (openSettingsButton) openSettingsButton.addEventListener("click", () => openSettingsModal());
+  if (closeSettingsButton) closeSettingsButton.addEventListener("click", () => closeSettingsModal());
+  if (settingsModal) settingsModal.addEventListener("click", (e) => {
+    if (e.target === settingsModal) closeSettingsModal();
+  });
+  if (newImageButton) newImageButton.addEventListener("click", () => { void openCaptureModal({ scanMode: false }); });
+  if (cancelCaptureButton) cancelCaptureButton.addEventListener("click", async () => {
+    if (scanActive) await finishScanSession({ cancelled: true, discard: true });
+    else closeCaptureModal();
+  });
+  if (captureModal) captureModal.addEventListener("click", (e) => {
+    if (e.target !== captureModal) return;
+    if (scanActive) { void finishScanSession({ cancelled: true, discard: true }); return; }
+    closeCaptureModal();
+  });
+  if (startCameraButton) startCameraButton.addEventListener("click",  () => startMainCamera());
   captureButton.addEventListener("click",      () => capturePhoto());
-  switchCameraButton.addEventListener("click", () => {
+  if (switchCameraButton) switchCameraButton.addEventListener("click", () => {
     facingMode = facingMode === "environment" ? "user" : "environment";
     // Flip means "use front/rear facing" — clear any explicit device pick so
     // facingMode drives selection again.
@@ -420,7 +525,7 @@ function registerEvents() {
   const editBridgeBtn = document.getElementById("editBridgeButton");
   if (editBridgeBtn) editBridgeBtn.addEventListener("click", () => { const b = activeBridge(); if (b) openBridgeEditor(b); });
   if (wordReportButton) wordReportButton.addEventListener("click", () => generateWordReport());
-  acquireGeoButton.addEventListener("click", () => acquireGeoAndHeading());
+  if (acquireGeoButton) acquireGeoButton.addEventListener("click", () => acquireGeoAndHeading());
   if (scanToggleBtn) scanToggleBtn.addEventListener("click", () => scanActive ? finishScanSession() : startScanSession());
   if (scanFinishBtn) scanFinishBtn.addEventListener("click", () => finishScanSession());
   if (scanShotBtn)   scanShotBtn.addEventListener("click", () => { if (scanActive) captureScanFrame("manual"); });
@@ -452,6 +557,7 @@ function registerEvents() {
     deferredInstallPrompt = null; installButton.hidden = true;
   });
   window.addEventListener("appinstalled", () => { installButton.hidden = true; setStatus("App installed."); });
+  window.addEventListener("pageshow", () => { setTimeout(() => { void recoverPrimaryView(); }, 0); });
   if (peerRoleSelect) peerRoleSelect.addEventListener("change", () => {
     peerState.role = peerRoleSelect.value === "rover" ? "rover" : "base";
     updatePeerTransferUi();
@@ -484,16 +590,8 @@ function registerEvents() {
     setStatus(`Bridge "${b.title || b.id}" synced to rover.`);
   });
   const peerClearCacheBtn = document.getElementById("peerClearCacheBtn");
-  if (peerClearCacheBtn) peerClearCacheBtn.addEventListener("click", async () => {
-    if (!confirm("Clear app cache and reload? The page will refresh.")) return;
-    try {
-      const regs = await navigator.serviceWorker?.getRegistrations() || [];
-      await Promise.all(regs.map(r => r.unregister()));
-      const keys = await caches.keys();
-      await Promise.all(keys.map(k => caches.delete(k)));
-    } catch (e) { console.warn("cache clear:", e); }
-    location.reload(true);
-  });
+  if (peerClearCacheBtn) peerClearCacheBtn.addEventListener("click", async () => { await clearCacheAndReloadFlow(); });
+  if (settingsClearCacheBtn) settingsClearCacheBtn.addEventListener("click", async () => { await clearCacheAndReloadFlow(); });
   if (peerQrScannerClose) peerQrScannerClose.addEventListener("click", () => stopPeerQrScan("QR scan closed."));
   if (peerQrFlipBtn) peerQrFlipBtn.addEventListener("click", () => flipPeerQrCamera());
   const peerQrRetryBtn = document.getElementById("peerQrRetryBtn");
@@ -1312,7 +1410,7 @@ async function startMainCamera() {
     cameraPreview.srcObject = stream;
     cameraFallback.hidden = true;
     captureButton.disabled = false;
-    switchCameraButton.disabled = false;
+    if (switchCameraButton) switchCameraButton.disabled = false;
     if (scanToggleBtn) scanToggleBtn.disabled = false;
     // Sync the active device id (in case facingMode/fallback picked it).
     const activeId = stream.getVideoTracks()?.[0]?.getSettings()?.deviceId;
@@ -1758,7 +1856,7 @@ function bearingBetween(from, to) {
 
 // ── Capture ───────────────────────────────────────────────────────────────────
 async function capturePhoto() {
-  if (!stream) { setStatus("Start the camera first."); return; }
+  if (!stream) { setStatus("Camera not ready yet. Try New image again."); return; }
   const w = cameraPreview.videoWidth, h = cameraPreview.videoHeight;
   if (!w || !h) { setStatus("Camera warming up \u2014 try again."); return; }
   snapshotCanvas.width = w; snapshotCanvas.height = h;
@@ -1811,7 +1909,7 @@ async function capturePhoto() {
       if (freshOri.attitude != null) currentAttitude = freshOri.attitude;
       headingText.textContent = orientationSummary();
     }
-    await savePhoto(mainBlob, thermalBlob, commentInput.value.trim(), captureLoc, currentHeading, facingMode, depthBlob, plyText, normalizeTags(captureTags), {
+    await savePhoto(mainBlob, thermalBlob, getCaptureComment(), captureLoc, currentHeading, facingMode, depthBlob, plyText, normalizeTags(captureTags), {
       attitude: currentAttitude,
       aprilTags: aprilTagResult.ids,
       aprilTagDetections: aprilTagResult.detections.map((d) => ({ id: d.id, cornersNormalized: d.cornersNormalized, hammingDistance: d.hammingDistance })),
@@ -1822,9 +1920,8 @@ async function capturePhoto() {
     setStatus("⚠ Save failed: " + e.message + (plyText ? " (PLY too large for storage?)" : ""));
     return;
   }
-  commentInput.value = "";
-  captureTags = emptyTags();
-  renderCaptureTags();
+  clearCaptureDraft();
+  closeCaptureModal();
   if (depthModeEnabled && !depthBlob) {
     setStatus(`⚠ Photo saved (+ stereo) but DEPTH FAILED — depth server not connected. Run start_servers.bat, then re-check Depth mode.`);
   } else {
@@ -1833,7 +1930,7 @@ async function capturePhoto() {
 }
 
 async function saveFiles(files) {
-  const manualComment = commentInput.value.trim();
+  const manualComment = getCaptureComment();
   const importTags = normalizeTags(captureTags);
   let saved = 0;
   for (const f of files) {
@@ -1852,9 +1949,7 @@ async function saveFiles(files) {
     });
     saved++;
   }
-  commentInput.value = "";
-  captureTags = emptyTags();
-  renderCaptureTags();
+  clearCaptureDraft();
   setStatus(`${saved} photo${saved === 1 ? "" : "s"} imported.`);
 }
 
@@ -1960,41 +2055,68 @@ async function lockCameraForScan() {
 }
 
 async function startScanSession() {
-  if (!stream) { setStatus("Start the camera before scanning."); return; }
+  await openCaptureModal({ scanMode: true });
+  if (!stream) { setStatus("Camera not ready yet. Try Start scan again."); return; }
   if (scanActive) return;
   setStatus("Locking camera settings for scan…");
   const camera = await lockCameraForScan();
   scanSession = {
     id: createId(), bridgeId: activeBridgeId, isScanSession: true,
-    label: (scanLabel.value || "").trim() || "Pier scan",
+    label: "Pier scan",
     createdAt: new Date().toISOString(), mode: "burst", camera,
   };
   await runTransaction("readwrite", (store) => store.put(scanSession));
   scanActive = true; scanSeq = 0;
   scanPrevSmall = null; scanAccumDx = 0; scanAccumDy = 0;
   scanCooldownTs = performance.now();
-  scanHud.hidden = false;
+  if (scanHud) scanHud.hidden = false;
   scanToggleBtn.textContent = "■ Finish scan";
-  captureButton.disabled = true; switchCameraButton.disabled = true;
+  captureButton.disabled = true;
+  if (switchCameraButton) switchCameraButton.disabled = true;
   updateScanHud(0, 0, false, "Move slowly across the surface…", "");
   setStatus(camera.locked ? `Scan started — camera locked (${camera.imgW}×${camera.imgH}).` : "Scan started — camera lock not supported on this device; proceeding.");
   scanLoopId = requestAnimationFrame(scanTick);
 }
 
-async function finishScanSession() {
+async function deleteScanSessionData(sessionId) {
+  if (!sessionId) return;
+  const records = await runTransaction("readonly", (store) => store.getAll());
+  const toDelete = records
+    .filter((r) => r && (r.id === sessionId || (r.isScanFrame && r.scanSessionId === sessionId)))
+    .map((r) => r.id);
+  for (const id of toDelete) await runTransaction("readwrite", (store) => store.delete(id));
+}
+
+async function finishScanSession(opts = {}) {
+  const discard = !!opts.discard;
+  const cancelled = !!opts.cancelled;
   if (!scanActive) return;
   scanActive = false;
   if (scanLoopId) { cancelAnimationFrame(scanLoopId); scanLoopId = null; }
-  scanHud.hidden = true;
+  if (scanHud) scanHud.hidden = true;
   scanToggleBtn.textContent = "▶ Start scan";
-  captureButton.disabled = false; switchCameraButton.disabled = false;
+  captureButton.disabled = false;
+  if (switchCameraButton) switchCameraButton.disabled = false;
   const n = scanSeq;
-  if (n === 0 && scanSession) {
+  const session = scanSession;
+  if (discard && session) {
+    await deleteScanSessionData(session.id);
+  } else if (n === 0 && session) {
     // Nothing captured — discard the empty session record.
-    await runTransaction("readwrite", (store) => store.delete(scanSession.id));
+    await runTransaction("readwrite", (store) => store.delete(session.id));
+  } else if (n > 0 && session) {
+    const current = session.label || "Pier scan";
+    const named = prompt("Name this scan session:", current);
+    const finalLabel = (named || "").trim() || current;
+    if (finalLabel !== session.label) {
+      session.label = finalLabel;
+      await runTransaction("readwrite", (store) => store.put(session));
+    }
   }
   scanSession = null;
-  setStatus(n ? `Scan finished — ${n} frame${n === 1 ? "" : "s"} saved.` : "Scan cancelled (no frames).");
+  closeCaptureModal();
+  if (discard) setStatus(`Scan cancelled — ${n} frame${n === 1 ? "" : "s"} discarded.`);
+  else setStatus(n ? `Scan finished — ${n} frame${n === 1 ? "" : "s"} saved.` : (cancelled ? "Scan cancelled (no frames)." : "Scan finished (no frames)."));
   await renderSavedPhotos();
 }
 
@@ -2048,10 +2170,11 @@ function focusAndExposure() {
 }
 
 function updateScanHud(overlapFrac, focus, ready, msg, cls) {
+  if (!scanOverlapBar || !scanCountEl || !scanFocusEl || !scanOverlapPctEl || !scanGuide) return;
   const pct = Math.max(0, Math.min(100, Math.round(overlapFrac * 100)));
   scanOverlapBar.style.width = pct + "%";
   scanOverlapBar.classList.toggle("ready", ready);
-  scanCountEl.textContent = `${scanSeq} frame${scanSeq === 1 ? "" : "s"}`;
+  if (scanCountEl) scanCountEl.textContent = `${scanSeq} frame${scanSeq === 1 ? "" : "s"}`;
   scanFocusEl.textContent = `Sharpness: ${focus == null ? "–" : Math.round(focus)}`;
   scanOverlapPctEl.textContent = `Move: ${pct}%`;
   scanGuide.textContent = msg;
@@ -2117,7 +2240,7 @@ async function captureScanFrame(reason, focusVal) {
     await runTransaction("readwrite", (store) => store.put(frame));
     scanAccumDx = 0; scanAccumDy = 0;
     scanCooldownTs = performance.now() + SCAN_COOLDOWN_MS;
-    scanCountEl.textContent = `${scanSeq} frame${scanSeq === 1 ? "" : "s"}`;
+    if (scanCountEl) scanCountEl.textContent = `${scanSeq} frame${scanSeq === 1 ? "" : "s"}`;
   } catch (e) {
     console.error("[scan] frame save failed:", e);
     setStatus("⚠ Scan frame save failed: " + e.message);
@@ -2361,16 +2484,6 @@ async function renderSavedPhotos() {
   for (const record of records) {
     const card = buildCard(record, photoNoById.get(record.id));
     photoGrid.append(card);
-    const mapContainer = card.querySelector(".photo-map-container");
-    if (record.location) {
-      const inst = initMap(mapContainer, record);
-      leafletInstances.set(record.id, inst);
-      if (kmlGeoJSON) applyKmlToMap(inst);
-    } else {
-      mapContainer.hidden = true;
-      const hint = card.querySelector(".map-hint");
-      if (hint) hint.hidden = true;
-    }
   }
   await renderScanSessions();
 }
@@ -2723,6 +2836,7 @@ function openPhotoAnnotator(record) {
           <button type="button" id="annotCalloutTool" class="secondary">🗨 Text callout</button>
           <button type="button" id="annotMeasureLineTool" class="secondary">📏 Measure line</button>
           <button type="button" id="annotMeasureCurveTool" class="secondary">〰 Measure curve</button>
+          <button type="button" id="annotMeasureAreaTool" class="secondary">Measure area</button>
           <div class="sketch-swatches annot-swatches"></div>
           <label class="sketch-custom">Color <input type="color" id="annotColor" value="#ef4444"></label>
           <label class="sketch-size">Size <input type="range" id="annotSize" min="1" max="24" value="3"></label>
@@ -2739,6 +2853,7 @@ function openPhotoAnnotator(record) {
             <input id="annotTagUnits" class="meta-input" type="text" value="in" style="width:64px;">
           </label>
           <button type="button" id="annotSetScaleFromTag" class="secondary">Set scale from tag</button>
+          <button type="button" id="annotResetScale" class="secondary">Reset scale</button>
           <span id="annotScaleInfo" class="sketch-hint"></span>
           <button type="button" id="annotEraser" class="secondary">🩹 Eraser</button>
           <button type="button" id="annotEditCallout" class="secondary">✎ Edit text</button>
@@ -2753,7 +2868,7 @@ function openPhotoAnnotator(record) {
           </div>
         </div>
         <div class="sketch-footer">
-          <span class="sketch-hint">Overlay is stored separately from the photo. Use AprilTag width + Set scale from tag, then Measure line/curve for physical dimensions.</span>
+          <span class="sketch-hint">Overlay is stored separately from the photo. Use AprilTag width + Set scale from tag, then Measure line/curve/area for physical dimensions.</span>
           <div class="sketch-footer-btns">
             <button type="button" class="annot-cancel secondary">Cancel</button>
             <button type="button" class="annot-remove secondary">Remove overlay</button>
@@ -2786,7 +2901,10 @@ function openPhotoAnnotator(record) {
     overlay.querySelector("#annotCalloutTool").addEventListener("click", () => setAnnotTool("callout"));
     overlay.querySelector("#annotMeasureLineTool").addEventListener("click", () => setAnnotTool("measure-line"));
     overlay.querySelector("#annotMeasureCurveTool").addEventListener("click", () => setAnnotTool("measure-curve"));
+    const areaBtn = overlay.querySelector("#annotMeasureAreaTool");
+    if (areaBtn) areaBtn.addEventListener("click", () => setAnnotTool("measure-area"));
     overlay.querySelector("#annotSetScaleFromTag").addEventListener("click", () => setAnnotScaleFromTag());
+    overlay.querySelector("#annotResetScale").addEventListener("click", () => resetAnnotScale());
     overlay.querySelector("#annotEditCallout").addEventListener("click", () => editSelectedCalloutText());
     overlay.querySelector("#annotDeleteCallout").addEventListener("click", () => deleteSelectedCallout());
     overlay.querySelector("#annotEraser").addEventListener("click", (e) => {
@@ -2864,11 +2982,12 @@ function setAnnotTool(tool) {
   if (!annotState) return;
   annotState.tool = tool;
   const modal = document.getElementById("photoAnnotatorModal");
-  modal.querySelector("#annotPenTool").classList.toggle("active", tool === "pen");
-  modal.querySelector("#annotCalloutTool").classList.toggle("active", tool === "callout");
-  modal.querySelector("#annotMeasureLineTool").classList.toggle("active", tool === "measure-line");
-  modal.querySelector("#annotMeasureCurveTool").classList.toggle("active", tool === "measure-curve");
-  if (tool === "pen" || tool === "measure-line" || tool === "measure-curve") annotState.calloutStart = null;
+  modal.querySelector("#annotPenTool")?.classList.toggle("active", tool === "pen");
+  modal.querySelector("#annotCalloutTool")?.classList.toggle("active", tool === "callout");
+  modal.querySelector("#annotMeasureLineTool")?.classList.toggle("active", tool === "measure-line");
+  modal.querySelector("#annotMeasureCurveTool")?.classList.toggle("active", tool === "measure-curve");
+  modal.querySelector("#annotMeasureAreaTool")?.classList.toggle("active", tool === "measure-area");
+  if (tool === "pen" || tool === "measure-line" || tool === "measure-curve" || tool === "measure-area") annotState.calloutStart = null;
 }
 
 function setAnnotColor(c) {
@@ -2921,23 +3040,29 @@ function syncAnnotControls() {
   }
 }
 
-function averageAprilTagSidePx(detections, widthPx, heightPx) {
+function aprilTagSideStats(detections, widthPx, heightPx) {
   if (!Array.isArray(detections) || !detections.length || !widthPx || !heightPx) return null;
-  let sum = 0;
-  let count = 0;
+  const sideByTag = [];
   for (const d of detections) {
     const corners = Array.isArray(d?.cornersNormalized) ? d.cornersNormalized : [];
     if (corners.length !== 4) continue;
     const pts = corners.map((p) => [Number(p.x) * widthPx, Number(p.y) * heightPx]);
     if (pts.some((p) => !Number.isFinite(p[0]) || !Number.isFinite(p[1]))) continue;
+    let sum = 0;
     for (let i = 0; i < 4; i++) {
       const a = pts[i];
       const b = pts[(i + 1) % 4];
       sum += Math.hypot(b[0] - a[0], b[1] - a[1]);
-      count += 1;
     }
+    sideByTag.push(sum / 4);
   }
-  return count ? (sum / count) : null;
+  if (!sideByTag.length) return null;
+  const sorted = sideByTag.slice().sort((a, b) => a - b);
+  return {
+    medianSidePx: sorted[Math.floor(sorted.length / 2)],
+    maxSidePx: sorted[sorted.length - 1],
+    count: sorted.length,
+  };
 }
 
 function setAnnotScaleFromTag() {
@@ -2951,7 +3076,8 @@ function setAnnotScaleFromTag() {
     return;
   }
   const detections = getDisplayAprilTagDetections(annotState.record);
-  const sidePx = averageAprilTagSidePx(detections, annotState.canvas.width, annotState.canvas.height);
+  const stats = aprilTagSideStats(detections, annotState.canvas.width, annotState.canvas.height);
+  const sidePx = stats?.maxSidePx;
   if (!Number.isFinite(sidePx) || sidePx <= 0) {
     setStatus("No AprilTag detections available for scale calibration.");
     return;
@@ -2959,7 +3085,15 @@ function setAnnotScaleFromTag() {
   annotState.scale = { pxPerUnit: sidePx / tagWidth, units, tagWidth };
   syncAnnotControls();
   redrawPhotoOverlay();
-  setStatus(`Scale set from AprilTags: ${tagWidth} ${units} per tag width.`);
+  setStatus(`Scale set from AprilTag (${stats.count} tag${stats.count === 1 ? "" : "s"}): ${(sidePx / tagWidth).toFixed(3)} px/${units}. Use black tag square width (not paper/white margin).`);
+}
+
+function resetAnnotScale() {
+  if (!annotState) return;
+  annotState.scale = null;
+  syncAnnotControls();
+  redrawPhotoOverlay();
+  setStatus("Scale reset.");
 }
 
 function applyAnnotStyleToSelectedCallout() {
@@ -3057,9 +3191,9 @@ function findAnnotOpHit(p) {
       }
       continue;
     }
-    const pts = (op.type === "measureCurve") ? (op.points || []) : (op.type === "stroke" ? (op.points || []) : null);
+    const pts = (op.type === "measureCurve" || op.type === "measureArea") ? (op.points || []) : (op.type === "stroke" ? (op.points || []) : null);
     if (!pts) continue;
-    const r = Math.max(8, (op.size || 3) * 1.3);
+    const r = Math.max(8, (op.size || 3) * 1.5);
     if (pts.length === 1) {
       const dx = p.x - pts[0][0], dy = p.y - pts[0][1];
       if (Math.hypot(dx, dy) <= r) return { idx: i, mode: "stroke", type: "stroke" };
@@ -3068,6 +3202,11 @@ function findAnnotOpHit(p) {
     for (let j = 1; j < pts.length; j++) {
       if (distSeg(p.x, p.y, pts[j - 1][0], pts[j - 1][1], pts[j][0], pts[j][1]) <= r) {
         return { idx: i, mode: op.type, type: op.type };
+      }
+    }
+    if (op.type === "measureArea" && pts.length > 2) {
+      if (distSeg(p.x, p.y, pts[pts.length - 1][0], pts[pts.length - 1][1], pts[0][0], pts[0][1]) <= r) {
+        return { idx: i, mode: "measureArea", type: "measureArea" };
       }
     }
   }
@@ -3130,7 +3269,7 @@ function setupPhotoAnnotatorCanvas(canvas) {
     if (annotState.tool === "measure-line") {
       annotState.drawing = true;
       annotState.selectedCalloutIdx = -1;
-      annotState.current = { type: "measureLine", p1: [p.x, p.y], p2: [p.x, p.y] };
+      annotState.current = { type: "measureLine", p1: [p.x, p.y], p2: [p.x, p.y], size: annotState.size };
       annotState.ops.push(annotState.current);
       redrawPhotoOverlay();
       return;
@@ -3138,7 +3277,15 @@ function setupPhotoAnnotatorCanvas(canvas) {
     if (annotState.tool === "measure-curve") {
       annotState.drawing = true;
       annotState.selectedCalloutIdx = -1;
-      annotState.current = { type: "measureCurve", points: [[p.x, p.y]] };
+      annotState.current = { type: "measureCurve", points: [[p.x, p.y]], size: annotState.size };
+      annotState.ops.push(annotState.current);
+      redrawPhotoOverlay();
+      return;
+    }
+    if (annotState.tool === "measure-area") {
+      annotState.drawing = true;
+      annotState.selectedCalloutIdx = -1;
+      annotState.current = { type: "measureArea", points: [[p.x, p.y]], size: annotState.size };
       annotState.ops.push(annotState.current);
       redrawPhotoOverlay();
       return;
@@ -3214,6 +3361,9 @@ function setupPhotoAnnotatorCanvas(canvas) {
     } else if (annotState.current?.type === "measureCurve") {
       const pts = annotState.current.points || [];
       if (pts.length < 2) annotState.ops.pop();
+    } else if (annotState.current?.type === "measureArea") {
+      const pts = annotState.current.points || [];
+      if (pts.length < 3) annotState.ops.pop();
     }
     annotState.current = null;
     redrawPhotoOverlay();
@@ -3236,18 +3386,40 @@ function formatMeasureLabel(pxLength) {
   return `${value.toFixed(3)} ${units}`;
 }
 
-function drawMeasureLabel(ctx, x, y, text) {
+function formatAreaLabel(pxArea) {
+  if (!annotState?.scale || !Number.isFinite(annotState.scale.pxPerUnit) || annotState.scale.pxPerUnit <= 0) {
+    return `${pxArea.toFixed(1)} px^2`;
+  }
+  const units = annotState.scale.units || "units";
+  const value = pxArea / (annotState.scale.pxPerUnit * annotState.scale.pxPerUnit);
+  return `${value.toFixed(3)} ${units}^2`;
+}
+
+function polygonAreaPx2(pts) {
+  if (!Array.isArray(pts) || pts.length < 3) return 0;
+  let sum = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    sum += (a[0] * b[1]) - (b[0] * a[1]);
+  }
+  return Math.abs(sum) * 0.5;
+}
+
+function drawMeasureLabel(ctx, x, y, text, size = 3) {
   ctx.save();
-  ctx.font = "14px Arial, sans-serif";
-  const w = Math.ceil(ctx.measureText(text).width + 10);
-  const h = 22;
+  const fontPx = Math.max(12, Math.round(10 + size * 1.1));
+  ctx.font = `${fontPx}px Arial, sans-serif`;
+  const padX = Math.max(5, Math.round(size * 1.6));
+  const h = Math.max(22, Math.round(fontPx + 8));
+  const w = Math.ceil(ctx.measureText(text).width + padX * 2);
   const bx = Math.max(2, Math.min(ctx.canvas.width - w - 2, x + 8));
   const by = Math.max(2, Math.min(ctx.canvas.height - h - 2, y + 8));
   ctx.fillStyle = "rgba(17,24,39,0.8)";
   ctx.fillRect(bx, by, w, h);
   ctx.fillStyle = "#f9fafb";
   ctx.textBaseline = "middle";
-  ctx.fillText(text, bx + 5, by + h * 0.5);
+  ctx.fillText(text, bx + padX, by + h * 0.5);
   ctx.restore();
 }
 
@@ -3341,18 +3513,20 @@ function redrawPhotoOverlay() {
       const p2 = Array.isArray(op.p2) ? op.p2 : null;
       if (!p1 || !p2) continue;
       const lenPx = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+      const size = Math.max(1, op.size || 3);
       ctx.save();
       ctx.strokeStyle = "#22d3ee";
       ctx.fillStyle = "#22d3ee";
-      ctx.lineWidth = 2;
+      ctx.lineWidth = Math.max(2, size * 0.75);
       ctx.beginPath();
       ctx.moveTo(p1[0], p1[1]);
       ctx.lineTo(p2[0], p2[1]);
       ctx.stroke();
-      ctx.beginPath(); ctx.arc(p1[0], p1[1], 3, 0, Math.PI * 2); ctx.fill();
-      ctx.beginPath(); ctx.arc(p2[0], p2[1], 3, 0, Math.PI * 2); ctx.fill();
+      const endpointR = Math.max(3, size * 0.6);
+      ctx.beginPath(); ctx.arc(p1[0], p1[1], endpointR, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(p2[0], p2[1], endpointR, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
-      drawMeasureLabel(ctx, (p1[0] + p2[0]) * 0.5, (p1[1] + p2[1]) * 0.5, formatMeasureLabel(lenPx));
+      drawMeasureLabel(ctx, (p1[0] + p2[0]) * 0.5, (p1[1] + p2[1]) * 0.5, formatMeasureLabel(lenPx), size);
       continue;
     }
     if (op.type === "measureCurve") {
@@ -3360,16 +3534,44 @@ function redrawPhotoOverlay() {
       if (pts.length < 2) continue;
       let lenPx = 0;
       for (let i = 1; i < pts.length; i++) lenPx += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+      const size = Math.max(1, op.size || 3);
       ctx.save();
       ctx.strokeStyle = "#34d399";
-      ctx.lineWidth = 2;
+      ctx.lineWidth = Math.max(2, size * 0.75);
       ctx.beginPath();
       ctx.moveTo(pts[0][0], pts[0][1]);
       for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
       ctx.stroke();
       ctx.restore();
       const end = pts[pts.length - 1];
-      drawMeasureLabel(ctx, end[0], end[1], formatMeasureLabel(lenPx));
+      drawMeasureLabel(ctx, end[0], end[1], formatMeasureLabel(lenPx), size);
+      continue;
+    }
+    if (op.type === "measureArea") {
+      const pts = op.points || [];
+      if (pts.length < 3) continue;
+      const size = Math.max(1, op.size || 3);
+      const areaPx2 = polygonAreaPx2(pts);
+      ctx.save();
+      ctx.strokeStyle = "#f59e0b";
+      ctx.fillStyle = "rgba(245,158,11,0.20)";
+      ctx.lineWidth = Math.max(2, size * 0.75);
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+      let cx = 0;
+      let cy = 0;
+      for (const p of pts) {
+        cx += p[0];
+        cy += p[1];
+      }
+      cx /= pts.length;
+      cy /= pts.length;
+      drawMeasureLabel(ctx, cx, cy, formatAreaLabel(areaPx2), size);
     }
   }
   if (annotState.tool === "callout" && annotState.calloutStart) {
@@ -3617,15 +3819,13 @@ async function saveSketch() {
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   const blob = new Blob([bytes], { type: "image/png" });
   try {
-    await savePhoto(blob, null, commentInput.value.trim(), currentLocation, currentHeading, facingMode, null, null, normalizeTags(captureTags), { isSketch: true });
+    await savePhoto(blob, null, getCaptureComment(), currentLocation, currentHeading, facingMode, null, null, normalizeTags(captureTags), { isSketch: true });
   } catch (e) {
     console.error("[sketch] save failed:", e);
     setStatus("⚠ Sketch save failed: " + e.message);
     return;
   }
-  commentInput.value = "";
-  captureTags = emptyTags();
-  renderCaptureTags();
+  clearCaptureDraft();
   closeSketchModal();
   setStatus("✏ Sketch saved.");
 }
@@ -3640,10 +3840,13 @@ function appView()      { return document.getElementById("appView"); }
 
 function showBridgesOverview() {
   closePeerTransferView();
+  closeSettingsModal();
+  closeCaptureModal();
   activeBridgeId = null;
   localStorage.removeItem(ACTIVE_BRIDGE_KEY);
   if (appView()) appView().hidden = true;
   if (bridgesView()) bridgesView().hidden = false;
+  if (openSettingsButton) openSettingsButton.hidden = true;
   renderBridgesList();
 }
 
@@ -3731,6 +3934,7 @@ async function openBridge(id) {
 
   if (bridgesView()) bridgesView().hidden = true;
   if (appView()) appView().hidden = false;
+  if (openSettingsButton) openSettingsButton.hidden = false;
 
   await loadSavedKml();
   await renderSavedPhotos();
@@ -4913,7 +5117,8 @@ function buildCard(record, photoNo) {
   renderComment(card.querySelector(".photo-comment-area"), record);
   renderAprilTagArea(card.querySelector(".photo-apriltag-area"), record);
   renderTagsArea(card.querySelector(".photo-tags-area"), record);
-  renderNavArea(card.querySelector(".photo-nav-area"), record);
+  const navBtn = card.querySelector(".edit-nav-btn");
+  if (navBtn) navBtn.addEventListener("click", () => openPhotoNavModal(record));
 
   const dlBtn = card.querySelector(".download-btn");
   if (displayOverlayBlob) dlBtn.textContent = "⬇ Photo only";
@@ -5486,10 +5691,9 @@ function initMap(container, record) {
   arrowMarker.on("drag", () => {
     const ll = arrowMarker.getLatLng();
     handleMarker.setLatLng(getHandleLatLng(lmap, ll, record.heading));
-    // Live-update the coordinate display while dragging
-    const card = container.closest(".photo-card");
-    if (card) {
-      const valEl = card.querySelector(".photo-nav-area .photo-nav-line");
+    const navHost = container.closest(".photo-nav-modal")?.querySelector(".photo-nav-host");
+    if (navHost) {
+      const valEl = navHost.querySelector(".photo-nav-line");
       if (valEl) valEl.textContent = navSummaryLine(record, { location: { lat: ll.lat, lng: ll.lng, accuracy: 0 } });
     }
   });
@@ -5498,8 +5702,8 @@ function initMap(container, record) {
     record.location = { lat: parseFloat(ll.lat.toFixed(6)), lng: parseFloat(ll.lng.toFixed(6)), accuracy: 0 };
     handleMarker.setLatLng(getHandleLatLng(lmap, ll, record.heading));
     await runTransaction("readwrite", (store) => store.put(record));
-    const card = container.closest(".photo-card");
-    if (card) renderNavArea(card.querySelector(".photo-nav-area"), record);
+    const navHost = container.closest(".photo-nav-modal")?.querySelector(".photo-nav-host");
+    if (navHost) renderNavArea(navHost, record);
     setStatus("Location updated by dragging.");
   });
 
@@ -5514,8 +5718,8 @@ function initMap(container, record) {
     handleMarker.setLatLng(getHandleLatLng(lmap, arrowMarker.getLatLng(), newH));
     arrowMarker.setIcon(makeArrowIcon(newH));
     await runTransaction("readwrite", (store) => store.put(record));
-    const card = container.closest(".photo-card");
-    if (card) renderNavArea(card.querySelector(".photo-nav-area"), record);
+    const navHost = container.closest(".photo-nav-modal")?.querySelector(".photo-nav-host");
+    if (navHost) renderNavArea(navHost, record);
     setStatus(`Direction: ${newH}\u00b0 ${bearingLabel(newH)}.`);
   });
 
@@ -6428,6 +6632,52 @@ function navSummaryLine(record, overrides = {}) {
   return parts.length ? parts.join(" · ") : "📍 — · 🧭 — · 📐 —";
 }
 
+function openPhotoNavModal(record) {
+  let overlay = document.getElementById("photoNavModal");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "photoNavModal";
+    overlay.className = "settings-modal photo-nav-modal";
+    overlay.innerHTML = `
+      <div class="settings-dialog" style="width:min(860px,100%);">
+        <div class="peer-transfer-modal-head">
+          <span class="scan-title">📍 Map & navigation</span>
+          <button type="button" class="secondary photo-nav-close">✕ Close</button>
+        </div>
+        <div class="photo-nav-host"></div>
+        <p class="map-hint">Drag the ▲ arrow to adjust location · Drag the yellow dot to adjust direction</p>
+        <div class="photo-map-container"></div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelector(".photo-nav-close").addEventListener("click", () => {
+      const inst = leafletInstances.get(overlay.dataset.recordId);
+      if (inst) { inst.lmap.remove(); leafletInstances.delete(overlay.dataset.recordId); }
+      overlay.hidden = true;
+    });
+    overlay.addEventListener("click", (e) => {
+      if (e.target !== overlay) return;
+      const inst = leafletInstances.get(overlay.dataset.recordId);
+      if (inst) { inst.lmap.remove(); leafletInstances.delete(overlay.dataset.recordId); }
+      overlay.hidden = true;
+    });
+  }
+
+  const prior = leafletInstances.get(record.id);
+  if (prior) { prior.lmap.remove(); leafletInstances.delete(record.id); }
+
+  const navHost = overlay.querySelector(".photo-nav-host");
+  renderNavArea(navHost, record);
+  const mapContainer = overlay.querySelector(".photo-map-container");
+  mapContainer.innerHTML = "";
+  if (record.location) {
+    const inst = initMap(mapContainer, record);
+    leafletInstances.set(record.id, inst);
+    if (kmlGeoJSON) applyKmlToMap(inst);
+  }
+  overlay.dataset.recordId = record.id;
+  overlay.hidden = false;
+}
+
 function renderNavArea(container, record, overrides = {}) {
   if (!container) return;
   container.innerHTML = "";
@@ -6552,10 +6802,10 @@ function renderLocationArea(container, record) {
       record.location = { lat, lng, accuracy: parseInt(accI.value) || 0 };
       await runTransaction("readwrite", (s) => s.put(record));
       const card = container.closest(".photo-card");
-      const mapContainer = card.querySelector(".photo-map-container");
+      const mapContainer = card ? card.querySelector(".photo-map-container") : null;
       if (leafletInstances.has(record.id)) {
         syncMapToRecord(record.id, record);
-      } else {
+      } else if (card && mapContainer) {
         mapContainer.hidden = false;
         const hint = card.querySelector(".map-hint"); if (hint) hint.hidden = false;
         const inst = initMap(mapContainer, record);
@@ -6569,8 +6819,11 @@ function renderLocationArea(container, record) {
       const inst = leafletInstances.get(record.id);
       if (inst) { inst.lmap.remove(); leafletInstances.delete(record.id); }
       const card = container.closest(".photo-card");
-      card.querySelector(".photo-map-container").hidden = true;
-      const hint = card.querySelector(".map-hint"); if (hint) hint.hidden = true;
+      if (card) {
+        const mapContainer = card.querySelector(".photo-map-container");
+        if (mapContainer) mapContainer.hidden = true;
+        const hint = card.querySelector(".map-hint"); if (hint) hint.hidden = true;
+      }
       renderLocationArea(container, record); setStatus("Location cleared.");
     });
     cn.addEventListener("click", () => renderLocationArea(container, record));
@@ -6685,7 +6938,7 @@ function revealFallback(msg) {
   stopAprilTagPreviewLoop();
   cameraFallback.hidden = false;
   captureButton.disabled = true;
-  switchCameraButton.disabled = true;
+  if (switchCameraButton) switchCameraButton.disabled = true;
   if (apriltagPreviewStatus) apriltagPreviewStatus.textContent = "AprilTag 36h11: camera unavailable.";
   setStatus(msg);
 }
