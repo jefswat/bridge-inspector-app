@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-16 22:46:00";
+const BUILD_STAMP = "2026-07-17 09:37:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -407,6 +407,8 @@ function registerEvents() {
   if (sketchButton) sketchButton.addEventListener("click", () => openSketchModal());
   const newBridgeBtn = document.getElementById("newBridgeButton");
   if (newBridgeBtn) newBridgeBtn.addEventListener("click", () => openBridgeEditor(null));
+  const importBridgeZipBtn = document.getElementById("importBridgeZipButton");
+  if (importBridgeZipBtn) importBridgeZipBtn.addEventListener("click", () => { void pickBridgeZipAndImport(); });
   const importNbiBtn = document.getElementById("importNbiButton");
   if (importNbiBtn) importNbiBtn.addEventListener("click", () => openNbiImport());
   const nearMeBtn = document.getElementById("bridgesNearMeButton");
@@ -4541,6 +4543,7 @@ async function downloadBridgeZip(id) {
   const manifest = {
     title: b.title,
     description: b.description || "",
+    reportConfig: b.reportConfig || null,
     createdAt: b.createdAt,
     exportedAt: new Date().toISOString(),
     photoCount: photos.length,
@@ -4557,6 +4560,9 @@ async function downloadBridgeZip(id) {
     const num = photoNoById.get(p.id) || { index: i, main: String(i), thermal: null, depth: `${i}-depth`, ply: `${i}-ply` };
     const kind = p.isSketch ? "sketch" : "photo";
     const files = [];
+    let deskewFile = null;
+    let overlayFile = null;
+    let overlayDeskewFile = null;
 
     if (p.blob) {
       try {
@@ -4570,11 +4576,35 @@ async function downloadBridgeZip(id) {
     if (p.thermalBlob) { const f = `${safeStem(num.thermal || `${num.index}-b`)}.jpg`; imgFolder.file(f, p.thermalBlob); files.push("images/" + f); }
     if (p.depthBlob)   { const f = `${safeStem(num.depth || `${num.index}-depth`)}.jpg`;  imgFolder.file(f, p.depthBlob);  files.push("images/" + f); }
     if (p.plyText)     { const f = `${safeStem(num.ply || `${num.index}-ply`)}.ply`; plyFolder.file(f, p.plyText); files.push("pointclouds/" + f); }
+    if (p.deskewBlob)  { const f = `${safeStem(num.main)}-deskew.jpg`; imgFolder.file(f, p.deskewBlob); files.push("images/" + f); deskewFile = "images/" + f; }
+    if (p.annotationOverlayBlob) {
+      const f = `${safeStem(num.main)}-overlay.png`;
+      imgFolder.file(f, p.annotationOverlayBlob);
+      files.push("images/" + f);
+      overlayFile = "images/" + f;
+    }
+    if (p.annotationOverlayBlobDeskew) {
+      const f = `${safeStem(num.main)}-overlay-deskew.png`;
+      imgFolder.file(f, p.annotationOverlayBlobDeskew);
+      files.push("images/" + f);
+      overlayDeskewFile = "images/" + f;
+    }
 
     manifest.photos.push({
       seq: i, photoNo: num.main, id: p.id, capturedAt: p.createdAt, comment: p.comment || "",
       tags: p.tags || null, location: p.location || null, heading: p.heading ?? null,
-      attitude: p.attitude ?? null, facing: p.facing || null, isSketch: !!p.isSketch, files,
+      attitude: p.attitude ?? null, facing: p.facing || null, isSketch: !!p.isSketch,
+      aprilTags: p.aprilTags || [],
+      aprilTagDetections: p.aprilTagDetections || [],
+      deskewActive: !!p.deskewActive,
+      aprilTagsDeskew: p.aprilTagsDeskew || [],
+      aprilTagDetectionsDeskew: p.aprilTagDetectionsDeskew || [],
+      annotationData: p.annotationData || null,
+      annotationDataDeskew: p.annotationDataDeskew || null,
+      deskewFile,
+      annotationOverlayFile: overlayFile,
+      annotationOverlayDeskewFile: overlayDeskewFile,
+      files,
     });
     csvRows.push([
       files[0] || "", kind, p.createdAt,
@@ -4616,6 +4646,143 @@ async function downloadBridgeZip(id) {
   a.click();
   URL.revokeObjectURL(a.href);
   setStatus(`✅ Downloaded “${b.title}” ZIP (${photos.length} item(s)).`);
+}
+
+async function pickBridgeZipAndImport() {
+  if (!window.JSZip) { setStatus("⚠ JSZip not loaded."); return; }
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ".zip,application/zip";
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    await importBridgeZipFile(file);
+  };
+  input.click();
+}
+
+function zipFindEntry(zip, relPath, rootPrefix = "") {
+  const rel = String(relPath || "").replace(/^\.?\//, "");
+  const root = String(rootPrefix || "").replace(/^\/+/, "");
+  if (!rel) return null;
+  const direct = zip.file(root + rel) || zip.file(rel);
+  if (direct) return direct;
+  const relLower = rel.toLowerCase();
+  const want = "/" + relLower;
+  for (const name of Object.keys(zip.files)) {
+    const entry = zip.files[name];
+    if (entry?.dir) continue;
+    const n = String(name).toLowerCase();
+    if (n === relLower || n.endsWith(want)) return entry;
+  }
+  return null;
+}
+
+async function importBridgeZipFile(file) {
+  try {
+    setStatus("Reading ZIP…");
+    const zip = await JSZip.loadAsync(await file.arrayBuffer());
+    const metadataEntry = Object.values(zip.files).find((e) => !e.dir && e.name.toLowerCase().endsWith("/metadata.json"))
+      || Object.values(zip.files).find((e) => !e.dir && e.name.toLowerCase() === "metadata.json");
+    if (!metadataEntry) throw new Error("metadata.json not found in ZIP.");
+    const manifest = JSON.parse(await metadataEntry.async("text"));
+    const prefix = metadataEntry.name.slice(0, Math.max(0, metadataEntry.name.lastIndexOf("/") + 1));
+    const nowIso = new Date().toISOString();
+    const bridgeTitle = String(manifest?.title || "Imported bridge").trim() || "Imported bridge";
+    const bridgeId = createId();
+    const bridgeRec = {
+      id: bridgeId,
+      title: bridgeTitle,
+      description: String(manifest?.description || ""),
+      createdAt: String(manifest?.createdAt || nowIso),
+      reportConfig: manifest?.reportConfig || null,
+      kml: null,
+    };
+
+    const overlayEntry = Object.values(zip.files).find((e) =>
+      !e.dir &&
+      e.name.startsWith(prefix + "overlay/") &&
+      /\.(kmz|kml)$/i.test(e.name)
+    );
+    if (overlayEntry) {
+      try {
+        const overlayBlob = await overlayEntry.async("blob");
+        const overlayName = overlayEntry.name.split("/").pop() || "overlay.kmz";
+        const overlayFile = new File([overlayBlob], overlayName, { type: /\.kmz$/i.test(overlayName) ? "application/vnd.google-earth.kmz" : "application/vnd.google-earth.kml+xml" });
+        bridgeRec.kml = await parseKmzToOverlay(overlayFile);
+      } catch (e) {
+        console.warn("overlay parse on import failed:", e);
+      }
+    }
+
+    await putBridgeRec(bridgeRec);
+    const importedPhotos = Array.isArray(manifest?.photos) ? manifest.photos.slice() : [];
+    importedPhotos.sort((a, b) => (Number(a?.seq) || 0) - (Number(b?.seq) || 0));
+    let importedCount = 0;
+
+    for (const p of importedPhotos) {
+      const files = Array.isArray(p?.files) ? p.files.filter((x) => typeof x === "string") : [];
+      const imageFiles = files.filter((f) => /^images\//i.test(f));
+      const mainPath = imageFiles.find((f) => !/-deskew\.jpg$/i.test(f) && !/-overlay(-deskew)?\.png$/i.test(f) && !/-depth\./i.test(f) && !/-b\./i.test(f))
+        || imageFiles.find((f) => !/-deskew\.jpg$/i.test(f) && !/-overlay(-deskew)?\.png$/i.test(f))
+        || null;
+      const thermalPath = imageFiles.find((f) => /-b\./i.test(f)) || null;
+      const depthPath = imageFiles.find((f) => /-depth\./i.test(f)) || null;
+      const deskewPath = (typeof p?.deskewFile === "string" && p.deskewFile) || imageFiles.find((f) => /-deskew\.jpg$/i.test(f)) || null;
+      const overlayPath = (typeof p?.annotationOverlayFile === "string" && p.annotationOverlayFile) || imageFiles.find((f) => /-overlay\.png$/i.test(f)) || null;
+      const overlayDeskewPath = (typeof p?.annotationOverlayDeskewFile === "string" && p.annotationOverlayDeskewFile) || imageFiles.find((f) => /-overlay-deskew\.png$/i.test(f)) || null;
+      const plyPath = files.find((f) => /^pointclouds\/.+\.ply$/i.test(f)) || null;
+
+      const mainEntry = mainPath ? zipFindEntry(zip, mainPath, prefix) : null;
+      if (!mainEntry) continue;
+
+      const mainBlob = await mainEntry.async("blob");
+      const thermalBlob = thermalPath ? await zipFindEntry(zip, thermalPath, prefix)?.async("blob") : null;
+      const depthBlob = depthPath ? await zipFindEntry(zip, depthPath, prefix)?.async("blob") : null;
+      const deskewBlob = deskewPath ? await zipFindEntry(zip, deskewPath, prefix)?.async("blob") : null;
+      const annotationOverlayBlob = overlayPath ? await zipFindEntry(zip, overlayPath, prefix)?.async("blob") : null;
+      const annotationOverlayBlobDeskew = overlayDeskewPath ? await zipFindEntry(zip, overlayDeskewPath, prefix)?.async("blob") : null;
+      const plyText = plyPath ? await zipFindEntry(zip, plyPath, prefix)?.async("text") : null;
+      const loc = p?.location && Number.isFinite(Number(p.location.lat)) && Number.isFinite(Number(p.location.lng))
+        ? { lat: Number(p.location.lat), lng: Number(p.location.lng), acc: Number(p.location.acc) || undefined }
+        : null;
+
+      const rec = {
+        id: createId(),
+        bridgeId,
+        createdAt: String(p?.capturedAt || nowIso),
+        comment: String(p?.comment || ""),
+        location: loc,
+        heading: Number.isFinite(Number(p?.heading)) ? Number(p.heading) : null,
+        attitude: Number.isFinite(Number(p?.attitude)) ? Number(p.attitude) : null,
+        facing: p?.facing || null,
+        isSketch: !!p?.isSketch,
+        tags: normalizeTags(p?.tags),
+        blob: mainBlob,
+        thermalBlob: thermalBlob || null,
+        depthBlob: depthBlob || null,
+        plyText: typeof plyText === "string" ? plyText : null,
+        deskewBlob: deskewBlob || null,
+        deskewActive: !!p?.deskewActive && !!deskewBlob,
+        aprilTags: Array.isArray(p?.aprilTags) ? p.aprilTags : [],
+        aprilTagDetections: Array.isArray(p?.aprilTagDetections) ? p.aprilTagDetections : [],
+        aprilTagsDeskew: Array.isArray(p?.aprilTagsDeskew) ? p.aprilTagsDeskew : [],
+        aprilTagDetectionsDeskew: Array.isArray(p?.aprilTagDetectionsDeskew) ? p.aprilTagDetectionsDeskew : [],
+        annotationData: p?.annotationData || null,
+        annotationDataDeskew: p?.annotationDataDeskew || null,
+        annotationOverlayBlob: annotationOverlayBlob || null,
+        annotationOverlayBlobDeskew: annotationOverlayBlobDeskew || null,
+      };
+      await runTransaction("readwrite", (s) => s.put(rec));
+      importedCount += 1;
+    }
+
+    showBridgesOverview();
+    setStatus(`✅ Imported ZIP: “${bridgeRec.title}” (${importedCount} item(s)).`);
+  } catch (e) {
+    console.warn("bridge ZIP import failed:", e);
+    setStatus("ZIP import failed: " + (e?.message || e));
+  }
 }
 
 function isDeskewActive(record) {
