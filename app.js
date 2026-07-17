@@ -1,4 +1,4 @@
-const BUILD_STAMP = "2026-07-16 22:35:00";
+const BUILD_STAMP = "2026-07-16 22:38:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -5969,6 +5969,16 @@ function normalizeDeskewAxisAngle(theta) {
   return t;
 }
 
+function closestSmallDeskewAngle(theta) {
+  const t = normalizeDeskewAxisAngle(theta);
+  const cands = [t, t - Math.PI / 2, t + Math.PI / 2];
+  let best = cands[0];
+  for (const c of cands) {
+    if (Math.abs(c) < Math.abs(best)) best = c;
+  }
+  return best;
+}
+
 function dominantDeskewAngleFromDetections(detections, width, height) {
   let sumCos2 = 0;
   let sumSin2 = 0;
@@ -5980,9 +5990,12 @@ function dominantDeskewAngleFromDetections(detections, width, height) {
       .map((p) => ({ x: Number(p?.x) * width, y: Number(p?.y) * height }))
       .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
     if (pts.length !== 4) continue;
-    for (let i = 0; i < 4; i++) {
-      const a = pts[i];
-      const b = pts[(i + 1) % 4];
+    // Use the same edge family only (0->1 and 3->2). Mixing horizontal+vertical
+    // families cancels out for square tags and produces unstable angles.
+    const pairs = [[0, 1], [3, 2]];
+    for (const [i0, i1] of pairs) {
+      const a = pts[i0];
+      const b = pts[i1];
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const len = Math.hypot(dx, dy);
@@ -5994,7 +6007,7 @@ function dominantDeskewAngleFromDetections(detections, width, height) {
     }
   }
   if (!(weightSum > 0)) return null;
-  return 0.5 * Math.atan2(sumSin2, sumCos2);
+  return closestSmallDeskewAngle(0.5 * Math.atan2(sumSin2, sumCos2));
 }
 
 function canvasToJpegBlob(canvas, quality = 0.92) {
