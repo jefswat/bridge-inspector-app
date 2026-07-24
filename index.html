@@ -18,14 +18,19 @@
   <script src="vendor/togeojson.umd.min.js"></script>
   <!-- docx (Word report generation) -->
   <script src="vendor/docx.umd.js"></script>
-  <link rel="stylesheet" href="styles.css?v=20260717-121300" />
+  <!-- Three.js (3D rendering) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <!-- proj4 (map projection / georeferencing) -->
+  <script src="vendor/proj4.js"></script>
+  <!-- web-ifc (IFC parsing) loaded dynamically as ES module in ifc-viewer.js -->
+  <link rel="stylesheet" href="styles.css?v=20260724-170000" />
 </head>
 <body>
 
 <header>
   <h1>📷 Photo Vault <span id="buildStamp" style="font-size:.55rem;font-weight:400;opacity:.7;vertical-align:middle;">build …</span></h1>
   <div style="display:flex;gap:8px;align-items:center;">
-    <a class="map-nav-link" href="map.html?v=20260717-121300">🗺 Map summary</a>
+    <a class="map-nav-link" href="map.html?v=20260723-161500">🗺 Map summary</a>
     <button id="openSettingsButton" class="secondary" hidden>⚙ Settings</button>
     <button id="openPeerTransferViewTop" class="secondary">🔁 Transfer</button>
     <button id="installButton" class="secondary" hidden>⬇ Install App</button>
@@ -62,6 +67,7 @@
     <div class="bridge-banner-actions">
       <button id="editBridgeButton" class="secondary">✎ Edit</button>
       <button id="downloadBridgeZip" class="secondary">⬇ Download ZIP</button>
+      <button id="view3dButton" class="secondary">🎯 View 3D</button>
       <button id="openPeerTransferView" class="secondary">🔁 Transfer view</button>
     </div>
   </div>
@@ -88,6 +94,8 @@
   <!-- ── Toolbar ── -->
   <div class="actions-row" style="justify-content:flex-end">
     <button id="wordReportButton" class="secondary" disabled>📄 Word Report</button>
+    <button id="taggedElementsButton" class="secondary" disabled>🧷 Tagged elements</button>
+    <button id="exportIfcButton" class="secondary" disabled>🧊 Export to IFC</button>
     <button id="clearAllButton" class="danger" disabled>🗑 Delete all</button>
   </div>
 
@@ -314,6 +322,61 @@
   </div>
 </div>
 
+<!-- ── IFC 3D Model Viewer ── -->
+<div id="ifcViewerModal" class="settings-modal" hidden>
+  <div class="settings-dialog ifc-viewer-dialog">
+    <div class="peer-transfer-modal-head">
+      <span class="scan-title">🎯 3D Model Viewer</span>
+      <button id="closeIfcViewerButton" type="button" class="secondary">✕ Close</button>
+    </div>
+    
+    <div class="ifc-viewer-controls">
+      <label class="secondary ifc-file-label">
+        📂 Upload IFC file
+        <input id="ifcFileInput" type="file" accept=".ifc,.IFC,application/octet-stream" hidden />
+      </label>
+      <div id="ifcFileStatus" class="status-bar" style="margin:8px 0;">No file loaded (drag IFC file here or click to browse)</div>
+    </div>
+
+    <div id="ifcViewPresets" class="ifc-view-presets" hidden>
+      <span class="ifc-view-presets-label">View:</span>
+      <button type="button" class="secondary ifc-view-btn is-active" data-view="iso" title="Isometric view">◈ Iso</button>
+      <button type="button" class="secondary ifc-view-btn" data-view="top" title="Top-down (plan) view">⬒ Top</button>
+      <button type="button" class="secondary ifc-view-btn" data-view="front" title="Front (elevation) view">▤ Front</button>
+      <button type="button" class="secondary ifc-view-btn" data-view="side" title="Side view">▥ Side</button>
+    </div>
+
+    <div id="ifcViewerContainer" class="ifc-viewer-container" style="width:100%;height:500px;background:#fafafa;border-radius:8px;position:relative;border:1px solid #cbd5e1;">
+      <div id="ifcViewerPlaceholder" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;color:#64748b;">
+        <p style="margin:0;">📤 Upload an IFC file to start</p>
+        <p style="margin:5px 0 0;font-size:.85rem;opacity:.7;">Rotate: drag • Zoom: scroll • Click elements to select</p>
+      </div>
+      <div id="ifcElevControls" class="ifc-elev-controls" hidden>
+        <button type="button" class="ifc-elev-btn" data-elev="up" title="Raise camera elevation (Z up)">▲</button>
+        <span class="ifc-elev-label">Elev</span>
+        <button type="button" class="ifc-elev-btn" data-elev="down" title="Lower camera elevation (Z down)">▼</button>
+      </div>
+      <div id="ifcMoveControls" class="ifc-move-controls" hidden>
+        <button type="button" class="ifc-move-btn ifc-move-fwd"   data-move="forward"  title="Move forward">▲</button>
+        <button type="button" class="ifc-move-btn ifc-move-left"  data-move="left"     title="Move left">◀</button>
+        <button type="button" class="ifc-move-btn ifc-move-right" data-move="right"    title="Move right">▶</button>
+        <button type="button" class="ifc-move-btn ifc-move-back"  data-move="backward" title="Move backward">▼</button>
+        <span class="ifc-move-label">Move</span>
+      </div>
+    </div>
+
+    <div class="ifc-viewer-info">
+      <div id="ifcSelectedElement" class="status-bar" style="margin:8px 0;">No element selected</div>
+      <div id="ifcTaggedPhotos" class="ifc-tagged-photos" hidden></div>
+      <div class="actions-row" style="justify-content:flex-end;margin-top:12px;">
+        <button id="ifcSetPhotoLocationButton" class="secondary" disabled>📍 Set photo location from camera</button>
+        <button id="ifcLinkToPhotoButton" class="secondary" disabled>🔗 Link to photo</button>
+        <button id="ifcClearSelectionButton" class="secondary" disabled>↻ Clear selection</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ── Photo card template ── -->
 <template id="photoCardTemplate">
   <article class="photo-card">
@@ -352,6 +415,8 @@
 <script src="vendor/cv.js?v=20260716-211500"></script>
 <script src="vendor/aruco.js?v=20260716-211500"></script>
 <script src="vendor/apriltag_36h11.js?v=20260716-211500"></script>
-<script src="app.js?v=20260717-121300"></script>
+<script src="ifc-viewer.js?v=20260724-170000"></script>
+<script src="ifc-export.js?v=20260724-170000"></script>
+<script src="app.js?v=20260724-170000"></script>
 </body>
 </html>

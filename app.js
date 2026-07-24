@@ -1,11 +1,12 @@
-const BUILD_VERSION = "v94";
-const BUILD_STAMP = "2026-07-17 12:13:00";
+const BUILD_VERSION = "v129";
+const BUILD_STAMP = "2026-07-24 11:55:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
 const META_STORE = "meta";
 const BRIDGE_STORE = "bridges";
-const DB_VERSION = 3;
+const IFC_STORE = "bridge_ifc"; // per-bridge stored IFC blob for auto-reload
+const DB_VERSION = 4;
 const KML_META_KEY = "kmlOverlay";
 const ACTIVE_BRIDGE_KEY = "active-bridge-id";
 const FEET_300_M = 91.44; // 300 feet in metres
@@ -99,6 +100,8 @@ const sketchButton       = document.getElementById("sketchButton");
 const filePicker         = document.getElementById("filePicker");
 const clearAllButton     = document.getElementById("clearAllButton");
 const wordReportButton   = document.getElementById("wordReportButton");
+const exportIfcButton    = document.getElementById("exportIfcButton");
+const taggedElementsButton = document.getElementById("taggedElementsButton");
 const emptyState         = document.getElementById("emptyState");
 const photoGrid          = document.getElementById("photoGrid");
 const photoCardTemplate  = document.getElementById("photoCardTemplate");
@@ -181,6 +184,24 @@ const peerAutoSendCheck  = document.getElementById("peerAutoSendCheck");
 const peerConnState      = document.getElementById("peerConnState");
 const peerTransferLog    = document.getElementById("peerTransferLog");
 
+// ── IFC 3D Viewer ────────────────────────────────────────────────────────────
+const ifcViewerModal     = document.getElementById("ifcViewerModal");
+const ifcFileInput       = document.getElementById("ifcFileInput");
+const ifcFileLabel       = document.querySelector(".ifc-file-label");
+const ifcFileStatus      = document.getElementById("ifcFileStatus");
+const ifcViewerContainer = document.getElementById("ifcViewerContainer");
+const ifcViewerPlaceholder = document.getElementById("ifcViewerPlaceholder");
+const ifcViewPresets     = document.getElementById("ifcViewPresets");
+const ifcElevControls    = document.getElementById("ifcElevControls");
+const ifcMoveControls    = document.getElementById("ifcMoveControls");
+const ifcSelectedElement = document.getElementById("ifcSelectedElement");
+const ifcTaggedPhotos    = document.getElementById("ifcTaggedPhotos");
+const ifcSetPhotoLocationButton = document.getElementById("ifcSetPhotoLocationButton");
+const ifcLinkToPhotoButton = document.getElementById("ifcLinkToPhotoButton");
+const ifcClearSelectionButton = document.getElementById("ifcClearSelectionButton");
+const closeIfcViewerButton = document.getElementById("closeIfcViewerButton");
+const view3dButton       = document.getElementById("view3dButton");
+
 // ── State ─────────────────────────────────────────────────────────────────────
 let db;
 let stream, thermalStream;
@@ -204,6 +225,14 @@ let peerQrDetector         = null;
 let peerQrScanStream       = null;
 let peerQrScanLoopId       = null;
 let peerQrFacingMode       = "environment"; // preferred facing for QR scanner; toggled by flip button
+let ifcViewer              = null; // IFC.js viewer instance
+let ifcCurrentSelection      = null; // currently selected IFC element metadata
+let ifcSelectedElements     = []; // currently selected IFC elements metadata (multi-select)
+let ifcLinkedPhotoId       = null; // photo the 3D viewer will tag the selected IFC element to
+let ifcLoadedBridgeId      = null; // bridge whose IFC is currently loaded in the viewer
+let navModalRecord         = null; // record currently shown in the Map & navigation modal
+let pendingIfcPhotoView    = null; // {id,lat,lng,heading,attitude,alt} to apply once an IFC loads
+let lastLoadedIfcFile      = null; // original IFC File uploaded this session, for merge export
 let aprilDetector          = null;
 let aprilPreviewCanvas     = null;
 let aprilPreviewCtx        = null;
@@ -306,7 +335,10 @@ if (wordReportButton) wordReportButton.disabled = true;
 
 init().catch((err) => {
   console.error("Startup failed:", err);
-  try { showBridgesOverview(); } catch (e) { console.warn("Recovery failed:", e); }
+  // Avoid cascading failures if IndexedDB could not be opened yet.
+  if (db) {
+    try { showBridgesOverview(); } catch (e) { console.warn("Recovery failed:", e); }
+  }
   setStatus(`Startup failed: ${err.message}`);
 });
 
@@ -385,6 +417,307 @@ function closeSettingsModal() {
   settingsModal.hidden = true;
 }
 
+// Ensure the viewer is constructed and initialized. Resolves true when ready.
+async function ensureIfcViewer() {
+  if (!ifcViewer) ifcViewer = new IFCViewer();
+  if (ifcViewer._initPromise) return ifcViewer._initPromise;
+  if (ifcViewer.model || ifcViewer.scene) return true; // already initialized
+  ifcViewer._initPromise = ifcViewer.init(ifcViewerContainer).then((success) => {
+    if (!success) { console.error("Failed to initialize IFC viewer"); setStatus("Failed to initialize 3D viewer"); }
+    return success;
+  });
+  return ifcViewer._initPromise;
+}
+
+function openIfcViewerModal() {
+  if (!ifcViewerModal) return;
+  ifcViewerModal.hidden = false;
+  if (ifcSetPhotoLocationButton) ifcSetPhotoLocationButton.disabled = !ifcLinkedPhotoId;
+  // Presets only make sense once a model is loaded; show them if one already is.
+  if (ifcViewPresets) {
+    ifcViewPresets.hidden = !(ifcViewer && ifcViewer.model);
+  }
+  // Initialize the viewer, then auto-load this bridge's saved IFC (if any) so
+  // the user doesn't have to re-pick the model for every photo / session.
+  ensureIfcViewer().then((ok) => { if (ok) void autoLoadBridgeIfc(); });
+}
+
+// Shared post-load UI: hide the placeholder, reveal the view/elev/move
+// controls, and update status. Called for both manual uploads and per-bridge
+// auto-loads.
+function onIfcModelLoaded(fileName) {
+  ifcLoadedBridgeId = activeBridgeId || null;
+  if (ifcViewerPlaceholder) ifcViewerPlaceholder.hidden = true;
+  if (ifcFileStatus) ifcFileStatus.textContent = `Loaded: ${fileName}`;
+  setStatus(`3D model loaded: ${fileName}`);
+  if (ifcViewPresets) { ifcViewPresets.hidden = false; setActiveViewPreset("iso"); }
+  if (ifcElevControls) ifcElevControls.hidden = false;
+  if (ifcMoveControls) ifcMoveControls.hidden = false;
+}
+
+function clearIfcLoadedModel(message) {
+  if (!ifcViewer) return;
+  if (typeof ifcViewer.clearSelection === "function") ifcViewer.clearSelection();
+  if (ifcViewer.model && ifcViewer.scene) ifcViewer.scene.remove(ifcViewer.model);
+  ifcViewer.model = null;
+  ifcLoadedBridgeId = null;
+  lastLoadedIfcFile = null;
+  if (ifcViewerPlaceholder) ifcViewerPlaceholder.hidden = false;
+  if (ifcViewPresets) ifcViewPresets.hidden = true;
+  if (ifcElevControls) ifcElevControls.hidden = true;
+  if (ifcMoveControls) ifcMoveControls.hidden = true;
+  if (ifcFileStatus) ifcFileStatus.textContent = "No file loaded (drag IFC file here or click to browse)";
+  if (message) setStatus(message);
+}
+
+// Highlight the active view-preset button in the IFC viewer toolbar.
+function setActiveViewPreset(view) {
+  if (!ifcViewPresets) return;
+  ifcViewPresets.querySelectorAll(".ifc-view-btn").forEach((b) => {
+    b.classList.toggle("is-active", b.dataset.view === view);
+  });
+}
+
+// Open the 3D IFC viewer to inspect a specific photo: aim the camera at the
+// photo's real-world location/heading/attitude and arm element-tagging so the
+// next selected element is tagged to this photo.
+function openIfcForPhoto(record) {
+  if (!record) return;
+  ifcLinkedPhotoId = record.id;
+
+  openIfcViewerModal();
+  clearIfcSelection();
+  // Raise the viewer above the Map & navigation modal (both are settings-modals).
+  if (ifcViewerModal) ifcViewerModal.style.zIndex = "2300";
+
+  // Reflect the current tag (if any) and prompt to pick an element.
+  if (ifcSelectedElement) {
+    const tags = normalizeIfcTags(record);
+    ifcSelectedElement.textContent = tags.length
+      ? `Tagged: ${tags.length} element${tags.length === 1 ? "" : "s"} — click elements to add/remove selection`
+      : "Click element(s) in the model to tag them to this photo";
+  }
+  if (ifcLinkToPhotoButton) ifcLinkToPhotoButton.textContent = "🔗 Tag selected elements to photo";
+  if (ifcSetPhotoLocationButton) ifcSetPhotoLocationButton.disabled = false;
+
+  const loc = record.location;
+  const hasLoc = loc && isFinite(loc.lat) && isFinite(loc.lng);
+
+  const aim = () => {
+    if (hasLoc && typeof ifcViewer.positionCameraFromGeo === "function") {
+      const ok = ifcViewer.positionCameraFromGeo(loc.lat, loc.lng, record.heading, record.attitude, loc.alt);
+      setStatus(ok
+        ? (isFinite(loc.alt)
+            ? "3D camera set to the photo's GPS location, direction & elevation. Use ▲▼ Elev to fine-tune height. Click an element to tag it."
+            : "3D camera set to the photo's location & direction. Click an element to tag it.")
+        : "Model has no georeference matching this photo — showing default view.");
+    } else if (!hasLoc) {
+      setStatus("This photo has no location yet — set one to aim the 3D camera. You can still tag elements.");
+    }
+  };
+
+  (async () => {
+    await ensureIfcViewer();
+    // Try the bridge's saved model first so no per-photo upload is needed.
+    if (!ifcViewer.model) await autoLoadBridgeIfc();
+    if (ifcViewer.model) { aim(); return; }
+    // Still nothing loaded — remember the request and prompt to upload once.
+    pendingIfcPhotoView = hasLoc
+      ? { id: record.id, lat: loc.lat, lng: loc.lng, heading: record.heading, attitude: record.attitude, alt: loc.alt }
+      : null;
+    if (ifcFileStatus) ifcFileStatus.textContent = "Upload the bridge IFC to view this photo in 3D.";
+    setStatus("Upload the IFC model to place the 3D view for this photo.");
+  })();
+}
+
+function closeIfcViewerModal() {
+  if (!ifcViewerModal) return;
+  ifcViewerModal.hidden = true;
+  // Don't destroy the viewer here; keep it in memory for reuse
+}
+
+function normalizeIfcTags(record) {
+  const out = [];
+  const add = (t) => {
+    if (!t || t.expressId == null) return;
+    const key = String(t.expressId);
+    if (out.some((x) => String(x.expressId) === key)) return;
+    out.push({
+      expressId: t.expressId ?? null,
+      elementId: t.elementId ?? null,
+      name: t.name ?? null,
+      type: t.type ?? null,
+      taggedAt: t.taggedAt || new Date().toISOString(),
+    });
+  };
+  if (Array.isArray(record?.ifcTags)) record.ifcTags.forEach(add);
+  if (record?.ifcTag) add(record.ifcTag); // backward compatibility
+  return out;
+}
+
+function setIfcTags(record, tags) {
+  const next = Array.isArray(tags) ? tags : [];
+  if (next.length) {
+    record.ifcTags = next;
+    record.ifcTag = next[0]; // keep legacy field for compatibility
+  } else {
+    delete record.ifcTags;
+    delete record.ifcTag;
+  }
+}
+
+function setIfcSelectedElement(elementData) {
+  const selected = Array.isArray(elementData?.selectedElements) ? elementData.selectedElements : (elementData ? [elementData] : []);
+  ifcSelectedElements = selected.filter((s) => s && s.ifcExpressId != null);
+  ifcCurrentSelection = ifcSelectedElements.length ? ifcSelectedElements[ifcSelectedElements.length - 1] : null;
+  if (ifcCurrentSelection) {
+    const first = ifcSelectedElements[0];
+    const label = first.elementName || first.elementId || "element";
+    const type = first.elementType ? ` (${first.elementType})` : "";
+    const extra = ifcSelectedElements.length > 1 ? ` +${ifcSelectedElements.length - 1} more` : "";
+    if (ifcSelectedElement) ifcSelectedElement.textContent = `Selected ${ifcSelectedElements.length}: ${label}${type}${extra}`;
+    if (ifcClearSelectionButton) ifcClearSelectionButton.disabled = false;
+    if (ifcLinkToPhotoButton) ifcLinkToPhotoButton.disabled = false;
+    if (ifcSetPhotoLocationButton) ifcSetPhotoLocationButton.disabled = !ifcLinkedPhotoId;
+    void renderTaggedPhotosForElement(ifcCurrentSelection.ifcExpressId);
+  } else {
+    if (ifcSelectedElement) ifcSelectedElement.textContent = "No element selected";
+    if (ifcClearSelectionButton) ifcClearSelectionButton.disabled = true;
+    if (ifcLinkToPhotoButton) ifcLinkToPhotoButton.disabled = true;
+    if (ifcSetPhotoLocationButton) ifcSetPhotoLocationButton.disabled = !ifcLinkedPhotoId;
+    if (ifcTaggedPhotos) { ifcTaggedPhotos.hidden = true; ifcTaggedPhotos.innerHTML = ""; }
+  }
+}
+
+// ── Reverse lookup: element → photos tagged to it ──────────────────────────────
+// Return the active bridge's photos tagged to a given IFC element expressId.
+async function photosTaggedTo(expressId) {
+  if (expressId == null) return [];
+  const records = await getActivePhotos();
+  const key = String(expressId);
+  return records.filter((r) => normalizeIfcTags(r).some((t) => String(t.expressId) === key));
+}
+
+// Build an index of every tagged element in the active bridge:
+// [{ expressId, name, type, photos:[records] }] sorted by name.
+async function taggedElementsIndex() {
+  const records = await getActivePhotos();
+  const map = new Map();
+  for (const r of records) {
+    for (const t of normalizeIfcTags(r)) {
+      if (!t || t.expressId == null) continue;
+      const key = String(t.expressId);
+      if (!map.has(key)) {
+        map.set(key, { expressId: t.expressId, name: t.name || t.elementId || `#${t.expressId}`, type: t.type || "", photos: [] });
+      }
+      map.get(key).photos.push(r);
+    }
+  }
+  return [...map.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+}
+
+// Gallery browser: a modal listing every IFC element that has photos tagged to
+// it, each expandable to show (and open) those photos.
+async function openTaggedElementsModal() {
+  const index = await taggedElementsIndex();
+  const overlay = document.createElement("div");
+  overlay.className = "settings-modal";
+  overlay.style.zIndex = "2400";
+  const list = index.length
+    ? index.map((el) => {
+        const ty = el.type ? ` <span class="tagged-el-type">${escapeHtml(el.type)}</span>` : "";
+        return `
+        <div class="tagged-el" data-express="${escapeHtml(String(el.expressId))}">
+          <div class="tagged-el-head">
+            <span class="tagged-el-name">🧊 ${escapeHtml(el.name)}${ty}</span>
+            <span class="tagged-el-count">${el.photos.length} 📷</span>
+          </div>
+          <div class="tagged-el-strip"></div>
+        </div>`;
+      }).join("")
+    : `<p class="ifc-tagged-empty">No photos are tagged to any element yet. Open a photo's Map &amp; navigation, tap “View in 3D”, click an element, then “Tag element to photo”.</p>`;
+  overlay.innerHTML = `
+    <div class="settings-dialog" style="width:min(720px,100%);max-height:86vh;overflow:auto;">
+      <div class="peer-transfer-modal-head">
+        <span class="scan-title">🧷 Tagged elements</span>
+        <button type="button" class="secondary" data-act="close">✕ Close</button>
+      </div>
+      <p class="map-hint">Elements in this bridge that have inspection photos tagged to them. Click a thumbnail to open the photo.</p>
+      <div class="tagged-el-list">${list}</div>
+    </div>`;
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay || e.target.closest("[data-act=close]")) overlay.remove();
+  });
+  document.body.appendChild(overlay);
+  // Populate thumbnail strips (object URLs) after insertion.
+  index.forEach((el) => {
+    const strip = overlay.querySelector(`.tagged-el[data-express="${CSS.escape(String(el.expressId))}"] .tagged-el-strip`);
+    if (!strip) return;
+    for (const rec of sortOldestFirst(el.photos)) strip.append(buildTaggedThumb(rec));
+  });
+}
+
+// Render a strip of thumbnails for photos tagged to `expressId` inside the 3D
+// viewer's info panel. Clicking a thumbnail opens that photo's nav modal.
+async function renderTaggedPhotosForElement(expressId) {
+  if (!ifcTaggedPhotos) return;
+  const photos = await photosTaggedTo(expressId);
+  ifcTaggedPhotos.innerHTML = "";
+  if (!photos.length) {
+    ifcTaggedPhotos.hidden = false;
+    const p = document.createElement("p");
+    p.className = "ifc-tagged-empty";
+    p.textContent = "📷 No photos tagged to this element yet.";
+    ifcTaggedPhotos.append(p);
+    return;
+  }
+  ifcTaggedPhotos.hidden = false;
+  const head = document.createElement("div");
+  head.className = "ifc-tagged-head";
+  head.textContent = `📷 ${photos.length} photo${photos.length === 1 ? "" : "s"} tagged to this element`;
+  ifcTaggedPhotos.append(head);
+  const strip = document.createElement("div");
+  strip.className = "ifc-tagged-strip";
+  for (const rec of sortOldestFirst(photos)) {
+    const thumb = buildTaggedThumb(rec);
+    strip.append(thumb);
+  }
+  ifcTaggedPhotos.append(strip);
+}
+
+// A single clickable thumbnail with a revocable object URL.
+function buildTaggedThumb(rec) {
+  const wrap = document.createElement("button");
+  wrap.type = "button";
+  wrap.className = "ifc-tagged-thumb";
+  wrap.title = "Open this photo";
+  const blob = getDisplayPhotoBlob(rec) || rec.blob;
+  if (blob) {
+    const img = document.createElement("img");
+    const url = URL.createObjectURL(blob);
+    img.src = url;
+    img.alt = "Tagged photo";
+    img.addEventListener("load", () => URL.revokeObjectURL(url), { once: true });
+    wrap.append(img);
+  } else {
+    wrap.textContent = "📷";
+  }
+  wrap.addEventListener("click", () => {
+    // Bring the nav modal above the 3D viewer to view/edit the photo.
+    openPhotoNavModal(rec);
+    const nav = document.getElementById("photoNavModal");
+    if (nav) nav.style.zIndex = "2500";
+  });
+  return wrap;
+}
+
+function clearIfcSelection() {
+  ifcSelectedElements = [];
+  ifcCurrentSelection = null;
+  setIfcSelectedElement(null);
+  if (ifcViewer && typeof ifcViewer.clearSelection === "function") ifcViewer.clearSelection();
+}
+
 function setCaptureModalMode(scanMode) {
   const isScan = !!scanMode;
   if (captureModalTitle) captureModalTitle.textContent = isScan ? "🎞 Guided scan" : "📸 New image";
@@ -435,6 +768,241 @@ function registerEvents() {
   if (closeSettingsButton) closeSettingsButton.addEventListener("click", () => closeSettingsModal());
   if (settingsModal) settingsModal.addEventListener("click", (e) => {
     if (e.target === settingsModal) closeSettingsModal();
+  });
+  // IFC Viewer events
+  if (view3dButton) view3dButton.addEventListener("click", () => {
+    ifcLinkedPhotoId = null;
+    if (ifcSetPhotoLocationButton) ifcSetPhotoLocationButton.disabled = true;
+    if (ifcLinkToPhotoButton) ifcLinkToPhotoButton.textContent = "🔗 Tag selected elements to photo";
+    openIfcViewerModal();
+  });
+  if (closeIfcViewerButton) closeIfcViewerButton.addEventListener("click", () => closeIfcViewerModal());
+  if (ifcViewPresets) {
+    ifcViewPresets.querySelectorAll(".ifc-view-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const view = btn.dataset.view;
+        if (ifcViewer && typeof ifcViewer.setView === "function") {
+          ifcViewer.setView(view);
+        }
+        setActiveViewPreset(view);
+      });
+    });
+  }
+  if (ifcElevControls) {
+    ifcElevControls.querySelectorAll(".ifc-elev-btn").forEach((btn) => {
+      // Hold-to-repeat with a slow→fast ramp. Scene units are metres, so we work
+      // in real distance: a single tap nudges ~2 in (0.05 m) for fine control,
+      // and holding accelerates up to ~1 ft/tick so a full ~40 ft height change
+      // takes only a couple of seconds. Resolution stays inch-level on a tap.
+      const FINE_M = 0.05;   // ~2 inches — first tap / start of hold
+      const RAMP_M = 0.03;   // added per tick while held
+      const MAX_M  = 0.30;   // ~1 foot per tick cap
+      let timer = null, ticks = 0;
+      const dir = btn.dataset.elev === "up" ? 1 : -1;
+      const step = () => {
+        if (ifcViewer && typeof ifcViewer.panElevation === "function") {
+          const mag = Math.min(FINE_M + ticks * RAMP_M, MAX_M);
+          ticks += 1;
+          ifcViewer.panElevation(dir * mag);
+        }
+      };
+      const start = (e) => { e.preventDefault(); ticks = 0; step(); timer = setInterval(step, 80); };
+      const stop = () => { if (timer) { clearInterval(timer); timer = null; } ticks = 0; };
+      btn.addEventListener("mousedown", start);
+      btn.addEventListener("touchstart", start, { passive: false });
+      ["mouseup", "mouseleave", "touchend", "touchcancel"].forEach((ev) =>
+        btn.addEventListener(ev, stop));
+    });
+  }
+  if (ifcMoveControls) {
+    ifcMoveControls.querySelectorAll(".ifc-move-btn").forEach((btn) => {
+      // Hold-to-repeat horizontal movement, accelerating the longer it's held.
+      let timer = null, ticks = 0;
+      const vec = {
+        forward:  [0,  1], backward: [0, -1],
+        left:    [-1,  0], right:    [1,  0],
+      }[btn.dataset.move] || [0, 0];
+      const step = () => {
+        if (ifcViewer && typeof ifcViewer.panMove === "function") {
+          // Ramp from a fine step up to a coarse one for both nudge & travel.
+          const mag = Math.min(0.01 + ticks * 0.004, 0.08);
+          ticks += 1;
+          ifcViewer.panMove(vec[0] * mag, vec[1] * mag);
+        }
+      };
+      const start = (e) => { e.preventDefault(); ticks = 0; step(); timer = setInterval(step, 60); };
+      const stop = () => { if (timer) { clearInterval(timer); timer = null; } ticks = 0; };
+      btn.addEventListener("mousedown", start);
+      btn.addEventListener("touchstart", start, { passive: false });
+      ["mouseup", "mouseleave", "touchend", "touchcancel"].forEach((ev) =>
+        btn.addEventListener(ev, stop));
+    });
+  }
+  if (ifcViewerModal) ifcViewerModal.addEventListener("click", (e) => {
+    if (e.target === ifcViewerModal) closeIfcViewerModal();
+  });
+  if (ifcFileInput) ifcFileInput.addEventListener("change", async (e) => {
+    console.log("IFC file input change event fired");
+    const file = e.target.files?.[0];
+    if (!file) {
+      console.warn("No file selected");
+      return;
+    }
+    console.log("Selected file:", file.name, file.type, file.size);
+    if (!ifcViewer) {
+      setStatus("Initializing 3D viewer...");
+      return;
+    }
+    try {
+      const success = await ifcViewer.loadIFCFile(file);
+      if (success) {
+        lastLoadedIfcFile = file; // keep for "merge photos into model" export
+        onIfcModelLoaded(file.name);
+        // Persist this IFC to the active bridge so it auto-loads next time
+        // (no need to re-pick the file for every photo / session).
+        void saveIfcForActiveBridge(file);
+        // If the viewer was opened to inspect a specific photo, jump the camera
+        // to that photo's location / heading now that the model is loaded.
+        if (pendingIfcPhotoView) {
+          const req = pendingIfcPhotoView; pendingIfcPhotoView = null;
+          if (isFinite(req.lat) && isFinite(req.lng) &&
+              typeof ifcViewer.positionCameraFromGeo === "function") {
+            const ok = ifcViewer.positionCameraFromGeo(req.lat, req.lng, req.heading, req.attitude, req.alt);
+            setStatus(ok
+              ? (isFinite(req.alt)
+                  ? "3D camera set to the photo's GPS location, direction & elevation. Use ▲▼ Elev to fine-tune. Click an element to tag it."
+                  : "3D camera set to the photo's location & direction. Click an element to tag it.")
+              : "Model loaded, but it has no georeference matching this photo.");
+          }
+        }
+      } else {
+        if (ifcFileStatus) ifcFileStatus.textContent = `Error loading ${file.name}`;
+        setStatus("Failed to load IFC file");
+      }
+    } catch (error) {
+      console.error("IFC file loading error:", error);
+      if (ifcFileStatus) ifcFileStatus.textContent = `Error: ${error.message}`;
+      setStatus("Error loading IFC file");
+    }
+    ifcFileInput.value = "";
+  });
+
+  // When an uploaded IFC is georeferenced, persist its real-world footprint to
+  // the active bridge so the map page can overlay it at the true lat/lon.
+  window.addEventListener("ifcGeoreferenced", async (e) => {
+    const g = e.detail || {};
+    if (!g.hasLatLon || !g.center || g.center.lat == null) {
+      setStatus(`IFC map coords found (${g.crsName || g.epsg || "unknown CRS"}) but no known WGS84 conversion — map overlay unavailable.`);
+      return;
+    }
+    const b = activeBridge();
+    if (!b) {
+      setStatus("IFC georeferenced — open a bridge first to save its footprint on the map.");
+      return;
+    }
+    b.ifcFootprint = {
+      epsg: g.epsg || null,
+      crsName: g.crsName || "",
+      center: g.center,
+      footprint: g.footprint || [],
+      fileName: (ifcViewer && ifcViewer.model && ifcViewer.model.userData.fileName) || null,
+      savedAt: new Date().toISOString(),
+    };
+    try {
+      await putBridgeRec(b);
+      setStatus(`Bridge footprint georeferenced at ${g.center.lat.toFixed(5)}, ${g.center.lon.toFixed(5)} — open the map to see it.`);
+    } catch (err) {
+      console.warn("Failed to save IFC footprint:", err);
+    }
+  });
+
+  if (ifcClearSelectionButton) ifcClearSelectionButton.addEventListener("click", () => clearIfcSelection());
+  if (ifcLinkToPhotoButton) ifcLinkToPhotoButton.addEventListener("click", async () => {
+    if (!ifcSelectedElements.length) { setStatus("Select one or more elements in the 3D model first."); return; }
+    if (!ifcLinkedPhotoId) {
+      setStatus("Open a photo's Map & navigation, then tap “View in 3D” to choose which photo to tag.");
+      return;
+    }
+    try {
+      const rec = await runTransaction("readonly", (s) => s.get(ifcLinkedPhotoId));
+      if (!rec) { setStatus("Target photo not found."); return; }
+      const tags = normalizeIfcTags(rec);
+      const now = new Date().toISOString();
+      let added = 0;
+      for (const sel of ifcSelectedElements) {
+        const key = String(sel.ifcExpressId);
+        if (tags.some((t) => String(t.expressId) === key)) continue;
+        tags.push({
+          expressId: sel.ifcExpressId ?? null,
+          elementId: sel.elementId ?? null,
+          name: sel.elementName ?? null,
+          type: sel.elementType ?? null,
+          taggedAt: now,
+        });
+        added += 1;
+      }
+      setIfcTags(rec, tags);
+      await runTransaction("readwrite", (s) => s.put(rec));
+      const total = normalizeIfcTags(rec).length;
+      setStatus(added
+        ? `Tagged ${added} element${added === 1 ? "" : "s"} to the photo (${total} total).`
+        : `Those selected elements were already tagged to this photo (${total} total).`);
+      if (ifcSelectedElement) ifcSelectedElement.textContent = `✓ Photo now tagged to ${total} element${total === 1 ? "" : "s"}`;
+      // Refresh the nav modal summary if it is showing this photo.
+      if (navModalRecord && navModalRecord.id === rec.id) {
+        navModalRecord.ifcTag = rec.ifcTag;
+        navModalRecord.ifcTags = rec.ifcTags;
+        const host = document.querySelector("#photoNavModal .photo-nav-host");
+        if (host) renderNavArea(host, navModalRecord);
+      }
+      // Refresh the open photo detail's Tags section so the tag shows there too.
+      const tagsHost = document.querySelector(`.photo-tags-area[data-photo-id="${rec.id}"]`);
+      if (tagsHost) renderTagsArea(tagsHost, rec);
+      // Refresh the in-viewer "photos tagged to this element" strip.
+      if (ifcCurrentSelection && ifcCurrentSelection.ifcExpressId != null) {
+        void renderTaggedPhotosForElement(ifcCurrentSelection.ifcExpressId);
+      }
+    } catch (e) {
+      console.error("IFC tag failed:", e);
+      setStatus("Tagging failed: " + e.message);
+    }
+  });
+  if (ifcSetPhotoLocationButton) ifcSetPhotoLocationButton.addEventListener("click", async () => {
+    if (!ifcLinkedPhotoId) {
+      setStatus("Open a photo's Map & navigation, then tap “View in 3D” so we know which photo to update.");
+      return;
+    }
+    if (!ifcViewer || typeof ifcViewer.getCameraGeoPosition !== "function") {
+      setStatus("3D viewer is not ready.");
+      return;
+    }
+    const g = ifcViewer.getCameraGeoPosition();
+    if (!g || !isFinite(g.lat) || !isFinite(g.lng)) {
+      setStatus("This IFC has no usable georeference for camera-based location updates.");
+      return;
+    }
+    try {
+      const rec = await runTransaction("readonly", (s) => s.get(ifcLinkedPhotoId));
+      if (!rec) { setStatus("Target photo not found."); return; }
+      rec.location = {
+        lat: parseFloat(g.lat.toFixed(7)),
+        lng: parseFloat(g.lng.toFixed(7)),
+        accuracy: rec.location?.accuracy ?? 0,
+        alt: isFinite(g.alt) ? parseFloat(g.alt.toFixed(2)) : (rec.location?.alt ?? null),
+        manual: true,
+      };
+      await runTransaction("readwrite", (s) => s.put(rec));
+      if (navModalRecord && navModalRecord.id === rec.id) {
+        navModalRecord.location = rec.location;
+        const host = document.querySelector("#photoNavModal .photo-nav-host");
+        if (host) renderNavArea(host, navModalRecord);
+      }
+      await renderSavedPhotos();
+      setStatus(`Photo location updated from 3D camera: ${rec.location.lat.toFixed(6)}, ${rec.location.lng.toFixed(6)}.`);
+    } catch (e) {
+      console.error("Set photo location from camera failed:", e);
+      setStatus("Failed to update photo location from camera: " + e.message);
+    }
   });
   if (newImageButton) newImageButton.addEventListener("click", () => { void openCaptureModal({ scanMode: false }); });
   if (cancelCaptureButton) cancelCaptureButton.addEventListener("click", async () => {
@@ -525,6 +1093,8 @@ function registerEvents() {
   const editBridgeBtn = document.getElementById("editBridgeButton");
   if (editBridgeBtn) editBridgeBtn.addEventListener("click", () => { const b = activeBridge(); if (b) openBridgeEditor(b); });
   if (wordReportButton) wordReportButton.addEventListener("click", () => generateWordReport());
+  if (exportIfcButton) exportIfcButton.addEventListener("click", () => exportPhotosToIfc());
+  if (taggedElementsButton) taggedElementsButton.addEventListener("click", () => openTaggedElementsModal());
   if (acquireGeoButton) acquireGeoButton.addEventListener("click", () => acquireGeoAndHeading());
   if (scanToggleBtn) scanToggleBtn.addEventListener("click", () => scanActive ? finishScanSession() : startScanSession());
   if (scanFinishBtn) scanFinishBtn.addEventListener("click", () => finishScanSession());
@@ -558,6 +1128,13 @@ function registerEvents() {
   });
   window.addEventListener("appinstalled", () => { installButton.hidden = true; setStatus("App installed."); });
   window.addEventListener("pageshow", () => { setTimeout(() => { void recoverPrimaryView(); }, 0); });
+  // IFC element selection from 3D viewer
+  window.addEventListener("ifcElementSelected", (e) => {
+    if (e.detail) {
+      console.log("IFC element selected event:", e.detail);
+      setIfcSelectedElement(e.detail);
+    }
+  });
   if (peerRoleSelect) peerRoleSelect.addEventListener("change", () => {
     peerState.role = peerRoleSelect.value === "rover" ? "rover" : "base";
     updatePeerTransferUi();
@@ -1772,10 +2349,24 @@ function orientationSummary() {
   return dir + att;
 }
 
+// Build a location object from a Geolocation position, including GPS altitude
+// (metres above the WGS84 ellipsoid) when the device reports it. `alt` is null
+// when unavailable (common on desktops / some phones indoors).
+function coordsToLoc(p) {
+  const c = p.coords;
+  const loc = { lat: c.latitude, lng: c.longitude, accuracy: Math.round(c.accuracy) };
+  if (c.altitude != null && isFinite(c.altitude)) {
+    loc.alt = Math.round(c.altitude * 10) / 10; // 0.1 m precision
+    if (c.altitudeAccuracy != null && isFinite(c.altitudeAccuracy))
+      loc.altAcc = Math.round(c.altitudeAccuracy);
+  }
+  return loc;
+}
+
 function acquireLocationNow(onSuccess, onError) {
   if (!navigator.geolocation) { onError(new Error("Not supported")); return; }
   navigator.geolocation.getCurrentPosition(
-    (p) => onSuccess({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: Math.round(p.coords.accuracy) }),
+    (p) => onSuccess(coordsToLoc(p)),
     onError, { enableHighAccuracy: true, timeout: 10000 }
   );
 }
@@ -1786,7 +2377,7 @@ function getFreshLocation(timeoutMs = 8000) {
   return new Promise((resolve) => {
     if (!navigator.geolocation) { resolve(null); return; }
     navigator.geolocation.getCurrentPosition(
-      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: Math.round(p.coords.accuracy) }),
+      (p) => resolve(coordsToLoc(p)),
       () => resolve(null),
       { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 0 }
     );
@@ -2475,17 +3066,172 @@ async function renderSavedPhotos() {
   if (!records.length) {
     emptyState.hidden = false; photoGrid.hidden = true; clearAllButton.disabled = true;
     if (wordReportButton) wordReportButton.disabled = true;
+    if (exportIfcButton) exportIfcButton.disabled = true;
+    if (taggedElementsButton) taggedElementsButton.disabled = true;
     await renderScanSessions();
     return;
   }
   clearAllButton.disabled = false; emptyState.hidden = true; photoGrid.hidden = false;
   if (wordReportButton) wordReportButton.disabled = false;
+  if (exportIfcButton) exportIfcButton.disabled = false;
+  if (taggedElementsButton) taggedElementsButton.disabled = false;
 
   for (const record of records) {
     const card = buildCard(record, photoNoById.get(record.id));
     photoGrid.append(card);
   }
   await renderScanSessions();
+}
+
+// Prepare photo records for export: attach a stable display name and the JPEG
+// blob we actually show for each one.
+function prepPhotosForExport(records) {
+  const photoNoById = buildPhotoNumberMap(records);
+  const ordered = sortOldestFirst(records);
+  return ordered.map((r) => {
+    const meta = photoNoById.get(r.id) || {};
+    const name = `Photo ${meta.main || meta.index || ""}`.trim();
+    return {
+      ...r,
+      exportName: name,
+      imageFileName: `${safeStem(name)}.jpg`,
+      blob: getDisplayPhotoBlob(r) || r.blob || null,
+    };
+  });
+}
+
+// For merge export, emit one association per (photo, tagged element) pair.
+// A photo tagged to 3 elements yields 3 IFC document relations.
+function expandForIfcMerge(records) {
+  const out = [];
+  for (const r of records) {
+    const tags = normalizeIfcTags(r);
+    if (!tags.length) { out.push(r); continue; }
+    for (const t of tags) out.push({ ...r, ifcTag: t });
+  }
+  return out;
+}
+
+// Small in-app chooser for the two IFC export modes. Resolves to
+// 'merge' | 'standalone' | null(cancel).
+function chooseIfcExportMode(taggedCount) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "settings-modal";
+    overlay.style.zIndex = "2400";
+    const merged = taggedCount > 0;
+    overlay.innerHTML = `
+      <div class="settings-dialog" style="width:min(560px,100%);">
+        <div class="peer-transfer-modal-head">
+          <span class="scan-title">🧊 Export photos to IFC</span>
+          <button type="button" class="secondary" data-act="cancel">✕ Close</button>
+        </div>
+        <div class="ifc-export-choice">
+          <button type="button" class="ifc-export-opt" data-act="merge">
+            <strong>🔗 Merge into my IFC model</strong>
+            <span>Attach photos to the real elements you tagged so anyone can click a
+            column/girder in their BIM viewer and see its photos.
+            ${merged ? `${taggedCount} photo-to-element tag link${taggedCount === 1 ? "" : "s"} ready to merge.`
+                     : `⚠ No photos are tagged to elements yet — nothing would link.`}</span>
+          </button>
+          <button type="button" class="ifc-export-opt" data-act="standalone">
+            <strong>📍 Standalone photo markers</strong>
+            <span>A new self-contained IFC where each photo is a directional pin at its
+            GPS location (no original model needed).</span>
+          </button>
+        </div>
+      </div>`;
+    const done = (val) => { overlay.remove(); resolve(val); };
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) return done(null);
+      const act = e.target.closest("[data-act]")?.dataset.act;
+      if (act) done(act === "cancel" ? null : act);
+    });
+    document.body.appendChild(overlay);
+  });
+}
+
+// Read the original IFC text: prefer the file loaded in the viewer this session,
+// otherwise ask the user to pick their .ifc file.
+async function getOriginalIfcText() {
+  if (lastLoadedIfcFile) {
+    try { return await lastLoadedIfcFile.text(); } catch (e) { /* fall through */ }
+  }
+  return new Promise((resolve) => {
+    const inp = document.createElement("input");
+    inp.type = "file";
+    inp.accept = ".ifc,.IFC,application/octet-stream";
+    inp.style.display = "none";
+    inp.addEventListener("change", async () => {
+      const f = inp.files?.[0];
+      inp.remove();
+      if (!f) return resolve(null);
+      try { resolve(await f.text()); } catch (e) { resolve(null); }
+    });
+    document.body.appendChild(inp);
+    inp.click();
+  });
+}
+
+function downloadTextFile(text, filename, mime) {
+  const blob = new Blob([text], { type: mime || "application/x-step" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 8000);
+}
+
+// Export the active bridge's photos to IFC. Two modes: merge document links onto
+// the real tagged elements of the original model (so external tools show photos
+// when clicking an element), or a standalone file of directional photo markers.
+async function exportPhotosToIfc() {
+  if (!window.ifcExport || typeof window.ifcExport.buildIFC !== "function") {
+    setStatus("IFC export module not loaded — clear cache & reload.");
+    return;
+  }
+  const records = await getActivePhotos();
+  if (!records.length) { setStatus("No photos to export."); return; }
+
+  const bridge = activeBridge();
+  const forExport = prepPhotosForExport(records);
+  const mergeRows = expandForIfcMerge(forExport);
+  const taggedCount = mergeRows.filter((r) => r.ifcTag && r.ifcTag.expressId != null).length;
+
+  const mode = await chooseIfcExportMode(taggedCount);
+  if (!mode) return;
+
+  const stem = safeStem((bridge && (bridge.title || bridge.name)) || "inspection");
+  const stamp = new Date().toISOString().slice(0, 10);
+
+  if (exportIfcButton) exportIfcButton.disabled = true;
+  try {
+    if (mode === "merge") {
+      if (!taggedCount) {
+        setStatus("No photos are tagged to elements — tag some in the 3D viewer first, or export standalone markers.");
+        return;
+      }
+      setStatus("Reading your IFC model to merge photos…");
+      const originalText = await getOriginalIfcText();
+      if (!originalText) { setStatus("Merge cancelled — no IFC model provided."); return; }
+      const { text, linked, withImages, skipped } =
+        await window.ifcExport.mergeIntoIFC(originalText, mergeRows, { embedImages: true });
+      if (!linked) { setStatus("No matching tagged elements were linked."); return; }
+      downloadTextFile(text, `${stem}-with-photos-${stamp}.ifc`);
+      setStatus(`Merged ${linked} photo link${linked === 1 ? "" : "s"} into your IFC (${withImages} with embedded image${withImages === 1 ? "" : "s"}${skipped ? `, ${skipped} untagged skipped` : ""}). Open it in your BIM tool and click a tagged element to see its photos.`);
+    } else {
+      setStatus(`Building IFC from ${forExport.length} photo${forExport.length === 1 ? "" : "s"}…`);
+      const { text, count, withImages } =
+        await window.ifcExport.buildIFC(forExport, bridge, { embedImages: true });
+      downloadTextFile(text, `${stem}-photos-${stamp}.ifc`);
+      setStatus(`Exported ${count} photo marker${count === 1 ? "" : "s"} to IFC (${withImages} with embedded image${withImages === 1 ? "" : "s"}).`);
+    }
+  } catch (e) {
+    console.error("IFC export failed:", e);
+    setStatus("IFC export failed: " + e.message);
+  } finally {
+    if (exportIfcButton) exportIfcButton.disabled = false;
+  }
 }
 
 async function clearAllPhotos() {
@@ -3898,6 +4644,7 @@ async function renderBridgesList() {
     meta.className = "bridge-card-meta";
     meta.innerHTML = `<span>📷 ${count} item${count !== 1 ? "s" : ""}</span>` +
                      `<span>${b.kml ? "🗺 KMZ attached" : "🗺 no overlay"}</span>` +
+                     `<span>${b.ifcFileName ? "🧊 IFC attached" : "🧊 no IFC"}</span>` +
                      (b.location ? `<span>📍 ${b.location.lat.toFixed(4)}, ${b.location.lng.toFixed(4)}</span>` : "");
     body.append(h, desc, meta);
 
@@ -3943,10 +4690,10 @@ async function openBridge(id) {
 }
 
 // ── Bridge create / edit modal ────────────────────────────────────────────────
-let bridgeEditorState = null; // { id|null, pendingKmz: File|null, clearKmz: bool }
+let bridgeEditorState = null; // { id|null, pendingKmz:File|null, clearKmz:bool, pendingIfc:File|null, clearIfc:bool }
 
 function openBridgeEditor(bridge = null) {
-  bridgeEditorState = { id: bridge ? bridge.id : null, pendingKmz: null, clearKmz: false };
+  bridgeEditorState = { id: bridge ? bridge.id : null, pendingKmz: null, clearKmz: false, pendingIfc: null, clearIfc: false };
   let overlay = document.getElementById("bridgeEditor");
   if (!overlay) {
     overlay = document.createElement("div");
@@ -3973,6 +4720,16 @@ function openBridgeEditor(bridge = null) {
               </label>
               <span id="bridgeKmzName" class="bridge-kmz-name">No file selected</span>
               <button type="button" id="bridgeKmzClear" class="secondary" hidden>Remove</button>
+            </div>
+          </div>
+          <div class="bridge-field">
+            <span>IFC model</span>
+            <div class="bridge-kmz-row">
+              <label class="bridge-kmz-pick secondary">📁 Choose IFC
+                <input type="file" id="bridgeIfc" accept=".ifc,.IFC,application/octet-stream" hidden />
+              </label>
+              <span id="bridgeIfcName" class="bridge-kmz-name">No file selected</span>
+              <button type="button" id="bridgeIfcClear" class="secondary" hidden>Remove</button>
             </div>
           </div>
         </div>
@@ -4002,17 +4759,44 @@ function openBridgeEditor(bridge = null) {
       overlay.querySelector("#bridgeKmzName").textContent = "Overlay will be removed";
       overlay.querySelector("#bridgeKmzClear").hidden = true;
     });
+    overlay.querySelector("#bridgeIfc").addEventListener("change", (e) => {
+      const f = e.target.files?.[0];
+      if (f) {
+        bridgeEditorState.pendingIfc = f;
+        bridgeEditorState.clearIfc = false;
+        overlay.querySelector("#bridgeIfcName").textContent = f.name;
+        overlay.querySelector("#bridgeIfcClear").hidden = false;
+      }
+    });
+    overlay.querySelector("#bridgeIfcClear").addEventListener("click", () => {
+      bridgeEditorState.pendingIfc = null;
+      bridgeEditorState.clearIfc = true;
+      overlay.querySelector("#bridgeIfc").value = "";
+      overlay.querySelector("#bridgeIfcName").textContent = "Model will be removed";
+      overlay.querySelector("#bridgeIfcClear").hidden = true;
+    });
   }
 
   const existingKmzName = bridge?.kml?.name;
+  const existingIfcName = bridge?.ifcFileName || "";
   overlay.querySelector("#bridgeTitle").value = bridge?.title || "";
   overlay.querySelector("#bridgeDesc").value  = bridge?.description || "";
   overlay.querySelector("#bridgeKmz").value = "";
   overlay.querySelector("#bridgeKmzName").textContent = existingKmzName || "No file selected";
   overlay.querySelector("#bridgeKmzClear").hidden = !existingKmzName;
+  overlay.querySelector("#bridgeIfc").value = "";
+  overlay.querySelector("#bridgeIfcName").textContent = existingIfcName || "No file selected";
+  overlay.querySelector("#bridgeIfcClear").hidden = !existingIfcName;
   overlay.querySelector(".bridge-dialog-title").textContent = bridge ? "🌉 Edit bridge" : "🌉 New bridge";
   overlay.style.display = "flex";
   overlay.querySelector("#bridgeTitle").focus();
+  if (bridge?.id && !existingIfcName) {
+    void getIfcRec(bridge.id).then((ifr) => {
+      if (!bridgeEditorState || bridgeEditorState.id !== bridge.id || !ifr?.name) return;
+      overlay.querySelector("#bridgeIfcName").textContent = ifr.name;
+      overlay.querySelector("#bridgeIfcClear").hidden = false;
+    }).catch(() => {});
+  }
 }
 
 function closeBridgeEditor() {
@@ -4045,6 +4829,28 @@ async function saveBridgeFromEditor() {
     saveBtn.disabled = false; saveBtn.textContent = "💾 Save bridge";
   } else if (bridgeEditorState.clearKmz) {
     rec.kml = null;
+  }
+
+  if (bridgeEditorState.pendingIfc) {
+    try {
+      await putIfcRec({
+        bridgeId: rec.id,
+        name: bridgeEditorState.pendingIfc.name,
+        size: bridgeEditorState.pendingIfc.size,
+        blob: bridgeEditorState.pendingIfc,
+        savedAt: Date.now(),
+      });
+      rec.ifcFileName = bridgeEditorState.pendingIfc.name;
+      rec.ifcSavedAt = new Date().toISOString();
+    } catch (e) {
+      console.warn("IFC save failed:", e);
+      setStatus("⚠ IFC save failed: " + e.message);
+    }
+  } else if (bridgeEditorState.clearIfc) {
+    try { await deleteIfcRec(rec.id); } catch (e) { console.warn("IFC delete failed:", e); }
+    delete rec.ifcFileName;
+    delete rec.ifcSavedAt;
+    if (ifcLoadedBridgeId === rec.id) clearIfcLoadedModel("IFC removed for this bridge.");
   }
 
   await putBridgeRec(rec);
@@ -4648,8 +5454,10 @@ async function deleteBridge(id) {
   const photos = (await runTransaction("readonly", (store) => store.getAll())).filter((p) => p.bridgeId === id);
   if (!confirm(`Delete “${name}” and its ${photos.length} photo(s)/sketch(es)? This cannot be undone.`)) return;
   for (const p of photos) await runTransaction("readwrite", (store) => store.delete(p.id));
+  try { await deleteIfcRec(id); } catch (e) { console.warn("IFC delete failed:", e); }
   await deleteBridgeRec(id);
   bridges = bridges.filter((x) => x.id !== id);
+  if (ifcLoadedBridgeId === id) clearIfcLoadedModel();
   if (activeBridgeId === id) showBridgesOverview();
   else renderBridgesList();
   setStatus(`Deleted bridge “${name}”.`);
@@ -5665,78 +6473,160 @@ function getHandleLatLng(lmap, mainLL, headingDeg, px = 55) {
   return lmap.containerPointToLatLng([mp.x + px * Math.sin(rad), mp.y - px * Math.cos(rad)]);
 }
 
-function initMap(container, record) {
-  const { lat, lng } = record.location;
-  const lmap = L.map(container, { scrollWheelZoom: true, maxZoom: 22 });
-  addEsriBasemap(lmap);
+// Draw the active bridge's georeferenced IFC footprint polygon on a Leaflet map.
+// Shared by the per-photo nav editor. Returns the polygon layer or null.
+function drawIfcFootprintOnMap(lmap, bridge) {
+  try {
+    const fp = bridge && bridge.ifcFootprint;
+    if (!fp || !Array.isArray(fp.footprint) || fp.footprint.length < 3) return null;
+    const latlngs = fp.footprint
+      .filter((c) => c && isFinite(c.lat) && isFinite(c.lon))
+      .map((c) => [c.lat, c.lon]);
+    if (latlngs.length < 3) return null;
+    const poly = L.polygon(latlngs, {
+      color: "#a855f7", weight: 2.5, opacity: 0.95,
+      fillColor: "#c084fc", fillOpacity: 0.18,
+      interactive: false, className: "ifc-footprint",
+    }).addTo(lmap);
+    return poly;
+  } catch (e) {
+    console.warn("IFC footprint draw failed:", e);
+    return null;
+  }
+}
 
-  const zoom = zoomFor300ft(lat, container.clientWidth || 280);
-  lmap.setView([lat, lng], zoom);
+function initMap(container, record) {
+  const bridge = activeBridge();
+  const fp = bridge && bridge.ifcFootprint;
+  const hasLoc = !!(record.location && isFinite(record.location.lat) && isFinite(record.location.lng));
+
+  // Choose a center: the photo's own location, else the IFC footprint center,
+  // else the bridge's own location. This lets us show the map (and the model
+  // footprint) even before the photo has a location, so a double-click can
+  // place it on the bridge.
+  const bridgeLoc = activeBridgeLocation();
+  let center;
+  if (hasLoc) center = { lat: record.location.lat, lng: record.location.lng };
+  else if (fp && fp.center && isFinite(fp.center.lat) && isFinite(fp.center.lon)) center = { lat: fp.center.lat, lng: fp.center.lon };
+  else if (bridgeLoc && isFinite(bridgeLoc.lat) && isFinite(bridgeLoc.lng)) center = { lat: bridgeLoc.lat, lng: bridgeLoc.lng };
+  else center = { lat: 39.5, lng: -98.35 };
+
+  const lmap = L.map(container, { scrollWheelZoom: true, maxZoom: 22, doubleClickZoom: false });
+  addEsriBasemap(lmap);
+  const zoom = hasLoc ? zoomFor300ft(center.lat, container.clientWidth || 280) : 18;
+  lmap.setView([center.lat, center.lng], zoom);
   lmap.invalidateSize();
 
-  const mainLL       = L.latLng(lat, lng);
-  const bridgeLoc    = activeBridgeLocation();
   if (bridgeLoc && isFinite(bridgeLoc.lat) && isFinite(bridgeLoc.lng)) {
-    const b = activeBridge();
     L.marker([bridgeLoc.lat, bridgeLoc.lng], {
-      icon: makeBridgePinIcon((b && b.title) ? b.title : "Bridge"),
+      icon: makeBridgePinIcon((bridge && bridge.title) ? bridge.title : "Bridge"),
       zIndexOffset: 50,
       interactive: false,
       keyboard: false,
     }).addTo(lmap);
   }
-  const arrowMarker  = L.marker(mainLL, { draggable: true, icon: makeArrowIcon(record.heading), zIndexOffset: 100 }).addTo(lmap);
-  const handleMarker = L.marker(getHandleLatLng(lmap, mainLL, record.heading), { draggable: true, icon: makeHandleIcon(), zIndexOffset: 200 }).addTo(lmap);
 
-  arrowMarker.on("drag", () => {
-    const ll = arrowMarker.getLatLng();
-    handleMarker.setLatLng(getHandleLatLng(lmap, ll, record.heading));
-    const navHost = container.closest(".photo-nav-modal")?.querySelector(".photo-nav-host");
-    if (navHost) {
-      const valEl = navHost.querySelector(".photo-nav-line");
-      if (valEl) valEl.textContent = navSummaryLine(record, { location: { lat: ll.lat, lng: ll.lng, accuracy: 0 } });
-    }
-  });
-  arrowMarker.on("dragend", async () => {
-    const ll = arrowMarker.getLatLng();
-    record.location = { lat: parseFloat(ll.lat.toFixed(6)), lng: parseFloat(ll.lng.toFixed(6)), accuracy: 0 };
-    handleMarker.setLatLng(getHandleLatLng(lmap, ll, record.heading));
+  // Draw the georeferenced IFC footprint (orthoprojection) if the active bridge
+  // has one, so the user can place photos relative to the real model outline.
+  const footprintPoly = drawIfcFootprintOnMap(lmap, bridge);
+  if (!hasLoc && footprintPoly) {
+    try { lmap.fitBounds(footprintPoly.getBounds(), { padding: [40, 40], maxZoom: 20 }); } catch (e) { /* ignore */ }
+  }
+
+  const inst = { lmap, arrowMarker: null, handleMarker: null, kmlLayer: null };
+
+  const wireArrow = () => {
+    inst.arrowMarker.on("drag", () => {
+      const ll = inst.arrowMarker.getLatLng();
+      inst.handleMarker.setLatLng(getHandleLatLng(lmap, ll, record.heading));
+      const navHost = container.closest(".photo-nav-modal")?.querySelector(".photo-nav-host");
+      if (navHost) {
+        const valEl = navHost.querySelector(".photo-nav-line");
+        if (valEl) valEl.textContent = navSummaryLine(record, {
+          location: {
+            lat: ll.lat,
+            lng: ll.lng,
+            accuracy: 0,
+            alt: (record.location && isFinite(record.location.alt)) ? record.location.alt : null,
+          }
+        });
+      }
+    });
+    inst.arrowMarker.on("dragend", async () => {
+      const ll = inst.arrowMarker.getLatLng();
+      record.location = {
+        lat: parseFloat(ll.lat.toFixed(6)),
+        lng: parseFloat(ll.lng.toFixed(6)),
+        accuracy: 0,
+        alt: (record.location && isFinite(record.location.alt)) ? record.location.alt : null,
+      };
+      inst.handleMarker.setLatLng(getHandleLatLng(lmap, ll, record.heading));
+      await runTransaction("readwrite", (store) => store.put(record));
+      const navHost = container.closest(".photo-nav-modal")?.querySelector(".photo-nav-host");
+      if (navHost) renderNavArea(navHost, record);
+      setStatus("Location updated by dragging.");
+    });
+    inst.handleMarker.on("drag", () => {
+      const newH = Math.round(bearingBetween(inst.arrowMarker.getLatLng(), inst.handleMarker.getLatLng()));
+      record.heading = newH;
+      inst.arrowMarker.setIcon(makeArrowIcon(newH));
+    });
+    inst.handleMarker.on("dragend", async () => {
+      const newH = Math.round(bearingBetween(inst.arrowMarker.getLatLng(), inst.handleMarker.getLatLng()));
+      record.heading = newH;
+      inst.handleMarker.setLatLng(getHandleLatLng(lmap, inst.arrowMarker.getLatLng(), newH));
+      inst.arrowMarker.setIcon(makeArrowIcon(newH));
+      await runTransaction("readwrite", (store) => store.put(record));
+      const navHost = container.closest(".photo-nav-modal")?.querySelector(".photo-nav-host");
+      if (navHost) renderNavArea(navHost, record);
+      setStatus(`Direction: ${newH}\u00b0 ${bearingLabel(newH)}.`);
+    });
+  };
+
+  // Create the draggable arrow + direction handle at a given latlng.
+  const ensureMarkers = (ll) => {
+    if (inst.arrowMarker) { inst.arrowMarker.setLatLng(ll); inst.handleMarker.setLatLng(getHandleLatLng(lmap, ll, record.heading)); return; }
+    inst.arrowMarker  = L.marker(ll, { draggable: true, icon: makeArrowIcon(record.heading), zIndexOffset: 100 }).addTo(lmap);
+    inst.handleMarker = L.marker(getHandleLatLng(lmap, ll, record.heading), { draggable: true, icon: makeHandleIcon(), zIndexOffset: 200 }).addTo(lmap);
+    wireArrow();
+  };
+
+  if (hasLoc) ensureMarkers(L.latLng(center.lat, center.lng));
+
+  // Double-click the map to snap (or first-place) the photo at the clicked point.
+  lmap.on("dblclick", async (e) => {
+    const ll = e.latlng;
+    const firstPlace = !record.location;
+    record.location = {
+      lat: parseFloat(ll.lat.toFixed(6)),
+      lng: parseFloat(ll.lng.toFixed(6)),
+      accuracy: 0,
+      alt: (record.location && isFinite(record.location.alt)) ? record.location.alt : null,
+      manual: true,
+    };
+    ensureMarkers(ll);
     await runTransaction("readwrite", (store) => store.put(record));
     const navHost = container.closest(".photo-nav-modal")?.querySelector(".photo-nav-host");
     if (navHost) renderNavArea(navHost, record);
-    setStatus("Location updated by dragging.");
+    setStatus(firstPlace
+      ? `Location placed at ${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}.`
+      : `Location snapped to ${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}.`);
   });
 
-  handleMarker.on("drag", () => {
-    const newH = Math.round(bearingBetween(arrowMarker.getLatLng(), handleMarker.getLatLng()));
-    record.heading = newH;
-    arrowMarker.setIcon(makeArrowIcon(newH));
-  });
-  handleMarker.on("dragend", async () => {
-    const newH = Math.round(bearingBetween(arrowMarker.getLatLng(), handleMarker.getLatLng()));
-    record.heading = newH;
-    handleMarker.setLatLng(getHandleLatLng(lmap, arrowMarker.getLatLng(), newH));
-    arrowMarker.setIcon(makeArrowIcon(newH));
-    await runTransaction("readwrite", (store) => store.put(record));
-    const navHost = container.closest(".photo-nav-modal")?.querySelector(".photo-nav-host");
-    if (navHost) renderNavArea(navHost, record);
-    setStatus(`Direction: ${newH}\u00b0 ${bearingLabel(newH)}.`);
-  });
-
-  return { lmap, arrowMarker, handleMarker, kmlLayer: null };
+  return inst;
 }
 
 function syncMapToRecord(recordId, record) {
   const inst = leafletInstances.get(recordId);
   if (!inst) return;
   const { lmap, arrowMarker, handleMarker } = inst;
-  if (record.location) {
+  if (record.location && arrowMarker && handleMarker) {
     const ll = L.latLng(record.location.lat, record.location.lng);
     arrowMarker.setLatLng(ll);
     lmap.setView(ll, lmap.getZoom());
     handleMarker.setLatLng(getHandleLatLng(lmap, ll, record.heading));
   }
-  arrowMarker.setIcon(makeArrowIcon(record.heading));
+  if (arrowMarker) arrowMarker.setIcon(makeArrowIcon(record.heading));
 }
 
 // ── KML / KMZ ─────────────────────────────────────────────────────────────────
@@ -6377,78 +7267,43 @@ function invert3x3(m) {
   return [A / det, B / det, C / det, D / det, E / det, F / det, G / det, H / det, I / det];
 }
 
-function normalizeDeskewAxisAngle(theta) {
-  let t = Number(theta) || 0;
-  while (t <= -Math.PI / 2) t += Math.PI;
-  while (t > Math.PI / 2) t -= Math.PI;
-  return t;
-}
-
-function closestSmallDeskewAngle(theta) {
-  const t = normalizeDeskewAxisAngle(theta);
-  const cands = [t, t - Math.PI / 2, t + Math.PI / 2];
-  let best = cands[0];
-  for (const c of cands) {
-    if (Math.abs(c) < Math.abs(best)) best = c;
-  }
-  return best;
-}
-
+// Compute the camera-roll skew angle (radians) from detected AprilTag corners.
+// For each edge of each tag, we measure how far it deviates from the nearest
+// cardinal direction (horizontal or vertical).  The length-weighted mean of all
+// those deviations gives the signed roll: positive = CW tilt, negative = CCW tilt.
+// Apply -skew to the canvas (canvas positive = CW) to level the image.
 function dominantDeskewAngleFromDetections(detections, width, height) {
-  let sumCos2 = 0;
-  let sumSin2 = 0;
-  let weightSum = 0;
+  let sumSkew = 0, totalLen = 0;
   for (const d of detections || []) {
     const cn = Array.isArray(d?.cornersNormalized) ? d.cornersNormalized : [];
     if (cn.length !== 4) continue;
-    const pts = cn
-      .map((p) => ({ x: Number(p?.x) * width, y: Number(p?.y) * height }))
-      .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
-    if (pts.length !== 4) continue;
-    // Corner start index can rotate per tag. Evaluate both opposite-edge families
-    // and keep the family that implies the smaller correction magnitude.
-    const families = [
-      [[0, 1], [2, 3]],
-      [[1, 2], [3, 0]],
-    ];
-    let bestAngle = null;
-    let bestAbs = Infinity;
-    let bestWeight = 0;
-    for (const fam of families) {
-      let famCos2 = 0;
-      let famSin2 = 0;
-      let famWeight = 0;
-      for (const [i0, i1] of fam) {
-        const a = pts[i0];
-        const b = pts[i1];
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const len = Math.hypot(dx, dy);
-        if (!(len > 1e-3)) continue;
-        const t = normalizeDeskewAxisAngle(Math.atan2(dy, dx));
-        famCos2 += Math.cos(2 * t) * len;
-        famSin2 += Math.sin(2 * t) * len;
-        famWeight += len;
+    const pts = cn.map((p) => [Number(p?.x) * width, Number(p?.y) * height]);
+    if (pts.some((p) => !Number.isFinite(p[0]) || !Number.isFinite(p[1]))) continue;
+    for (let i = 0; i < 4; i++) {
+      const [ax, ay] = pts[i];
+      const [bx, by] = pts[(i + 1) % 4];
+      const dx = bx - ax, dy = by - ay;
+      const len = Math.hypot(dx, dy);
+      if (!(len > 1)) continue;
+      // Raw angle in (-π, π].  Map to line direction (-π/2, π/2].
+      let ang = Math.atan2(dy, dx);
+      if (ang > Math.PI / 2)  ang -= Math.PI;
+      if (ang <= -Math.PI / 2) ang += Math.PI;
+      // Deviation from nearest cardinal: 0° (horizontal) or ±90° (vertical).
+      let skew;
+      if (Math.abs(ang) <= Math.PI / 4) {
+        skew = ang;                       // near-horizontal: skew = angle from 0°
+      } else {
+        skew = ang > 0 ? ang - Math.PI / 2 : ang + Math.PI / 2;  // near-vertical
       }
-      if (!(famWeight > 0)) continue;
-      const famAngle = closestSmallDeskewAngle(0.5 * Math.atan2(famSin2, famCos2));
-      const famAbs = Math.abs(famAngle);
-      if (famAbs < bestAbs) {
-        bestAbs = famAbs;
-        bestAngle = famAngle;
-        bestWeight = famWeight;
-      }
-    }
-    if (Number.isFinite(bestAngle) && bestWeight > 0) {
-      sumCos2 += Math.cos(2 * bestAngle) * bestWeight;
-      sumSin2 += Math.sin(2 * bestAngle) * bestWeight;
-      weightSum += bestWeight;
+      sumSkew += skew * len;
+      totalLen += len;
     }
   }
-  if (!(weightSum > 0)) return null;
-  const angle = closestSmallDeskewAngle(0.5 * Math.atan2(sumSin2, sumCos2));
+  if (!(totalLen > 0)) return null;
+  const skew = sumSkew / totalLen;
   const maxAbs = 25 * Math.PI / 180;
-  return Math.max(-maxAbs, Math.min(maxAbs, angle));
+  return Math.max(-maxAbs, Math.min(maxAbs, skew));
 }
 
 function canvasToJpegBlob(canvas, quality = 0.92) {
@@ -6457,59 +7312,379 @@ function canvasToJpegBlob(canvas, quality = 0.92) {
   });
 }
 
-function rotateCanvasImage(srcCanvas, angleRad, bg = "#000") {
-  const w = srcCanvas.width;
-  const h = srcCanvas.height;
-  const outCanvas = document.createElement("canvas");
-  outCanvas.width = w;
-  outCanvas.height = h;
-  const ctx = outCanvas.getContext("2d");
+// Rotate srcCanvas/ImageBitmap by angleRad about its centre.
+// Corners are filled by repeating the nearest edge pixel row/column
+// (a 1-pixel-thick approximation of BORDER_REPLICATE).
+function rotateCanvasImage(src, angleRad) {
+  const w = src.width;
+  const h = src.height;
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext("2d");
   if (!ctx) throw new Error("Could not render deskew output.");
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, w, h);
+
+  // Draw rotated image.
+  ctx.save();
   ctx.translate(w / 2, h / 2);
   ctx.rotate(angleRad);
-  ctx.drawImage(srcCanvas, -w / 2, -h / 2);
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  return outCanvas;
+  ctx.drawImage(src, -w / 2, -h / 2);
+  ctx.restore();
+
+  // Fill exposed corners by stretching the four border strips.
+  // The strip width needed = d where d = max(|sin(a)|*h, |sin(a)|*w)/2 + 2.
+  const sinA = Math.abs(Math.sin(angleRad));
+  const strip = Math.ceil(sinA * Math.max(w, h) / 2) + 2;
+  if (strip > 0) {
+    ctx.save();
+    // top strip: stretch the top row down
+    ctx.drawImage(out, 0, strip, w, 1, 0, 0, w, strip);
+    // bottom strip: stretch the bottom row up
+    ctx.drawImage(out, 0, h - strip - 1, w, 1, 0, h - strip, w, strip);
+    // left strip: stretch the left column right
+    ctx.drawImage(out, strip, 0, 1, h, 0, 0, strip, h);
+    // right strip: stretch the right column left
+    ctx.drawImage(out, w - strip - 1, 0, 1, h, w - strip, 0, strip, h);
+    ctx.restore();
+  }
+  return out;
 }
 
+
+// ─────────────────────────── Perspective warp helpers ────────────────────────
+
+// Apply 3×3 homography H to point (x,y) → [u,v]
+function _applyH(H, x, y) {
+  const w = H[2][0]*x + H[2][1]*y + H[2][2];
+  return [(H[0][0]*x + H[0][1]*y + H[0][2]) / w,
+          (H[1][0]*x + H[1][1]*y + H[1][2]) / w];
+}
+
+// Invert 3×3 homography
+function _invertH(H) {
+  const [[a,b,c],[d,e,f],[g,h,k]] = H;
+  const det = a*(e*k-f*h) - b*(d*k-f*g) + c*(d*h-e*g);
+  if (Math.abs(det) < 1e-12) return null;
+  return [
+    [(e*k-f*h)/det, (c*h-b*k)/det, (b*f-c*e)/det],
+    [(f*g-d*k)/det, (a*k-c*g)/det, (c*d-a*f)/det],
+    [(d*h-e*g)/det, (b*g-a*h)/det, (a*e-b*d)/det],
+  ];
+}
+
+// Exact homography from 4 src→dst point pairs via Gaussian elimination (8×8).
+function _homography4(srcP, dstP) {
+  const A = [], b = [];
+  for (let i = 0; i < 4; i++) {
+    const [x,y] = srcP[i], [u,v] = dstP[i];
+    A.push([-x,-y,-1, 0, 0, 0, u*x, u*y]); b.push(-u);
+    A.push([ 0, 0, 0,-x,-y,-1, v*x, v*y]); b.push(-v);
+  }
+  const h = solveLinearSystem(A, b);
+  if (!h) return null;
+  return [[h[0],h[1],h[2]],[h[3],h[4],h[5]],[h[6],h[7],1]];
+}
+
+// Least-squares homography from N≥4 src→dst point pairs (normal equations).
+function _homographyLSQ(srcP, dstP) {
+  if (srcP.length === 4) return _homography4(srcP, dstP);
+  const rows = [], rhs = [];
+  for (let i = 0; i < srcP.length; i++) {
+    const [x,y] = srcP[i], [u,v] = dstP[i];
+    rows.push([-x,-y,-1, 0, 0, 0, u*x, u*y]); rhs.push(-u);
+    rows.push([ 0, 0, 0,-x,-y,-1, v*x, v*y]); rhs.push(-v);
+  }
+  const n = 8;
+  const ATA = Array.from({length:n}, ()=>new Array(n).fill(0));
+  const ATb = new Array(n).fill(0);
+  for (let r = 0; r < rows.length; r++) {
+    for (let i = 0; i < n; i++) {
+      ATb[i] += rows[r][i] * rhs[r];
+      for (let j = 0; j < n; j++) ATA[i][j] += rows[r][i] * rows[r][j];
+    }
+  }
+  const h = solveLinearSystem(ATA, ATb);
+  if (!h) return _homography4(srcP.slice(0,4), dstP.slice(0,4));
+  return [[h[0],h[1],h[2]],[h[3],h[4],h[5]],[h[6],h[7],1]];
+}
+
+// Scale a homography H (defined for a detect-canvas of scale dScale relative to
+// the full-res image) into full-res space.  H_full = S * H * S^-1 where S=diag(s,s,1).
+function _scaleH(H, s) {
+  const [[a,b,c],[d,e,f],[g,h,i]] = H;
+  return [[a, b, c*s],[d, e, f*s],[g/s, h/s, i]];
+}
+
+function _mulH(A, B) {
+  return [
+    [A[0][0]*B[0][0] + A[0][1]*B[1][0] + A[0][2]*B[2][0], A[0][0]*B[0][1] + A[0][1]*B[1][1] + A[0][2]*B[2][1], A[0][0]*B[0][2] + A[0][1]*B[1][2] + A[0][2]*B[2][2]],
+    [A[1][0]*B[0][0] + A[1][1]*B[1][0] + A[1][2]*B[2][0], A[1][0]*B[0][1] + A[1][1]*B[1][1] + A[1][2]*B[2][1], A[1][0]*B[0][2] + A[1][1]*B[1][2] + A[1][2]*B[2][2]],
+    [A[2][0]*B[0][0] + A[2][1]*B[1][0] + A[2][2]*B[2][0], A[2][0]*B[0][1] + A[2][1]*B[1][1] + A[2][2]*B[2][1], A[2][0]*B[0][2] + A[2][1]*B[1][2] + A[2][2]*B[2][2]],
+  ];
+}
+
+// Normalize homography so transformed source image fits output frame.
+// This prevents global shift and clipping after deskew.
+function _fitHomographyToFrame(H, srcW, srcH, outW, outH, margin = 4) {
+  const corners = [[0,0],[srcW,0],[srcW,srcH],[0,srcH]].map(([x,y]) => _applyH(H, x, y));
+  if (corners.some((p) => !p || !Number.isFinite(p[0]) || !Number.isFinite(p[1]))) return H;
+  const xs = corners.map((p) => p[0]);
+  const ys = corners.map((p) => p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const bw = Math.max(1e-6, maxX - minX);
+  const bh = Math.max(1e-6, maxY - minY);
+  const availW = Math.max(1, outW - 2*margin);
+  const availH = Math.max(1, outH - 2*margin);
+  const fitScale = Math.min(availW / bw, availH / bh);
+  const tx = (outW - bw * fitScale) * 0.5 - minX * fitScale;
+  const ty = (outH - bh * fitScale) * 0.5 - minY * fitScale;
+  const N = [[fitScale, 0, tx],[0, fitScale, ty],[0,0,1]];
+  return _mulH(N, H);
+}
+
+// Render one textured triangle using the canvas affine-per-triangle technique.
+// (x0,y0)→(u0,v0) etc.  Destination coords → source coords.
+function _drawTexTri(ctx, img, x0,y0,u0,v0, x1,y1,u1,v1, x2,y2,u2,v2) {
+  const du1=u1-u0, du2=u2-u0, dv1=v1-v0, dv2=v2-v0;
+  const det = du1*dv2 - du2*dv1;
+  if (Math.abs(det) < 0.5) return;
+  // Affine transform: src(u,v) → dst(x,y)
+  const a = ((x1-x0)*dv2-(x2-x0)*dv1)/det;
+  const b = ((x2-x0)*du1-(x1-x0)*du2)/det;
+  const c =  x0 - a*u0 - b*v0;
+  const d = ((y1-y0)*dv2-(y2-y0)*dv1)/det;
+  const e = ((y2-y0)*du1-(y1-y0)*du2)/det;
+  const f =  y0 - d*u0 - e*v0;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.lineTo(x2,y2); ctx.closePath();
+  ctx.clip();
+  // canvas transform(m11,m12,m21,m22,dx,dy): maps src (u,v) → dst
+  ctx.transform(a, d, b, e, c, f);
+  ctx.drawImage(img, 0, 0);
+  ctx.restore();
+}
+
+// Apply homography H (src→dst) to warp srcCanvas into dstW×dstH output.
+// Uses a triangular mesh: more subdivisions = better quality.
+function warpPerspectiveCanvas(srcCanvas, H, dstW, dstH, mesh = 40) {
+  const Hinv = _invertH(H); // dst→src for backward mapping
+  if (!Hinv) return srcCanvas;
+  const out = document.createElement("canvas");
+  out.width = dstW; out.height = dstH;
+  const ctx = out.getContext("2d");
+  if (!ctx) return srcCanvas;
+  const cw = dstW / mesh, ch = dstH / mesh;
+  for (let row = 0; row < mesh; row++) {
+    for (let col = 0; col < mesh; col++) {
+      const dx0=col*cw, dy0=row*ch, dx1=(col+1)*cw, dy1=(row+1)*ch;
+      const [u00,v00] = _applyH(Hinv, dx0, dy0);
+      const [u10,v10] = _applyH(Hinv, dx1, dy0);
+      const [u01,v01] = _applyH(Hinv, dx0, dy1);
+      const [u11,v11] = _applyH(Hinv, dx1, dy1);
+      _drawTexTri(ctx, srcCanvas, dx0,dy0,u00,v00, dx1,dy0,u10,v10, dx0,dy1,u01,v01);
+      _drawTexTri(ctx, srcCanvas, dx1,dy0,u10,v10, dx1,dy1,u11,v11, dx0,dy1,u01,v01);
+    }
+  }
+  return out;
+}
+
+// Return points ordered counter-clockwise around centroid.
+function _orderQuadAroundCentroidCCW(pts) {
+  const cx = (pts[0][0] + pts[1][0] + pts[2][0] + pts[3][0]) / 4;
+  const cy = (pts[0][1] + pts[1][1] + pts[2][1] + pts[3][1]) / 4;
+  return pts
+    .map((p) => ({ p, a: Math.atan2(p[1] - cy, p[0] - cx) }))
+    .sort((u, v) => u.a - v.a)
+    .map((x) => x.p);
+}
+
+// Build homography candidates from the largest detected tag.
+// We test both winding directions and all cyclic shifts to avoid axis flips.
+function computeDeskewHomographyCandidates(detections, width, height) {
+  let bestPts = null;
+  let bestArea = 0;
+  for (const d of detections || []) {
+    const cn = Array.isArray(d?.cornersNormalized) ? d.cornersNormalized : [];
+    if (cn.length !== 4) continue;
+    const raw = cn.map((p) => [Number(p.x) * width, Number(p.y) * height]);
+    if (raw.some((c) => !Number.isFinite(c[0]) || !Number.isFinite(c[1]))) continue;
+    const pts = _orderQuadAroundCentroidCCW(raw);
+    const [p0, p1, p2, p3] = pts;
+    const area = Math.abs((p0[0] - p2[0]) * (p1[1] - p3[1]) - (p1[0] - p3[0]) * (p0[1] - p2[1])) / 2;
+    if (area > bestArea) { bestArea = area; bestPts = pts; }
+  }
+  if (!bestPts) return [];
+
+  const [p0, p1, p2, p3] = bestPts;
+  const cx = (p0[0] + p1[0] + p2[0] + p3[0]) / 4;
+  const cy = (p0[1] + p1[1] + p2[1] + p3[1]) / 4;
+  const h = ([
+    Math.hypot(p1[0] - p0[0], p1[1] - p0[1]),
+    Math.hypot(p2[0] - p1[0], p2[1] - p1[1]),
+    Math.hypot(p3[0] - p2[0], p3[1] - p2[1]),
+    Math.hypot(p0[0] - p3[0], p0[1] - p3[1]),
+  ].reduce((a, b) => a + b, 0)) / 8;
+
+  const ideal = [[cx - h, cy - h], [cx + h, cy - h], [cx + h, cy + h], [cx - h, cy + h]];
+  const rev = [bestPts[0], bestPts[3], bestPts[2], bestPts[1]];
+  const out = [];
+  for (const base of [bestPts, rev]) {
+    for (let r = 0; r < 4; r++) {
+      const src = [base[r % 4], base[(r + 1) % 4], base[(r + 2) % 4], base[(r + 3) % 4]];
+      const H = _homography4(src, ideal);
+      if (H) out.push(H);
+    }
+  }
+  return out;
+}
+
+// Lower is better: how close transformed tags are to rectangles (equal opposite
+// edges + 90° corners). Uses detected corners in the already-warped image.
+function rectificationErrorFromDetections(detections, width, height) {
+  let err = 0;
+  let wsum = 0;
+  for (const d of detections || []) {
+    const cn = Array.isArray(d?.cornersNormalized) ? d.cornersNormalized : [];
+    if (cn.length !== 4) continue;
+    const p = cn.map((q) => [Number(q.x) * width, Number(q.y) * height]);
+    if (p.some((q) => !Number.isFinite(q[0]) || !Number.isFinite(q[1]))) continue;
+    const v = [
+      [p[1][0]-p[0][0], p[1][1]-p[0][1]],
+      [p[2][0]-p[1][0], p[2][1]-p[1][1]],
+      [p[3][0]-p[2][0], p[3][1]-p[2][1]],
+      [p[0][0]-p[3][0], p[0][1]-p[3][1]],
+    ];
+    const l = v.map((e) => Math.hypot(e[0], e[1]));
+    if (l.some((x) => !(x > 1e-3))) continue;
+    const eq = Math.abs(l[0]-l[2])/(l[0]+l[2]) + Math.abs(l[1]-l[3])/(l[1]+l[3]);
+    const ortho =
+      Math.abs((v[0][0]*v[1][0] + v[0][1]*v[1][1]) / (l[0]*l[1])) +
+      Math.abs((v[1][0]*v[2][0] + v[1][1]*v[2][1]) / (l[1]*l[2])) +
+      Math.abs((v[2][0]*v[3][0] + v[2][1]*v[3][1]) / (l[2]*l[3])) +
+      Math.abs((v[3][0]*v[0][0] + v[3][1]*v[0][1]) / (l[3]*l[0]));
+    const per = l[0] + l[1] + l[2] + l[3];
+    err += (eq + 0.35 * ortho) * per;
+    wsum += per;
+  }
+  if (!(wsum > 0)) return 1e9;
+  return err / wsum;
+}
+
+
+
 async function requestDeskewFromOpenCv(blob, existingDetections = []) {
+  // Try the Python OpenCV server first — it processes full-res and uses BORDER_REPLICATE fill.
+  // Convert blob to base64 BEFORE the server try-catch so a blob-read error won't be
+  // mistaken for "server unavailable".
+  let b64 = null;
+  try {
+    b64 = await blobToBase64NoPrefix(blob);
+  } catch (blobErr) {
+    console.warn("Deskew: could not read blob as base64:", blobErr.message);
+  }
+
+  if (b64) {
+    const ac = new AbortController();
+    const timeout = setTimeout(() => ac.abort(), 5000); // 5 s network timeout
+    try {
+      const resp = await fetch("http://localhost:8766/deskew", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageBase64: b64 }),
+        signal: ac.signal,
+      });
+      clearTimeout(timeout);
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.ok && data.imageBase64) {
+          return {
+            blob: base64ToBlob(data.imageBase64, data.mime || "image/jpeg"),
+            markerCount: Number(data.markerCount) || 0,
+            angleDeg: Number(data.angleDeg) || 0,
+          };
+        }
+        // Server ran but reported a processing error (e.g. corrupted image) — log and fall through to JS.
+        console.warn("Deskew server error:", data.error || "unknown");
+      } else {
+        console.warn("Deskew server HTTP", resp.status, "— falling back to JS");
+      }
+    } catch (serverErr) {
+      clearTimeout(timeout);
+      if (serverErr.name === "AbortError") {
+        console.info("Deskew server timed out (5 s), using JS fallback");
+      } else {
+        console.info("Deskew server unreachable, using JS fallback:", serverErr.message);
+      }
+    }
+  }
+
+  // JS canvas fallback — full perspective correction using tag corner homography.
+  // Detection runs on a downscaled canvas for speed; warp is applied full-res.
   const bmp = await createImageBitmap(blob);
   try {
-    const maxDim = 1600;
-    const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
-    const sw = Math.max(1, Math.round(bmp.width * scale));
-    const sh = Math.max(1, Math.round(bmp.height * scale));
-    const srcCanvas = document.createElement("canvas");
-    srcCanvas.width = sw;
-    srcCanvas.height = sh;
-    const srcCtx = srcCanvas.getContext("2d", { willReadFrequently: true });
-    if (!srcCtx) throw new Error("Could not access image data for deskew.");
-    srcCtx.drawImage(bmp, 0, 0, sw, sh);
+    const fw = bmp.width, fh = bmp.height;
+
+    // --- Detection pass: downscale to 1600px max ---
+    const detectMaxDim = 1600;
+    const dScale = Math.min(1, detectMaxDim / Math.max(fw, fh));
+    const dw = Math.max(1, Math.round(fw * dScale));
+    const dh = Math.max(1, Math.round(fh * dScale));
+    const detectCanvas = document.createElement("canvas");
+    detectCanvas.width = dw;
+    detectCanvas.height = dh;
+    const detectCtx = detectCanvas.getContext("2d", { willReadFrequently: true });
+    if (!detectCtx) throw new Error("Could not access image data for deskew.");
+    detectCtx.drawImage(bmp, 0, 0, dw, dh);
 
     const detected = (Array.isArray(existingDetections) && existingDetections.length)
       ? existingDetections
-      : findAprilTagsInCanvas(srcCanvas, 960).detections;
-    const baseAngle = dominantDeskewAngleFromDetections(detected, sw, sh);
-    if (!Number.isFinite(baseAngle)) throw new Error("No AprilTag corners available for deskew.");
-    const candidates = [
-      { correction: -baseAngle, canvas: rotateCanvasImage(srcCanvas, -baseAngle) },
-      { correction: baseAngle, canvas: rotateCanvasImage(srcCanvas, baseAngle) },
-    ];
-    let best = null;
-    for (const c of candidates) {
-      const redetected = findAprilTagsInCanvas(c.canvas, 960).detections;
-      const residual = dominantDeskewAngleFromDetections(redetected, c.canvas.width, c.canvas.height);
-      const score = Number.isFinite(residual) ? Math.abs(residual) : 999;
-      if (!best || score < best.score) best = { ...c, score, residual, markerCount: redetected.length || detected.length };
+      : findAprilTagsInCanvas(detectCanvas, 960).detections;
+
+    if (!detected.length) throw new Error("No AprilTag corners available for deskew.");
+
+    // --- Compute perspective-correction homography in detect-canvas space ---
+    // Build orientation candidates and select the one that best rectifies *all* tags.
+    const candidates = computeDeskewHomographyCandidates(detected, dw, dh);
+    if (!candidates.length) throw new Error("Could not compute deskew homography (need at least 1 tag).");
+
+    let H = null;
+    let bestErr = Infinity;
+    for (const hc of candidates) {
+      const hcFit = _fitHomographyToFrame(hc, dw, dh, dw, dh, 3);
+      const testWarp = warpPerspectiveCanvas(detectCanvas, hcFit, dw, dh, 36);
+      const redetected = findAprilTagsInCanvas(testWarp, 960).detections;
+      const rectErr = rectificationErrorFromDetections(redetected, dw, dh);
+      // Favor candidates that keep more tags detectable after warp.
+      const missPenalty = Math.max(0, detected.length - redetected.length) * 0.05;
+      const score = rectErr + missPenalty;
+      if (score < bestErr) {
+        bestErr = score;
+        H = hc;
+      }
     }
-    const outCanvas = best?.canvas || candidates[0].canvas;
-    const used = Number.isFinite(best?.correction) ? best.correction : (-baseAngle);
+    if (!H) throw new Error("Could not resolve deskew orientation.");
+
+    // Scale H to full-res space (H was computed for dw×dh, image is fw×fh)
+    const s = fw / dw;
+    const HfullRaw = _scaleH(H, s);
+    const Hfull = _fitHomographyToFrame(HfullRaw, fw, fh, fw, fh, 6);
+
+    // --- Draw full-res source canvas ---
+    const fullCanvas = document.createElement("canvas");
+    fullCanvas.width = fw;
+    fullCanvas.height = fh;
+    const fullCtx = fullCanvas.getContext("2d");
+    if (!fullCtx) throw new Error("Could not draw full-res image.");
+    fullCtx.drawImage(bmp, 0, 0);
+
+    // --- Apply perspective warp (mesh=64 → 64×64×2 = 8192 triangles) ---
+    const outCanvas = warpPerspectiveCanvas(fullCanvas, Hfull, fw, fh, 64);
     return {
-      blob: await canvasToJpegBlob(outCanvas),
-      markerCount: Number(best?.markerCount) || detected.length,
-      angleDeg: (used * 180) / Math.PI,
+      blob: await canvasToJpegBlob(outCanvas, 0.92),
+      markerCount: detected.length,
+      angleDeg: null, // perspective correction — not a single angle
     };
   } finally {
     bmp.close?.();
@@ -6599,10 +7774,33 @@ function renderAprilTagArea(container, record) {
 // ── Tags ──────────────────────────────────────────────────────────────────────
 function renderTagsArea(container, record) {
   container.innerHTML = "";
+  if (record && record.id != null) container.dataset.photoId = record.id;
   const has = !tagsAreEmpty(record.tags);
   const hdr = makeAreaHeader("\ud83c\udff7 Tags", has ? "Edit" : "Add");
   container.append(hdr.div);
   container.append(has ? buildTagSummary(record.tags) : makeMuted("No tags yet"));
+  // Surface any 3D IFC elements this photo is tagged to (set from the 3D viewer).
+  for (const t of normalizeIfcTags(record)) {
+    const chip = document.createElement("div");
+    chip.className = "ifc-tag-chip";
+    const label = t.name || t.elementId || "IFC element";
+    const type = t.type ? ` (${t.type})` : "";
+    chip.innerHTML = `<span>\ud83e\uddca ${escapeHtml(label)}${escapeHtml(type)}</span>`;
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "ifc-tag-remove";
+    rm.textContent = "\u2715";
+    rm.title = "Remove 3D element tag";
+    rm.addEventListener("click", async () => {
+      const keep = normalizeIfcTags(record).filter((x) => String(x.expressId) !== String(t.expressId));
+      setIfcTags(record, keep);
+      await runTransaction("readwrite", (s) => s.put(record));
+      renderTagsArea(container, record);
+      setStatus("3D element tag removed.");
+    });
+    chip.append(rm);
+    container.append(chip);
+  }
   hdr.btn.addEventListener("click", () => {
     container.innerHTML = "";
     const working = normalizeTags(record.tags);
@@ -6627,9 +7825,10 @@ function navSummaryLine(record, overrides = {}) {
   const attitude = overrides.attitude ?? record.attitude ?? null;
   const parts = [];
   if (loc && isFinite(loc.lat) && isFinite(loc.lng)) parts.push(`📍 ${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}`);
+  if (loc && isFinite(loc.alt)) parts.push(`⛰ ${loc.alt.toFixed(1)} m`);
   if (heading != null && isFinite(heading)) parts.push(`🧭 ${Math.round(heading)}° ${bearingLabel(heading)}`);
   if (attitude != null && isFinite(attitude)) parts.push(`📐 ${attitudeLabel(attitude)}`);
-  return parts.length ? parts.join(" · ") : "📍 — · 🧭 — · 📐 —";
+  return parts.length ? parts.join(" · ") : "📍 — · ⛰ — · 🧭 — · 📐 —";
 }
 
 function openPhotoNavModal(record) {
@@ -6645,7 +7844,10 @@ function openPhotoNavModal(record) {
           <button type="button" class="secondary photo-nav-close">✕ Close</button>
         </div>
         <div class="photo-nav-host"></div>
-        <p class="map-hint">Drag the ▲ arrow to adjust location · Drag the yellow dot to adjust direction</p>
+        <div class="photo-nav-3d-row">
+          <button type="button" class="secondary photo-nav-3d-btn">🧊 View in 3D &amp; tag element</button>
+        </div>
+        <p class="map-hint">Double-click the map to place/move location · Drag the ▲ arrow to fine-tune · Drag the yellow dot to set direction</p>
         <div class="photo-map-container"></div>
       </div>`;
     document.body.appendChild(overlay);
@@ -6653,6 +7855,9 @@ function openPhotoNavModal(record) {
       const inst = leafletInstances.get(overlay.dataset.recordId);
       if (inst) { inst.lmap.remove(); leafletInstances.delete(overlay.dataset.recordId); }
       overlay.hidden = true;
+    });
+    overlay.querySelector(".photo-nav-3d-btn").addEventListener("click", () => {
+      if (navModalRecord) openIfcForPhoto(navModalRecord);
     });
     overlay.addEventListener("click", (e) => {
       if (e.target !== overlay) return;
@@ -6662,20 +7867,63 @@ function openPhotoNavModal(record) {
     });
   }
 
+  // Remove any prior Leaflet instance (from this or another photo) so the shared
+  // container can be re-initialized cleanly.
+  const priorId = overlay.dataset.recordId;
+  if (priorId && leafletInstances.has(priorId)) {
+    const pInst = leafletInstances.get(priorId);
+    if (pInst) { pInst.lmap.remove(); leafletInstances.delete(priorId); }
+  }
   const prior = leafletInstances.get(record.id);
   if (prior) { prior.lmap.remove(); leafletInstances.delete(record.id); }
 
   const navHost = overlay.querySelector(".photo-nav-host");
+  navModalRecord = record;
   renderNavArea(navHost, record);
+  // Show modal before creating Leaflet so container has a real size.
+  overlay.hidden = false;
   const mapContainer = overlay.querySelector(".photo-map-container");
   mapContainer.innerHTML = "";
-  if (record.location) {
-    const inst = initMap(mapContainer, record);
-    leafletInstances.set(record.id, inst);
-    if (kmlGeoJSON) applyKmlToMap(inst);
-  }
+  // Use a fresh inner element each time so Leaflet never sees an already-
+  // initialized container. Always show the map so the user can see the bridge /
+  // IFC footprint and double-click to place a location, even for photos with no
+  // location yet.
+  const mapEl = document.createElement("div");
+  mapEl.style.width = "100%";
+  mapEl.style.height = "100%";
+  mapContainer.appendChild(mapEl);
+  const inst = initMap(mapEl, record);
+  leafletInstances.set(record.id, inst);
+  // Leaflet in modals can start slightly off-center if layout settles after init.
+  // Re-invalidate and re-center on the next ticks so satellite tiles align.
+  const recenter = () => {
+    if (!inst || !inst.lmap) return;
+    inst.lmap.invalidateSize({ pan: false });
+    const hasLoc = !!(record.location && isFinite(record.location.lat) && isFinite(record.location.lng));
+    if (hasLoc) {
+      const ll = L.latLng(record.location.lat, record.location.lng);
+      inst.lmap.setView(ll, inst.lmap.getZoom(), { animate: false });
+      if (inst.arrowMarker && inst.handleMarker) {
+        inst.arrowMarker.setLatLng(ll);
+        inst.handleMarker.setLatLng(getHandleLatLng(inst.lmap, ll, record.heading));
+      }
+    } else {
+      const bridge = activeBridge();
+      const fp = bridge && bridge.ifcFootprint;
+      if (fp && Array.isArray(fp.footprint)) {
+        const latlngs = fp.footprint
+          .filter((c) => c && isFinite(c.lat) && isFinite(c.lon))
+          .map((c) => [c.lat, c.lon]);
+        if (latlngs.length >= 3) {
+          try { inst.lmap.fitBounds(L.latLngBounds(latlngs), { padding: [40, 40], maxZoom: 20 }); } catch (e) { /* ignore */ }
+        }
+      }
+    }
+  };
+  setTimeout(recenter, 0);
+  setTimeout(recenter, 120);
+  if (kmlGeoJSON) applyKmlToMap(inst);
   overlay.dataset.recordId = record.id;
-  overlay.hidden = false;
 }
 
 function renderNavArea(container, record, overrides = {}) {
@@ -6686,11 +7934,23 @@ function renderNavArea(container, record, overrides = {}) {
   const p = document.createElement("p"); p.className = "area-value photo-nav-line";
   p.textContent = navSummaryLine(record, overrides);
   container.append(hdr.div, p);
+  const ifcTags = normalizeIfcTags(record);
+  if (ifcTags.length) {
+    const t = document.createElement("p");
+    t.className = "area-value photo-nav-line";
+    const first = ifcTags[0];
+    const nm = first.name || first.type || "element";
+    const ty = (first.type && first.name) ? ` (${first.type})` : "";
+    const more = ifcTags.length > 1 ? ` +${ifcTags.length - 1} more` : "";
+    t.textContent = `🧊 Tagged element${ifcTags.length === 1 ? "" : "s"}: ${nm}${ty}${more}`;
+    container.append(t);
+  }
   hdr.btn.addEventListener("click", () => {
     container.innerHTML = "";
     const latI = makeInput("number", record.location?.lat ?? "", "Latitude"); latI.step = "0.00001";
     const lngI = makeInput("number", record.location?.lng ?? "", "Longitude"); lngI.step = "0.00001";
     const accI = makeInput("number", record.location?.accuracy ?? "", "Accuracy (m)");
+    const altI = makeInput("number", record.location?.alt ?? "", "Elevation (m)"); altI.step = "0.1";
     const degI = makeInput("number", record.heading ?? "", "Heading 0–360");
     const sel = document.createElement("select");
     sel.className = "meta-input";
@@ -6711,6 +7971,7 @@ function renderNavArea(container, record, overrides = {}) {
       makeLabeledField("Latitude", latI),
       makeLabeledField("Longitude", lngI),
       makeLabeledField("Accuracy (m)", accI),
+      makeLabeledField("Elevation (m)", altI),
       makeLabeledField("Heading (0–360)", degI),
       makeLabeledField("Camera", sel),
       makeLabeledField("Attitude (− down, + up)", attI),
@@ -6720,7 +7981,11 @@ function renderNavArea(container, record, overrides = {}) {
     gpsBtn.addEventListener("click", () => {
       sp.textContent = "Reading GPS…";
       acquireLocationNow(
-        (loc) => { latI.value = loc.lat; lngI.value = loc.lng; accI.value = loc.accuracy; sp.textContent = "Got GPS — press Save."; },
+        (loc) => {
+          latI.value = loc.lat; lngI.value = loc.lng; accI.value = loc.accuracy;
+          if (isFinite(loc.alt)) altI.value = loc.alt;
+          sp.textContent = "Got GPS — press Save.";
+        },
         (e) => { sp.textContent = `GPS failed: ${e.message || e}`; }
       );
     });
@@ -6739,8 +8004,15 @@ function renderNavArea(container, record, overrides = {}) {
       );
     });
     sv.addEventListener("click", async () => {
-      const lat = parseFloat(latI.value), lng = parseFloat(lngI.value), acc = parseFloat(accI.value);
-      record.location = (isFinite(lat) && isFinite(lng)) ? { lat, lng, accuracy: isFinite(acc) ? Math.max(0, Math.round(acc)) : 0 } : null;
+      const lat = parseFloat(latI.value), lng = parseFloat(lngI.value), acc = parseFloat(accI.value), alt = parseFloat(altI.value);
+      record.location = (isFinite(lat) && isFinite(lng))
+        ? {
+            lat,
+            lng,
+            accuracy: isFinite(acc) ? Math.max(0, Math.round(acc)) : 0,
+            alt: isFinite(alt) ? parseFloat(alt.toFixed(2)) : null,
+          }
+        : null;
       const h = parseInt(degI.value);
       record.heading = isNaN(h) ? null : (((h % 360) + 360) % 360);
       record.facing = record.heading == null ? null : (sel.value || null);
@@ -6749,7 +8021,7 @@ function renderNavArea(container, record, overrides = {}) {
       await runTransaction("readwrite", (s) => s.put(record));
       syncMapToRecord(record.id, record);
       renderNavArea(container, record);
-      setStatus("Location / direction / attitude updated.");
+      setStatus("Location / elevation / direction / attitude updated.");
     });
     cl.addEventListener("click", async () => {
       record.location = null; record.heading = null; record.facing = null; record.attitude = null;
@@ -6769,9 +8041,11 @@ function renderLocationArea(container, record) {
   const hdr = makeAreaHeader("\ud83d\udccd Location", record.location ? "Edit" : "Add");
   container.append(hdr.div);
   if (record.location) {
-    const { lat, lng, accuracy } = record.location;
+    const { lat, lng, accuracy, alt } = record.location;
     const p = document.createElement("p"); p.className = "area-value";
-    p.innerHTML = `<a href="https://www.google.com/maps?q=${lat},${lng}" target="_blank" rel="noopener">${lat.toFixed(5)}, ${lng.toFixed(5)}</a>${accuracy ? ` (\u00b1${accuracy}m)` : ""}`;
+    p.innerHTML = `<a href="https://www.google.com/maps?q=${lat},${lng}" target="_blank" rel="noopener">${lat.toFixed(5)}, ${lng.toFixed(5)}</a>` +
+      `${accuracy ? ` (\u00b1${accuracy}m)` : ""}` +
+      `${isFinite(alt) ? ` · Elev ${Number(alt).toFixed(1)} m` : ""}`;
     container.append(p);
   } else { container.append(makeMuted("No location recorded")); }
 
@@ -6780,18 +8054,30 @@ function renderLocationArea(container, record) {
     const latI = makeInput("number", record.location?.lat ?? "", "e.g. 41.87654");
     const lngI = makeInput("number", record.location?.lng ?? "", "e.g. -87.62345");
     const accI = makeInput("number", record.location?.accuracy ?? "", "e.g. 10");
+    const altI = makeInput("number", record.location?.alt ?? "", "e.g. 312.4");
+    altI.step = "0.1";
     latI.step = lngI.step = "0.00001";
     const reBtn = makeButton("Re-acquire GPS", "secondary");
     const row = document.createElement("div"); row.className = "edit-row";
     const sv = makeButton("Save", ""), cn = makeButton("Cancel", "secondary"), cl = makeButton("Clear", "danger");
     row.append(sv, cn, cl);
     const sp = makeEditStatus();
-    container.append(makeLabeledField("Latitude", latI), makeLabeledField("Longitude", lngI), makeLabeledField("Accuracy (m)", accI), reBtn, row, sp);
+    container.append(
+      makeLabeledField("Latitude", latI),
+      makeLabeledField("Longitude", lngI),
+      makeLabeledField("Accuracy (m)", accI),
+      makeLabeledField("Elevation (m)", altI),
+      reBtn, row, sp
+    );
 
     reBtn.addEventListener("click", () => {
       sp.textContent = "Acquiring GPS\u2026";
       acquireLocationNow(
-        (loc) => { latI.value = loc.lat; lngI.value = loc.lng; accI.value = loc.accuracy; sp.textContent = "GPS acquired \u2014 press Save."; },
+        (loc) => {
+          latI.value = loc.lat; lngI.value = loc.lng; accI.value = loc.accuracy;
+          if (isFinite(loc.alt)) altI.value = loc.alt;
+          sp.textContent = "GPS acquired \u2014 press Save.";
+        },
         (err) => { sp.textContent = `Failed: ${err.message}`; }
       );
     });
@@ -6799,7 +8085,13 @@ function renderLocationArea(container, record) {
     sv.addEventListener("click", async () => {
       const lat = parseFloat(latI.value), lng = parseFloat(lngI.value);
       if (isNaN(lat) || isNaN(lng)) { sp.textContent = "Enter valid coordinates."; return; }
-      record.location = { lat, lng, accuracy: parseInt(accI.value) || 0 };
+      const alt = parseFloat(altI.value);
+      record.location = {
+        lat,
+        lng,
+        accuracy: parseInt(accI.value) || 0,
+        alt: isFinite(alt) ? parseFloat(alt.toFixed(2)) : null,
+      };
       await runTransaction("readwrite", (s) => s.put(record));
       const card = container.closest(".photo-card");
       const mapContainer = card ? card.querySelector(".photo-map-container") : null;
@@ -6955,15 +8247,29 @@ function canvasToBlob(canvas, type = "image/jpeg", quality = 0.92) {
 
 function openDatabase() {
   return new Promise((res, rej) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.addEventListener("upgradeneeded", () => {
-      const idb = req.result;
-      if (!idb.objectStoreNames.contains(STORE_NAME)) idb.createObjectStore(STORE_NAME, { keyPath: "id" });
-      if (!idb.objectStoreNames.contains(META_STORE)) idb.createObjectStore(META_STORE, { keyPath: "key" });
-      if (!idb.objectStoreNames.contains(BRIDGE_STORE)) idb.createObjectStore(BRIDGE_STORE, { keyPath: "id" });
-    });
-    req.addEventListener("success", () => res(req.result));
-    req.addEventListener("error",   () => rej(req.error));
+    let reopened = false;
+    const openReq = (version) => {
+      const req = version == null ? indexedDB.open(DB_NAME) : indexedDB.open(DB_NAME, version);
+      req.addEventListener("upgradeneeded", () => {
+        const idb = req.result;
+        if (!idb.objectStoreNames.contains(STORE_NAME)) idb.createObjectStore(STORE_NAME, { keyPath: "id" });
+        if (!idb.objectStoreNames.contains(META_STORE)) idb.createObjectStore(META_STORE, { keyPath: "key" });
+        if (!idb.objectStoreNames.contains(BRIDGE_STORE)) idb.createObjectStore(BRIDGE_STORE, { keyPath: "id" });
+        if (!idb.objectStoreNames.contains(IFC_STORE)) idb.createObjectStore(IFC_STORE, { keyPath: "bridgeId" });
+      });
+      req.addEventListener("success", () => res(req.result));
+      req.addEventListener("error", () => {
+        const msg = String(req.error?.message || req.error || "");
+        const isVersionErr = req.error?.name === "VersionError" || msg.includes("less than the existing version");
+        if (!reopened && isVersionErr) {
+          reopened = true;
+          openReq(null); // open current DB version
+          return;
+        }
+        rej(req.error);
+      });
+    };
+    openReq(DB_VERSION);
   });
 }
 function runTransaction(mode, action) {
@@ -7014,6 +8320,68 @@ function getAllBridges()   { return bridgeTx("readonly",  (s) => s.getAll()); }
 function getBridgeRec(id)  { return bridgeTx("readonly",  (s) => s.get(id)); }
 function putBridgeRec(b)   { return bridgeTx("readwrite", (s) => s.put(b)); }
 function deleteBridgeRec(id){ return bridgeTx("readwrite", (s) => s.delete(id)); }
+
+// ── Per-bridge IFC store (auto-reload the model instead of re-picking it) ──────
+function ifcTx(mode, action) {
+  return new Promise((res, rej) => {
+    const tx = db.transaction(IFC_STORE, mode), req = action(tx.objectStore(IFC_STORE));
+    tx.addEventListener("complete", () => res(req && "result" in req ? req.result : undefined));
+    tx.addEventListener("error",    () => rej(tx.error));
+    tx.addEventListener("abort",    () => rej(tx.error ?? new Error("Transaction aborted.")));
+  });
+}
+function getIfcRec(bridgeId)    { return ifcTx("readonly",  (s) => s.get(bridgeId)); }
+function putIfcRec(rec)         { return ifcTx("readwrite", (s) => s.put(rec)); }
+function deleteIfcRec(bridgeId) { return ifcTx("readwrite", (s) => s.delete(bridgeId)); }
+
+// Save the uploaded IFC blob against the active bridge so it can be auto-loaded
+// on future visits. Silently no-ops if there is no active bridge.
+async function saveIfcForActiveBridge(file) {
+  try {
+    const b = activeBridge();
+    if (!b || !file) return;
+    await putIfcRec({ bridgeId: b.id, name: file.name, size: file.size, blob: file, savedAt: Date.now() });
+    b.ifcFileName = file.name;
+    b.ifcSavedAt = new Date().toISOString();
+    await putBridgeRec(b);
+    const idx = bridges.findIndex((x) => x.id === b.id);
+    if (idx >= 0) bridges[idx] = b;
+  } catch (e) {
+    console.warn("Could not persist IFC for bridge:", e);
+  }
+}
+
+// If the active bridge has a saved IFC and nothing is loaded yet, load it.
+// Returns true if a model was (or already is) loaded.
+async function autoLoadBridgeIfc() {
+  if (!ifcViewer) return false;
+  const b = activeBridge();
+  if (!b) return false;
+  if (ifcViewer.model && ifcLoadedBridgeId === b.id) return true;
+  let rec = null;
+  try { rec = await getIfcRec(b.id); } catch (e) { /* ignore */ }
+  if (!rec || !rec.blob) {
+    if (ifcViewer.model && ifcLoadedBridgeId && ifcLoadedBridgeId !== b.id) {
+      clearIfcLoadedModel(`No IFC is saved for “${b.title || "this bridge"}” yet. Upload one in Edit bridge or in the 3D viewer.`);
+    }
+    return false;
+  }
+  if (ifcFileStatus) ifcFileStatus.textContent = `Loading saved model: ${rec.name}…`;
+  setStatus(`Loading saved 3D model for ${b.title || "this bridge"}…`);
+  try {
+    const file = (rec.blob instanceof File) ? rec.blob : new File([rec.blob], rec.name || "model.ifc");
+    const ok = await ifcViewer.loadIFCFile(file);
+    if (ok) {
+      lastLoadedIfcFile = file;
+      onIfcModelLoaded(rec.name || "saved model");
+      return true;
+    }
+  } catch (e) {
+    console.warn("Auto-load of saved IFC failed:", e);
+  }
+  return false;
+}
+
 async function registerServiceWorker() {
   if (!("serviceWorker" in navigator)) return;
   try { await navigator.serviceWorker.register("sw.js"); } catch (e) { console.warn("SW:", e); }

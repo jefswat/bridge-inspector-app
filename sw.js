@@ -1,8 +1,10 @@
-const CACHE_NAME = "photo-vault-v94";
+const CACHE_NAME = "photo-vault-v129";
 const ASSETS = [
   "./",
   "./index.html",
   "./app.js",
+  "./ifc-viewer.js",
+  "./ifc-export.js",
   "./report.js",
   "./basemap.js",
   "./map.html",
@@ -21,7 +23,10 @@ const ASSETS = [
   "./vendor/jsqr.min.js",
   "./vendor/cv.js",
   "./vendor/aruco.js",
-  "./vendor/apriltag_36h11.js"
+  "./vendor/apriltag_36h11.js",
+  "./vendor/proj4.js",
+  "./vendor/web-ifc-api.js",
+  "./vendor/web-ifc.wasm"
 ];
 
 self.addEventListener("install", (e) => {
