@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v144";
-const BUILD_STAMP = "2026-07-24 18:52:00";
+﻿const BUILD_VERSION = "v145";
+const BUILD_STAMP = "2026-07-24 18:55:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -1021,7 +1021,8 @@ function registerEvents() {
           }
         }
       } else {
-        if (ifcFileStatus) ifcFileStatus.textContent = `Error loading ${file.name}`;
+        const detail = (ifcViewer && ifcViewer.lastLoadError) ? ifcViewer.lastLoadError : `Error loading ${file.name}`;
+        if (ifcFileStatus) ifcFileStatus.textContent = detail;
         setStatus("Failed to load IFC file");
       }
     } catch (error) {

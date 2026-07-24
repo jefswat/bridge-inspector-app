@@ -180,10 +180,47 @@ class IFCViewer {
   /**
    * Load and parse IFC file from File input
    */
+  // Robustly read a picked File into an ArrayBuffer. On Android work profiles,
+  // file.arrayBuffer() can throw NotReadableError when the file lives in a
+  // managed/cloud location. Fall back to FileReader, then to a Blob re-slice,
+  // and finally throw a clear, actionable message.
+  async _readFileRobust(file) {
+    // Attempt 1: modern Blob.arrayBuffer()
+    try {
+      return await file.arrayBuffer();
+    } catch (e1) {
+      console.warn('file.arrayBuffer() failed, trying FileReader:', e1 && e1.name, e1 && e1.message);
+    }
+    // Attempt 2: legacy FileReader
+    try {
+      return await new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(fr.result);
+        fr.onerror = () => reject(fr.error || new Error('FileReader failed'));
+        fr.onabort = () => reject(new Error('FileReader aborted'));
+        fr.readAsArrayBuffer(file);
+      });
+    } catch (e2) {
+      console.warn('FileReader failed, trying Blob re-slice:', e2 && e2.name, e2 && e2.message);
+    }
+    // Attempt 3: re-slice the Blob then read (sometimes refreshes the handle)
+    try {
+      const reblob = file.slice(0, file.size);
+      return await reblob.arrayBuffer();
+    } catch (e3) {
+      console.error('All read attempts failed:', e3 && e3.name, e3 && e3.message);
+    }
+    throw new Error(
+      "Couldn't read this file (permission blocked by your device/work profile). " +
+      "This usually means the IFC is in a cloud or managed folder (OneDrive, SharePoint, Google Drive). " +
+      "Fix: download/copy the .ifc into your phone's local Downloads folder, then pick it from there."
+    );
+  }
+
   async loadIFCFile(file, options = {}) {
     try {
       console.log('Loading IFC file:', file.name);
-      const arrayBuffer = await file.arrayBuffer();
+      const arrayBuffer = await this._readFileRobust(file);
       const excludeRebar = !!options.excludeRebar;
 
       // Dynamically load web-ifc ES module (only ships as ESM, not a browser global)
@@ -343,9 +380,11 @@ class IFCViewer {
       this._refreshTaggedSymbols();
 
       console.log(`IFC loaded: ${file.name} with ${elements.length} elements (${meshCount} meshes${excludeRebar ? `, skipped rebar elements: ${skippedRebar}` : ''})`);
+      this.lastLoadError = null;
       return true;
     } catch (error) {
       console.error('IFC file loading error:', error);
+      this.lastLoadError = (error && error.message) ? error.message : String(error);
       return false;
     }
   }
