@@ -1,5 +1,5 @@
 const BUILD_VERSION = "v144";
-const BUILD_STAMP = "2026-07-24 18:45:00";
+const BUILD_STAMP = "2026-07-24 18:52:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -403,7 +403,30 @@ function initDebugConsole() {
     window.addEventListener("unhandledrejection", (e) => {
       addDebugEntry("error", "Unhandled: " + String(e.reason));
     });
-    
+
+    // Hook console.error / warn / log to also mirror into the panel.
+    // Capture originals FIRST so we never recurse.
+    const _origError = console.error.bind(console);
+    const _origWarn = console.warn.bind(console);
+    const _origLog = console.log.bind(console);
+    const fmt = (args) => Array.from(args).map((a) => {
+      if (a instanceof Error) return (a.stack || a.message || String(a));
+      if (typeof a === "object") { try { return JSON.stringify(a); } catch (e) { return String(a); } }
+      return String(a);
+    }).join(" ");
+    console.error = function () { _origError.apply(console, arguments); addDebugEntry("error", fmt(arguments)); };
+    console.warn = function () { _origWarn.apply(console, arguments); addDebugEntry("warn", fmt(arguments)); };
+    console.log = function () {
+      _origLog.apply(console, arguments);
+      const m = fmt(arguments);
+      if (/ifc|wasm|worker|web-ifc|georef|projection|schema|mesh|element|rebar|model/i.test(m)) {
+        addDebugEntry("info", m);
+      }
+    };
+
+    // Global logger other modules (ifc-viewer.js) can call directly.
+    window.pvDebugLog = addDebugEntry;
+
     addDebugEntry("info", "Debug console ready");
   } catch (err) {
     console.error("Debug init failed:", err);
