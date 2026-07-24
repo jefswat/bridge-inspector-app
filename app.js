@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v143";
-const BUILD_STAMP = "2026-07-24 17:05:00";
+const BUILD_VERSION = "v144";
+const BUILD_STAMP = "2026-07-24 18:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -202,6 +202,10 @@ const ifcLinkToPhotoButton = document.getElementById("ifcLinkToPhotoButton");
 const ifcClearSelectionButton = document.getElementById("ifcClearSelectionButton");
 const closeIfcViewerButton = document.getElementById("closeIfcViewerButton");
 const view3dButton       = document.getElementById("view3dButton");
+let debugConsolePanel    = null;
+let debugConsoleLog      = null;
+let debugConsoleCheck    = null;
+let debugLogEntries      = [];
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let db;
@@ -345,7 +349,84 @@ init().catch((err) => {
 });
 
 // ── Init ──────────────────────────────────────────────────────────────────────
+
+// __ Debug Console (minimal, fail-safe) 
+function initDebugConsole() {
+  try {
+    debugConsolePanel = document.getElementById("debugConsolePanel");
+    debugConsoleLog = document.getElementById("debugConsoleLog");
+    debugConsoleCheck = document.getElementById("debugConsoleCheck");
+    const copyBtn = document.getElementById("debugConsoleCopyBtn");
+    const clearBtn = document.getElementById("debugConsoleClearBtn");
+    const closeBtn = document.getElementById("debugConsoleCloseBtn");
+    
+    if (!debugConsolePanel || !debugConsoleLog || !debugConsoleCheck) return;
+    
+    const enabled = localStorage.getItem("debugConsoleEnabled") === "1";
+    debugConsoleCheck.checked = enabled;
+    debugConsolePanel.style.display = enabled ? "block" : "none";
+    
+    debugConsoleCheck.addEventListener("change", () => {
+      const on = debugConsoleCheck.checked;
+      localStorage.setItem("debugConsoleEnabled", on ? "1" : "0");
+      debugConsolePanel.style.display = on ? "block" : "none";
+    });
+    
+    if (copyBtn) {
+      copyBtn.addEventListener("click", () => {
+        navigator.clipboard.writeText(debugLogEntries.join("\n")).then(() => {
+          const orig = copyBtn.textContent;
+          copyBtn.textContent = "✓ Copied!";
+          setTimeout(() => { copyBtn.textContent = orig; }, 1500);
+        }).catch(() => {});
+      });
+    }
+    
+    if (clearBtn) {
+      clearBtn.addEventListener("click", () => {
+        debugLogEntries = [];
+        debugConsoleLog.innerHTML = "";
+      });
+    }
+    
+    if (closeBtn) {
+      closeBtn.addEventListener("click", () => {
+        debugConsolePanel.style.display = "none";
+        debugConsoleCheck.checked = false;
+        localStorage.setItem("debugConsoleEnabled", "0");
+      });
+    }
+    
+    window.addEventListener("error", (e) => {
+      addDebugEntry("error", e.message + " (" + e.filename + ":" + e.lineno + ")");
+    });
+    window.addEventListener("unhandledrejection", (e) => {
+      addDebugEntry("error", "Unhandled: " + String(e.reason));
+    });
+    
+    addDebugEntry("info", "Debug console ready");
+  } catch (err) {
+    console.error("Debug init failed:", err);
+  }
+}
+
+function addDebugEntry(level, msg) {
+  if (!debugConsoleLog) return;
+  try {
+    const ts = new Date().toISOString().slice(11, 23);
+    const text = "[" + ts + "] [" + level.toUpperCase() + "] " + msg;
+    debugLogEntries.push(text);
+    if (debugLogEntries.length > 300) debugLogEntries.shift();
+    const color = level === "error" ? "#f87171" : level === "warn" ? "#fbbf24" : "#94a3b8";
+    const row = document.createElement("div");
+    row.style.cssText = "color:" + color + ";border-bottom:1px solid #1e293b;padding:2px 0;word-break:break-all;font-size:0.7rem;";
+    row.textContent = text;
+    debugConsoleLog.appendChild(row);
+    debugConsoleLog.scrollTop = debugConsoleLog.scrollHeight;
+  } catch (e) {}
+}
 async function init() {
+  initDebugConsole();
   const bs = document.getElementById('buildStamp');
   if (bs) bs.textContent = `build ${BUILD_VERSION} · ${BUILD_STAMP}`;
   console.log("Photo Vault build", BUILD_VERSION, BUILD_STAMP);
