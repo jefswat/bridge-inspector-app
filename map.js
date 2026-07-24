@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v94";
-const BUILD_STAMP = "2026-07-17 12:13:00";
+const BUILD_VERSION = "v142";
+const BUILD_STAMP = "2026-07-24 17:00:00";
 
 // ── Photo tags (mirror of app.js) ─────────────────────────────────────────────
 const TAG_CATEGORIES = [
@@ -26,7 +26,8 @@ const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
 const META_STORE = "meta";
 const BRIDGE_STORE = "bridges";
-const DB_VERSION = 3;
+const IFC_STORE = "bridge_ifc";
+const DB_VERSION = 4;
 const KML_META_KEY = "kmlOverlay";
 const ACTIVE_BRIDGE_KEY = "active-bridge-id";
 
@@ -53,6 +54,9 @@ async function init() {
   summaryMap.setView([39.5, -98.35], 4); // continental US until we have points
 
   detailClose.addEventListener("click", closeDetail);
+  // This is a read-only viewing map: a single click on empty map closes the
+  // open detail panel. (Editing a photo's location is done in the per-photo
+  // "Map & navigation" editor, not here.)
   summaryMap.on("click", () => closeDetail());
   registerServiceWorker();
 
@@ -70,6 +74,9 @@ async function init() {
     }
   }
   await restoreCadOverlay(bridge);
+  // Intentionally hide the full-model footprint box in summary view; use the
+  // structural category projections instead for a cleaner overlay.
+  drawIfcProjection(bridge);
   // Default the map to the bridge's own location (e.g. imported from the NBI)
   // so it's centered there before any located photos exist.
   if (bridge && bridge.location && isFinite(bridge.location.lat) && isFinite(bridge.location.lng)) {
@@ -114,7 +121,7 @@ async function loadPhotos() {
   });
 
   summaryMap.fitBounds(L.latLngBounds(latlngs), { padding: [50, 50], maxZoom: 19 });
-  summaryStatus.textContent = `${located.length} photo(s) on the map. Click an arrow to view the photo and its details.`;
+  summaryStatus.textContent = `${located.length} photo(s) on the map. Tap an arrow to view details.`;
 }
 
 // Numbered arrow (rotated by heading). Dimmed when heading is unknown.
@@ -182,6 +189,7 @@ function selectPhoto(record) {
   if (m) summaryMap.panTo(m.getLatLng(), { animate: true });
 }
 
+// ── Double-click the map to move the selected photo's location ────────────────
 function addMeta(label, valueHtml, isHtml = false) {
   const row = document.createElement("div");
   row.className = "detail-meta-row";
@@ -199,6 +207,90 @@ function closeDetail() {
     m.getElement()?.querySelector(".arrow-icon")?.classList.remove("summary-arrow-active");
   }
   if (detailImg.dataset.url) { URL.revokeObjectURL(detailImg.dataset.url); delete detailImg.dataset.url; }
+}
+
+// ── IFC georeferenced footprint overlay (from the bridge's uploaded IFC) ──────
+function drawIfcFootprint(bridge) {
+  try {
+    const fp = bridge && bridge.ifcFootprint;
+    if (!fp || !Array.isArray(fp.footprint) || fp.footprint.length < 3) {
+      console.log("IFC footprint: none saved on this bridge yet. Upload an IFC in the 3D viewer (with a bridge open) to georeference it.");
+      return;
+    }
+    console.log("IFC footprint present:", fp.crsName || fp.epsg, "center", fp.center);
+    const latlngs = fp.footprint
+      .filter((c) => c && isFinite(c.lat) && isFinite(c.lon))
+      .map((c) => [c.lat, c.lon]);
+    if (latlngs.length < 3) return;
+
+    const poly = L.polygon(latlngs, {
+      color: "#a855f7",
+      weight: 2.5,
+      opacity: 0.95,
+      fillColor: "#c084fc",
+      fillOpacity: 0.22,
+      className: "ifc-footprint",
+    }).addTo(summaryMap);
+
+    const cLat = fp.center && isFinite(fp.center.lat) ? fp.center.lat : latlngs[0][0];
+    const cLon = fp.center && isFinite(fp.center.lon) ? fp.center.lon : latlngs[0][1];
+    poly.bindPopup(
+      `<strong>${escapeHtml(bridge.title || "Bridge")} — IFC model</strong><br>` +
+      (fp.fileName ? `${escapeHtml(fp.fileName)}<br>` : "") +
+      (fp.crsName ? `CRS: ${escapeHtml(fp.crsName)}<br>` : "") +
+      `Center: ${cLat.toFixed(5)}, ${cLon.toFixed(5)}`
+    );
+
+    // Center the map on the footprint (photos, if any, will refit afterwards).
+    summaryMap.fitBounds(poly.getBounds(), { padding: [60, 60], maxZoom: 20 });
+  } catch (e) {
+    console.warn("IFC footprint overlay failed:", e);
+  }
+}
+
+function drawIfcProjection(bridge) {
+  try {
+    const fp = bridge && bridge.ifcFootprint;
+    const projections = fp && Array.isArray(fp.projections) ? fp.projections : [];
+    if (!projections.length) return;
+    const styles = {
+      deck:    { color: "#0284c7", fillColor: "#0ea5e9", fillOpacity: 0.10, weight: 1.6 },
+      barrier: { color: "#7c3aed", fillColor: "#8b5cf6", fillOpacity: 0.12, weight: 1.5 },
+      girder:  { color: "#b45309", fillColor: "#f59e0b", fillOpacity: 0.20, weight: 2.2 },
+      pier:    { color: "#be123c", fillColor: "#f43f5e", fillOpacity: 0.22, weight: 2.2 },
+      other:   { color: "#334155", fillColor: "#64748b", fillOpacity: 0.04, weight: 1.0 },
+    };
+    const byKey = new Map([["deck", []], ["barrier", []], ["girder", []], ["pier", []]]);
+    for (const p of projections) {
+      const key = p && p.key;
+      if (!byKey.has(key)) continue;
+      byKey.get(key).push(p);
+    }
+    // Draw in controlled order, and skip "other" so it does not mask key structure.
+    for (const key of ["deck", "barrier", "girder", "pier"]) {
+      const list = byKey.get(key) || [];
+      for (const proj of list) {
+        const latlngs = (proj && Array.isArray(proj.footprint) ? proj.footprint : [])
+          .filter((c) => c && isFinite(c.lat) && isFinite(c.lon))
+          .map((c) => [c.lat, c.lon]);
+        if (latlngs.length < 3) continue;
+        const st = styles[proj.key] || styles.other;
+        const poly = L.polygon(latlngs, {
+          color: st.color,
+          weight: st.weight,
+          opacity: 0.9,
+          fillColor: st.fillColor,
+          fillOpacity: st.fillOpacity,
+          className: `ifc-proj ifc-proj-${proj.key || "other"}`,
+        }).addTo(summaryMap);
+        if (proj.key === "girder" || proj.key === "pier") poly.bringToFront();
+        const nm = proj.elementName ? ` — ${escapeHtml(String(proj.elementName))}` : "";
+        poly.bindTooltip(`IFC ${proj.label || proj.key || "Other"}${nm}`, { sticky: true });
+      }
+    }
+  } catch (e) {
+    console.warn("IFC projection overlay failed:", e);
+  }
 }
 
 // ── Bridge's CAD overlay (restored from the bridge record) ─────────────────────
@@ -248,15 +340,29 @@ function escapeHtml(s) {
 
 function openDatabase() {
   return new Promise((res, rej) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.addEventListener("upgradeneeded", () => {
-      const idb = req.result;
-      if (!idb.objectStoreNames.contains(STORE_NAME)) idb.createObjectStore(STORE_NAME, { keyPath: "id" });
-      if (!idb.objectStoreNames.contains(META_STORE)) idb.createObjectStore(META_STORE, { keyPath: "key" });
-      if (!idb.objectStoreNames.contains(BRIDGE_STORE)) idb.createObjectStore(BRIDGE_STORE, { keyPath: "id" });
-    });
-    req.addEventListener("success", () => res(req.result));
-    req.addEventListener("error",   () => rej(req.error));
+    let reopened = false;
+    const openReq = (version) => {
+      const req = version == null ? indexedDB.open(DB_NAME) : indexedDB.open(DB_NAME, version);
+      req.addEventListener("upgradeneeded", () => {
+        const idb = req.result;
+        if (!idb.objectStoreNames.contains(STORE_NAME)) idb.createObjectStore(STORE_NAME, { keyPath: "id" });
+        if (!idb.objectStoreNames.contains(META_STORE)) idb.createObjectStore(META_STORE, { keyPath: "key" });
+        if (!idb.objectStoreNames.contains(BRIDGE_STORE)) idb.createObjectStore(BRIDGE_STORE, { keyPath: "id" });
+        if (!idb.objectStoreNames.contains(IFC_STORE)) idb.createObjectStore(IFC_STORE, { keyPath: "bridgeId" });
+      });
+      req.addEventListener("success", () => res(req.result));
+      req.addEventListener("error", () => {
+        const msg = String(req.error?.message || req.error || "");
+        const isVersionErr = req.error?.name === "VersionError" || msg.includes("less than the existing version");
+        if (!reopened && isVersionErr) {
+          reopened = true;
+          openReq(null);
+          return;
+        }
+        rej(req.error);
+      });
+    };
+    openReq(DB_VERSION);
   });
 }
 function getBridgeRec(id) {

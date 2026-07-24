@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v129";
-const BUILD_STAMP = "2026-07-24 11:55:00";
+const BUILD_VERSION = "v143";
+const BUILD_STAMP = "2026-07-24 17:05:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -189,6 +189,7 @@ const ifcViewerModal     = document.getElementById("ifcViewerModal");
 const ifcFileInput       = document.getElementById("ifcFileInput");
 const ifcFileLabel       = document.querySelector(".ifc-file-label");
 const ifcFileStatus      = document.getElementById("ifcFileStatus");
+const ifcExcludeRebarCheck = document.getElementById("ifcExcludeRebarCheck");
 const ifcViewerContainer = document.getElementById("ifcViewerContainer");
 const ifcViewerPlaceholder = document.getElementById("ifcViewerPlaceholder");
 const ifcViewPresets     = document.getElementById("ifcViewPresets");
@@ -233,6 +234,7 @@ let ifcLoadedBridgeId      = null; // bridge whose IFC is currently loaded in th
 let navModalRecord         = null; // record currently shown in the Map & navigation modal
 let pendingIfcPhotoView    = null; // {id,lat,lng,heading,attitude,alt} to apply once an IFC loads
 let lastLoadedIfcFile      = null; // original IFC File uploaded this session, for merge export
+const IFC_EXCLUDE_REBAR_KEY = "ifcExcludeRebar";
 let aprilDetector          = null;
 let aprilPreviewCanvas     = null;
 let aprilPreviewCtx        = null;
@@ -351,6 +353,10 @@ async function init() {
   updatePeerTransferUi();
   db = await openDatabase();
   await ensureBridges();
+  if (ifcExcludeRebarCheck) {
+    const saved = localStorage.getItem(IFC_EXCLUDE_REBAR_KEY);
+    ifcExcludeRebarCheck.checked = saved == null ? true : saved !== "0";
+  }
   registerEvents();
   await registerServiceWorker();
   if (apriltagPreviewStatus && !aprilTagDetectorReady()) {
@@ -359,6 +365,12 @@ async function init() {
 
   await recoverPrimaryView();
   setStatus("Ready.");
+}
+
+function getIfcLoadOptions() {
+  return {
+    excludeRebar: !!(ifcExcludeRebarCheck && ifcExcludeRebarCheck.checked),
+  };
 }
 
 async function recoverPrimaryView() {
@@ -453,11 +465,13 @@ function onIfcModelLoaded(fileName) {
   if (ifcViewPresets) { ifcViewPresets.hidden = false; setActiveViewPreset("iso"); }
   if (ifcElevControls) ifcElevControls.hidden = false;
   if (ifcMoveControls) ifcMoveControls.hidden = false;
+  void refreshIfcTaggedSymbols();
 }
 
 function clearIfcLoadedModel(message) {
   if (!ifcViewer) return;
   if (typeof ifcViewer.clearSelection === "function") ifcViewer.clearSelection();
+  if (typeof ifcViewer.setTaggedElementIds === "function") ifcViewer.setTaggedElementIds([]);
   if (ifcViewer.model && ifcViewer.scene) ifcViewer.scene.remove(ifcViewer.model);
   ifcViewer.model = null;
   ifcLoadedBridgeId = null;
@@ -614,6 +628,27 @@ async function taggedElementsIndex() {
     }
   }
   return [...map.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+}
+
+async function refreshIfcTaggedSymbols() {
+  if (!ifcViewer || typeof ifcViewer.setTaggedElementIds !== "function") return;
+  try {
+    const records = await getActivePhotos();
+    const ids = [];
+    const seen = new Set();
+    for (const r of records) {
+      for (const t of normalizeIfcTags(r)) {
+        if (!t || t.expressId == null) continue;
+        const key = String(t.expressId);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        ids.push(t.expressId);
+      }
+    }
+    ifcViewer.setTaggedElementIds(ids);
+  } catch (e) {
+    console.warn("Could not refresh IFC tagged symbols:", e);
+  }
 }
 
 // Gallery browser: a modal listing every IFC element that has photos tagged to
@@ -777,6 +812,12 @@ function registerEvents() {
     openIfcViewerModal();
   });
   if (closeIfcViewerButton) closeIfcViewerButton.addEventListener("click", () => closeIfcViewerModal());
+  if (ifcExcludeRebarCheck) ifcExcludeRebarCheck.addEventListener("change", () => {
+    localStorage.setItem(IFC_EXCLUDE_REBAR_KEY, ifcExcludeRebarCheck.checked ? "1" : "0");
+    setStatus(ifcExcludeRebarCheck.checked
+      ? "Rebar filtering enabled for next IFC load."
+      : "Rebar filtering disabled for next IFC load.");
+  });
   if (ifcViewPresets) {
     ifcViewPresets.querySelectorAll(".ifc-view-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -854,7 +895,7 @@ function registerEvents() {
       return;
     }
     try {
-      const success = await ifcViewer.loadIFCFile(file);
+      const success = await ifcViewer.loadIFCFile(file, getIfcLoadOptions());
       if (success) {
         lastLoadedIfcFile = file; // keep for "merge photos into model" export
         onIfcModelLoaded(file.name);
@@ -905,6 +946,7 @@ function registerEvents() {
       crsName: g.crsName || "",
       center: g.center,
       footprint: g.footprint || [],
+      projections: Array.isArray(g.projections) ? g.projections : [],
       fileName: (ifcViewer && ifcViewer.model && ifcViewer.model.userData.fileName) || null,
       savedAt: new Date().toISOString(),
     };
@@ -943,6 +985,7 @@ function registerEvents() {
       }
       setIfcTags(rec, tags);
       await runTransaction("readwrite", (s) => s.put(rec));
+      void refreshIfcTaggedSymbols();
       const total = normalizeIfcTags(rec).length;
       setStatus(added
         ? `Tagged ${added} element${added === 1 ? "" : "s"} to the photo (${total} total).`
@@ -6495,6 +6538,54 @@ function drawIfcFootprintOnMap(lmap, bridge) {
   }
 }
 
+function drawIfcProjectionOnMap(lmap, bridge) {
+  try {
+    const fp = bridge && bridge.ifcFootprint;
+    const projections = fp && Array.isArray(fp.projections) ? fp.projections : [];
+    if (!projections.length) return null;
+    const styles = {
+      deck:    { color: "#0284c7", fillColor: "#0ea5e9", fillOpacity: 0.10, weight: 1.6 },
+      barrier: { color: "#7c3aed", fillColor: "#8b5cf6", fillOpacity: 0.12, weight: 1.5 },
+      girder:  { color: "#b45309", fillColor: "#f59e0b", fillOpacity: 0.20, weight: 2.2 },
+      pier:    { color: "#be123c", fillColor: "#f43f5e", fillOpacity: 0.22, weight: 2.2 },
+      other:   { color: "#334155", fillColor: "#64748b", fillOpacity: 0.04, weight: 1.0 },
+    };
+    const byKey = new Map([["deck", []], ["barrier", []], ["girder", []], ["pier", []]]);
+    for (const p of projections) {
+      const key = p && p.key;
+      if (!byKey.has(key)) continue;
+      byKey.get(key).push(p);
+    }
+
+    const allLatLngs = [];
+    for (const key of ["deck", "barrier", "girder", "pier"]) {
+      const list = byKey.get(key) || [];
+      for (const proj of list) {
+        const latlngs = (proj && Array.isArray(proj.footprint) ? proj.footprint : [])
+          .filter((c) => c && isFinite(c.lat) && isFinite(c.lon))
+          .map((c) => [c.lat, c.lon]);
+        if (latlngs.length < 3) continue;
+        allLatLngs.push(...latlngs);
+        const st = styles[proj.key] || styles.other;
+        const poly = L.polygon(latlngs, {
+          color: st.color,
+          weight: st.weight,
+          opacity: 0.9,
+          fillColor: st.fillColor,
+          fillOpacity: st.fillOpacity,
+          interactive: false,
+          className: `ifc-proj ifc-proj-${proj.key || "other"}`,
+        }).addTo(lmap);
+        if (proj.key === "girder" || proj.key === "pier") poly.bringToFront();
+      }
+    }
+    return allLatLngs.length >= 3 ? L.latLngBounds(allLatLngs) : null;
+  } catch (e) {
+    console.warn("IFC projection draw failed:", e);
+    return null;
+  }
+}
+
 function initMap(container, record) {
   const bridge = activeBridge();
   const fp = bridge && bridge.ifcFootprint;
@@ -6526,11 +6617,10 @@ function initMap(container, record) {
     }).addTo(lmap);
   }
 
-  // Draw the georeferenced IFC footprint (orthoprojection) if the active bridge
-  // has one, so the user can place photos relative to the real model outline.
-  const footprintPoly = drawIfcFootprintOnMap(lmap, bridge);
-  if (!hasLoc && footprintPoly) {
-    try { lmap.fitBounds(footprintPoly.getBounds(), { padding: [40, 40], maxZoom: 20 }); } catch (e) { /* ignore */ }
+  // Draw per-element IFC projection overlays (not the single full-model box).
+  const projectionBounds = drawIfcProjectionOnMap(lmap, bridge);
+  if (!hasLoc && projectionBounds) {
+    try { lmap.fitBounds(projectionBounds, { padding: [40, 40], maxZoom: 20 }); } catch (e) { /* ignore */ }
   }
 
   const inst = { lmap, arrowMarker: null, handleMarker: null, kmlLayer: null };
@@ -7578,17 +7668,20 @@ async function requestDeskewFromOpenCv(blob, existingDetections = []) {
   // Try the Python OpenCV server first — it processes full-res and uses BORDER_REPLICATE fill.
   // Convert blob to base64 BEFORE the server try-catch so a blob-read error won't be
   // mistaken for "server unavailable".
+  console.log("[Deskew] start — blob:", blob ? `${blob.type} ${blob.size}b` : "null");
   let b64 = null;
   try {
     b64 = await blobToBase64NoPrefix(blob);
+    console.log("[Deskew] b64 length:", b64 ? b64.length : 0);
   } catch (blobErr) {
-    console.warn("Deskew: could not read blob as base64:", blobErr.message);
+    console.warn("[Deskew] could not read blob as base64:", blobErr.message);
   }
 
   if (b64) {
     const ac = new AbortController();
-    const timeout = setTimeout(() => ac.abort(), 5000); // 5 s network timeout
+    const timeout = setTimeout(() => ac.abort(), 5000);
     try {
+      console.log("[Deskew] sending to http://localhost:8766/deskew …");
       const resp = await fetch("http://localhost:8766/deskew", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -7596,8 +7689,10 @@ async function requestDeskewFromOpenCv(blob, existingDetections = []) {
         signal: ac.signal,
       });
       clearTimeout(timeout);
+      console.log("[Deskew] server response:", resp.status);
       if (resp.ok) {
         const data = await resp.json();
+        console.log("[Deskew] data.ok:", data.ok, "imageBase64 length:", data.imageBase64?.length);
         if (data.ok && data.imageBase64) {
           return {
             blob: base64ToBlob(data.imageBase64, data.mime || "image/jpeg"),
@@ -7605,19 +7700,20 @@ async function requestDeskewFromOpenCv(blob, existingDetections = []) {
             angleDeg: Number(data.angleDeg) || 0,
           };
         }
-        // Server ran but reported a processing error (e.g. corrupted image) — log and fall through to JS.
-        console.warn("Deskew server error:", data.error || "unknown");
+        console.warn("[Deskew] server error:", data.error || "unknown");
       } else {
-        console.warn("Deskew server HTTP", resp.status, "— falling back to JS");
+        console.warn("[Deskew] server HTTP", resp.status, "— falling back to JS");
       }
     } catch (serverErr) {
       clearTimeout(timeout);
       if (serverErr.name === "AbortError") {
-        console.info("Deskew server timed out (5 s), using JS fallback");
+        console.info("[Deskew] timed out (5 s), using JS fallback");
       } else {
-        console.info("Deskew server unreachable, using JS fallback:", serverErr.message);
+        console.info("[Deskew] unreachable, using JS fallback:", serverErr.message);
       }
     }
+  } else {
+    console.warn("[Deskew] b64 is empty — skipping server, going straight to JS fallback");
   }
 
   // JS canvas fallback — full perspective correction using tag corner homography.
@@ -7701,16 +7797,21 @@ async function deskewCapturedPhotoOpenCv(record) {
     setStatus("Deskewing photo…");
     const existingDetections = Array.isArray(record.aprilTagDetections) ? record.aprilTagDetections : [];
     const result = await requestDeskewFromOpenCv(record.blob, existingDetections);
+    console.log("[Deskew] result blob:", result.blob?.size, "markers:", result.markerCount);
     const april = await findAprilTagsInBlob(result.blob);
+    console.log("[Deskew] re-detected tags:", april.ids);
     record.deskewBlob = result.blob;
     record.deskewActive = true;
     record.aprilTagsDeskew = april.ids;
     record.aprilTagDetectionsDeskew = april.detections.map((d) => ({ id: d.id, cornersNormalized: d.cornersNormalized, hammingDistance: d.hammingDistance }));
     await runTransaction("readwrite", (s) => s.put(record));
+    console.log("[Deskew] IDB put done");
     await renderSavedPhotos();
+    console.log("[Deskew] render done");
     const ang = Number.isFinite(result.angleDeg) ? `, ${result.angleDeg.toFixed(1)}°` : "";
     setStatus(`Deskew view ready (${result.markerCount} marker${result.markerCount === 1 ? "" : "s"} used${ang}). Original retained.`);
   } catch (e) {
+    console.error("[Deskew] failed:", e);
     setStatus("Deskew failed: " + e.message);
   }
 }
@@ -7795,6 +7896,7 @@ function renderTagsArea(container, record) {
       const keep = normalizeIfcTags(record).filter((x) => String(x.expressId) !== String(t.expressId));
       setIfcTags(record, keep);
       await runTransaction("readwrite", (s) => s.put(record));
+      void refreshIfcTaggedSymbols();
       renderTagsArea(container, record);
       setStatus("3D element tag removed.");
     });
@@ -7821,13 +7923,16 @@ function renderTagsArea(container, record) {
 
 function navSummaryLine(record, overrides = {}) {
   const loc = overrides.location ?? record.location ?? null;
-  const heading = overrides.heading ?? record.heading ?? null;
-  const attitude = overrides.attitude ?? record.attitude ?? null;
+  const heading = Number(overrides.heading ?? record.heading);
+  const attitude = Number(overrides.attitude ?? record.attitude);
+  const lat = Number(loc?.lat);
+  const lng = Number(loc?.lng);
+  const alt = Number(loc?.alt);
   const parts = [];
-  if (loc && isFinite(loc.lat) && isFinite(loc.lng)) parts.push(`📍 ${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}`);
-  if (loc && isFinite(loc.alt)) parts.push(`⛰ ${loc.alt.toFixed(1)} m`);
-  if (heading != null && isFinite(heading)) parts.push(`🧭 ${Math.round(heading)}° ${bearingLabel(heading)}`);
-  if (attitude != null && isFinite(attitude)) parts.push(`📐 ${attitudeLabel(attitude)}`);
+  if (Number.isFinite(lat) && Number.isFinite(lng)) parts.push(`📍 ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+  if (Number.isFinite(alt)) parts.push(`⛰ ${alt.toFixed(1)} m`);
+  if (Number.isFinite(heading)) parts.push(`🧭 ${Math.round(heading)}° ${bearingLabel(heading)}`);
+  if (Number.isFinite(attitude)) parts.push(`📐 ${attitudeLabel(attitude)}`);
   return parts.length ? parts.join(" · ") : "📍 — · ⛰ — · 🧭 — · 📐 —";
 }
 
@@ -7910,13 +8015,21 @@ function openPhotoNavModal(record) {
     } else {
       const bridge = activeBridge();
       const fp = bridge && bridge.ifcFootprint;
-      if (fp && Array.isArray(fp.footprint)) {
-        const latlngs = fp.footprint
+      let latlngs = [];
+      const projections = fp && Array.isArray(fp.projections) ? fp.projections : [];
+      for (const proj of projections) {
+        const pts = (proj && Array.isArray(proj.footprint) ? proj.footprint : [])
           .filter((c) => c && isFinite(c.lat) && isFinite(c.lon))
           .map((c) => [c.lat, c.lon]);
-        if (latlngs.length >= 3) {
-          try { inst.lmap.fitBounds(L.latLngBounds(latlngs), { padding: [40, 40], maxZoom: 20 }); } catch (e) { /* ignore */ }
-        }
+        latlngs.push(...pts);
+      }
+      if (latlngs.length < 3 && fp && Array.isArray(fp.footprint)) {
+        latlngs = fp.footprint
+          .filter((c) => c && isFinite(c.lat) && isFinite(c.lon))
+          .map((c) => [c.lat, c.lon]);
+      }
+      if (latlngs.length >= 3) {
+        try { inst.lmap.fitBounds(L.latLngBounds(latlngs), { padding: [40, 40], maxZoom: 20 }); } catch (e) { /* ignore */ }
       }
     }
   };
@@ -8370,7 +8483,7 @@ async function autoLoadBridgeIfc() {
   setStatus(`Loading saved 3D model for ${b.title || "this bridge"}…`);
   try {
     const file = (rec.blob instanceof File) ? rec.blob : new File([rec.blob], rec.name || "model.ifc");
-    const ok = await ifcViewer.loadIFCFile(file);
+    const ok = await ifcViewer.loadIFCFile(file, getIfcLoadOptions());
     if (ok) {
       lastLoadedIfcFile = file;
       onIfcModelLoaded(rec.name || "saved model");
