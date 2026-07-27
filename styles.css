@@ -1285,6 +1285,24 @@ select {
   gap: 8px;
 }
 
+.ifc-viewer-mode-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ifc-viewer-mode-bar .secondary.is-active {
+  background: #4338ca;
+  border-color: #4338ca;
+  color: #fff;
+}
+
+.ifc-condition-legend {
+  font-size: .78rem;
+  color: #64748b;
+}
+
 .ifc-option-row {
   display: inline-flex;
   align-items: center;
@@ -1542,7 +1560,8 @@ select {
 
 .ifc-viewer-container {
   flex: 1;
-  min-height: 400px;
+  max-height: 60%;
+  min-height: 300px;
   position: relative;
   overflow: hidden;
   transition: background 0.2s;
@@ -1552,4 +1571,8 @@ select {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex: 1;
+  min-height: 250px;
+  overflow-y: auto;
+  padding-right: 8px;
 }

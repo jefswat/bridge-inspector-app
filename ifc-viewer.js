@@ -26,6 +26,9 @@ class IFCViewer {
     this.taggedExpressIds = new Set();
     this.taggedSprites = [];
     this.taggedSpriteTexture = null;
+    this.conditionColorEnabled = false;
+    this.conditionColorByExpress = new Map(); // expressId(string) -> color hex
+    this.conditionColorByMesh = new Map(); // mesh.uuid -> color hex
   }
 
   _initThreeJs() {
@@ -237,6 +240,7 @@ class IFCViewer {
       this.selectedElements.clear();
       this.selectedElement = null;
       this._clearTaggedSymbols();
+      this.conditionColorByMesh.clear();
       if (this.model) {
         this.scene.remove(this.model);
         this.originalColors.clear();
@@ -1023,6 +1027,64 @@ class IFCViewer {
     return mesh ? (Array.isArray(mesh.material) ? mesh.material[0] : mesh.material) : null;
   }
 
+  _conditionColorForRating(rawRating) {
+    const text = String(rawRating ?? "").trim().toLowerCase();
+    const num = Number.parseFloat(text);
+    if (Number.isFinite(num)) {
+      if (num <= 3) return 0xb91c1c; // critical
+      if (num <= 5) return 0xea580c; // poor
+      if (num <= 7) return 0xca8a04; // fair
+      return 0x16a34a; // good
+    }
+    if (text.includes("crit")) return 0xb91c1c;
+    if (text.includes("poor") || text.includes("bad")) return 0xea580c;
+    if (text.includes("fair") || text.includes("moderate")) return 0xca8a04;
+    if (text.includes("good") || text.includes("excellent")) return 0x16a34a;
+    return 0x0284c7; // textual but unclassified rating
+  }
+
+  _baseMeshColor(mesh) {
+    if (!mesh) return null;
+    const uuid = mesh.uuid;
+    if (this.conditionColorEnabled && this.conditionColorByMesh.has(uuid)) {
+      return this.conditionColorByMesh.get(uuid);
+    }
+    if (this.originalColors.has(uuid)) return this.originalColors.get(uuid);
+    return null;
+  }
+
+  setConditionColoring(rows, enabled) {
+    this.conditionColorEnabled = !!enabled;
+    this.conditionColorByExpress.clear();
+    if (Array.isArray(rows)) {
+      for (const row of rows) {
+        if (!row || row.expressId == null) continue;
+        const key = String(row.expressId);
+        this.conditionColorByExpress.set(key, this._conditionColorForRating(row.conditionRating));
+      }
+    }
+
+    this.conditionColorByMesh.clear();
+    if (this.model) {
+      this.model.traverse((child) => {
+        if (!child || !child.isMesh) return;
+        const eid = child.userData && child.userData.ifcExpressId;
+        if (eid == null) return;
+        const colorHex = this.conditionColorByExpress.get(String(eid));
+        if (colorHex != null) this.conditionColorByMesh.set(child.uuid, colorHex);
+      });
+    }
+
+    if (!this.model) return;
+    this.model.traverse((child) => {
+      if (!child || !child.isMesh) return;
+      if (this.selectedElements.has(child.uuid)) return; // selected stays highlighted
+      const m = this._matOf(child);
+      const baseColor = this._baseMeshColor(child);
+      if (m && m.color && baseColor != null) m.color.setHex(baseColor);
+    });
+  }
+
   _highlightMesh(mesh) {
     if (!mesh) return;
     const m = this._matOf(mesh);
@@ -1036,8 +1098,8 @@ class IFCViewer {
   _unhighlightMesh(mesh) {
     if (!mesh) return;
     const m = this._matOf(mesh);
-    const original = this.originalColors.get(mesh.uuid);
-    if (m && m.color && original !== undefined) m.color.setHex(original);
+    const baseColor = this._baseMeshColor(mesh);
+    if (m && m.color && baseColor != null) m.color.setHex(baseColor);
     this.selectedElements.delete(mesh.uuid);
   }
 

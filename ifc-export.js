@@ -267,6 +267,124 @@
     return max;
   }
 
+  function truncateIfcText(s, maxLen = 255) {
+    return String(s == null ? "" : s).slice(0, maxLen);
+  }
+
+  function ifcTextValue(s, maxLen = 255) {
+    return `IFCTEXT(${q(truncateIfcText(s, maxLen))})`;
+  }
+
+  function hasEntityId(text, id) {
+    const n = Number(id);
+    if (!isFinite(n)) return false;
+    const re = new RegExp(`#${Math.trunc(n)}\\s*=`, "i");
+    return re.test(text);
+  }
+
+  function findFirstEntityIdByType(text, typeName) {
+    const re = new RegExp(`#(\\d+)\\s*=\\s*${typeName}\\b`, "i");
+    const m = re.exec(text);
+    return m ? Number(m[1]) : null;
+  }
+
+  function insertEntitiesBeforeDataEnd(originalText, entities) {
+    if (!entities.length) return originalText;
+    const endIso = originalText.lastIndexOf("END-ISO-10303-21");
+    const searchIn = endIso >= 0 ? originalText.slice(0, endIso) : originalText;
+    const endSec = searchIn.lastIndexOf("ENDSEC");
+    if (endSec >= 0) {
+      return originalText.slice(0, endSec) + entities.join("\n") + "\n" + originalText.slice(endSec);
+    }
+    if (endIso >= 0) {
+      return originalText.slice(0, endIso) + entities.join("\n") + "\nENDSEC;\n" + originalText.slice(endIso);
+    }
+    return originalText + "\n" + entities.join("\n") + "\n";
+  }
+
+  /**
+   * Compliance-safe writer:
+   * appends IFC property sets only (no embedded/base64 image URIs).
+   *
+   * @param {string} originalText
+   * @param {Object} payload { projectPropertySets:Array, elementPropertySets:Array }
+   * @returns {{text:string, appendedProject:number, appendedElement:number, skipped:number, totalAppended:number}}
+   */
+  function writeCompliantIFC(originalText, payload) {
+    payload = payload || {};
+    const projectRows = Array.isArray(payload.projectPropertySets) ? payload.projectPropertySets : [];
+    const elementRows = Array.isArray(payload.elementPropertySets) ? payload.elementPropertySets : [];
+    let nextId = maxEntityId(originalText) + 1;
+    const add = [];
+    const emit = (body) => { const id = nextId++; add.push(`#${id}=${body};`); return id; };
+    const projectId = findFirstEntityIdByType(originalText, "IFCPROJECT");
+    let appendedProject = 0;
+    let appendedElement = 0;
+    let skipped = 0;
+
+    const defaultElementPsetName = "Pset_BridgeInspectionElementCondition";
+    const defaultProjectPsetName = "Pset_BridgeInspection";
+
+    if (projectId == null) skipped += projectRows.length;
+    else {
+      for (const row of projectRows) {
+        if (!row) { skipped += 1; continue; }
+        const psetName = truncateIfcText(row.psetName || defaultProjectPsetName, 255);
+        const props = [];
+        const pv = (name, val) => {
+          const p = emit(`IFCPROPERTYSINGLEVALUE(${q(truncateIfcText(name, 255))},$,${ifcTextValue(val, 255)},$)`);
+          props.push(p);
+        };
+        if (row.inspectionDate) pv("InspectionDate", row.inspectionDate);
+        if (row.inspectorName) pv("InspectorName", row.inspectorName);
+        if (row.inspectorFirm) pv("InspectorFirm", row.inspectorFirm);
+        if (row.appliedAt) pv("AppliedAt", row.appliedAt);
+        if (!props.length) { skipped += 1; continue; }
+        const pset = emit(`IFCPROPERTYSET('${ifcGuid()}',$,${q(psetName)},$,(${props.map((p) => "#" + p).join(",")}))`);
+        emit(`IFCRELDEFINESBYPROPERTIES('${ifcGuid()}',$,${q(psetName)},$, (#${projectId}), #${pset})`);
+        appendedProject += 1;
+      }
+    }
+
+    for (const row of elementRows) {
+      if (!row || row.expressId == null || !hasEntityId(originalText, row.expressId)) { skipped += 1; continue; }
+      const psetName = truncateIfcText(row.psetName || defaultElementPsetName, 255);
+      const props = [];
+      const pv = (name, val) => {
+        const p = emit(`IFCPROPERTYSINGLEVALUE(${q(truncateIfcText(name, 255))},$,${ifcTextValue(val, 255)},$)`);
+        props.push(p);
+      };
+      if (row.conditionRating != null && String(row.conditionRating).trim()) pv("ConditionRating", row.conditionRating);
+      if (row.appliedAt) pv("AppliedAt", row.appliedAt);
+      if (row.elementName) pv("ElementName", row.elementName);
+      if (row.elementType) pv("ElementType", row.elementType);
+      if (row.elementId) pv("ElementId", row.elementId);
+      if (!props.length) { skipped += 1; continue; }
+      const pset = emit(`IFCPROPERTYSET('${ifcGuid()}',$,${q(psetName)},$,(${props.map((p) => "#" + p).join(",")}))`);
+      emit(`IFCRELDEFINESBYPROPERTIES('${ifcGuid()}',$,${q(psetName)},$, (#${Math.trunc(Number(row.expressId))}), #${pset})`);
+      appendedElement += 1;
+    }
+
+    if (!add.length) {
+      return {
+        text: originalText,
+        appendedProject: 0,
+        appendedElement: 0,
+        skipped,
+        totalAppended: 0,
+      };
+    }
+
+    const text = insertEntitiesBeforeDataEnd(originalText, add);
+    return {
+      text,
+      appendedProject,
+      appendedElement,
+      skipped,
+      totalAppended: appendedProject + appendedElement,
+    };
+  }
+
   /**
    * @param {string} originalText  the original .ifc file text
    * @param {Array} records  photo records with .ifcTag.expressId and .blob
@@ -343,5 +461,5 @@
     return { text, linked, withImages, skipped };
   }
 
-  window.ifcExport = { buildIFC, mergeIntoIFC, ifcGuid, detectSchema };
+  window.ifcExport = { buildIFC, mergeIntoIFC, writeCompliantIFC, ifcGuid, detectSchema };
 })();

@@ -1,5 +1,5 @@
-﻿const BUILD_VERSION = "v146";
-const BUILD_STAMP = "2026-07-27 07:44:00";
+const BUILD_VERSION = "v150";
+const BUILD_STAMP = "2026-07-27 09:28:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -196,10 +196,24 @@ const ifcViewPresets     = document.getElementById("ifcViewPresets");
 const ifcElevControls    = document.getElementById("ifcElevControls");
 const ifcMoveControls    = document.getElementById("ifcMoveControls");
 const ifcSelectedElement = document.getElementById("ifcSelectedElement");
+const ifcViewerModeBar = document.getElementById("ifcViewerModeBar");
+const ifcConditionAssignViewToggle = document.getElementById("ifcConditionAssignViewToggle");
+const ifcConditionColorLegend = document.getElementById("ifcConditionColorLegend");
+const ifcViewerPsets = document.getElementById("ifcViewerPsets");
+const ifcConditionPsetCard = document.getElementById("ifcConditionPsetCard");
+const ifcInspectionPsetCard = document.getElementById("ifcInspectionPsetCard");
 const ifcTaggedPhotos    = document.getElementById("ifcTaggedPhotos");
 const ifcSetPhotoLocationButton = document.getElementById("ifcSetPhotoLocationButton");
 const ifcLinkToPhotoButton = document.getElementById("ifcLinkToPhotoButton");
 const ifcClearSelectionButton = document.getElementById("ifcClearSelectionButton");
+const ifcConditionRatingInput = document.getElementById("ifcConditionRatingInput");
+const ifcApplyConditionPsetButton = document.getElementById("ifcApplyConditionPsetButton");
+const ifcConditionSummary = document.getElementById("ifcConditionSummary");
+const ifcInspectionDateInput = document.getElementById("ifcInspectionDateInput");
+const ifcInspectorNameInput = document.getElementById("ifcInspectorNameInput");
+const ifcInspectorFirmInput = document.getElementById("ifcInspectorFirmInput");
+const ifcApplyInspectionPsetButton = document.getElementById("ifcApplyInspectionPsetButton");
+const ifcInspectionSummary = document.getElementById("ifcInspectionSummary");
 const closeIfcViewerButton = document.getElementById("closeIfcViewerButton");
 const view3dButton       = document.getElementById("view3dButton");
 let debugConsolePanel    = null;
@@ -235,9 +249,14 @@ let ifcCurrentSelection      = null; // currently selected IFC element metadata
 let ifcSelectedElements     = []; // currently selected IFC elements metadata (multi-select)
 let ifcLinkedPhotoId       = null; // photo the 3D viewer will tag the selected IFC element to
 let ifcLoadedBridgeId      = null; // bridge whose IFC is currently loaded in the viewer
+let ifcViewerContextMode   = "main"; // "main" (bridge) or "photo" (tagging from a photo)
+let ifcConditionAssignViewActive = false;
 let navModalRecord         = null; // record currently shown in the Map & navigation modal
 let pendingIfcPhotoView    = null; // {id,lat,lng,heading,attitude,alt} to apply once an IFC loads
 let lastLoadedIfcFile      = null; // original IFC File uploaded this session, for merge export
+
+const IFC_ELEMENT_PSET_NAME = "Pset_BridgeInspectionElementCondition";
+const IFC_PROJECT_PSET_NAME = "Pset_BridgeInspection";
 const IFC_EXCLUDE_REBAR_KEY = "ifcExcludeRebar";
 let aprilDetector          = null;
 let aprilPreviewCanvas     = null;
@@ -462,6 +481,8 @@ async function init() {
     ifcExcludeRebarCheck.checked = saved == null ? true : saved !== "0";
   }
   registerEvents();
+  applyIfcViewerContextUI();
+  setIfcConditionAssignView(false);
   await registerServiceWorker();
   if (apriltagPreviewStatus && !aprilTagDetectorReady()) {
     apriltagPreviewStatus.textContent = "AprilTag 36h11: detector library not loaded.";
@@ -548,7 +569,13 @@ async function ensureIfcViewer() {
 function openIfcViewerModal() {
   if (!ifcViewerModal) return;
   ifcViewerModal.hidden = false;
+  applyIfcViewerContextUI();
+  if (ifcInspectionDateInput && !ifcInspectionDateInput.value) {
+    ifcInspectionDateInput.value = new Date().toISOString().slice(0, 10);
+  }
   if (ifcSetPhotoLocationButton) ifcSetPhotoLocationButton.disabled = !ifcLinkedPhotoId;
+  refreshIfcPropertySetUI();
+  refreshIfcConditionColoring();
   // Presets only make sense once a model is loaded; show them if one already is.
   if (ifcViewPresets) {
     ifcViewPresets.hidden = !(ifcViewer && ifcViewer.model);
@@ -570,6 +597,7 @@ function onIfcModelLoaded(fileName) {
   if (ifcElevControls) ifcElevControls.hidden = false;
   if (ifcMoveControls) ifcMoveControls.hidden = false;
   void refreshIfcTaggedSymbols();
+  refreshIfcConditionColoring();
 }
 
 function clearIfcLoadedModel(message) {
@@ -601,6 +629,7 @@ function setActiveViewPreset(view) {
 // next selected element is tagged to this photo.
 function openIfcForPhoto(record) {
   if (!record) return;
+  ifcViewerContextMode = "photo";
   ifcLinkedPhotoId = record.id;
 
   openIfcViewerModal();
@@ -684,6 +713,175 @@ function setIfcTags(record, tags) {
   }
 }
 
+function getBridgeElementPropertySets(bridge) {
+  return Array.isArray(bridge?.ifcElementPropertySets) ? bridge.ifcElementPropertySets : [];
+}
+
+function getBridgeProjectPropertySets(bridge) {
+  return Array.isArray(bridge?.ifcProjectPropertySets) ? bridge.ifcProjectPropertySets : [];
+}
+
+function latestConditionRatingsByExpress(bridge) {
+  const rows = getBridgeElementPropertySets(bridge);
+  const seen = new Set();
+  const latest = [];
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i];
+    if (!row || row.psetName !== IFC_ELEMENT_PSET_NAME || row.expressId == null) continue;
+    const key = String(row.expressId);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    latest.push({
+      expressId: row.expressId,
+      conditionRating: row.conditionRating ?? "",
+    });
+  }
+  return latest;
+}
+
+function applyIfcViewerContextUI() {
+  const inMainViewer = ifcViewerContextMode === "main";
+  if (ifcViewerPsets) ifcViewerPsets.hidden = false;
+  if (ifcConditionPsetCard) ifcConditionPsetCard.hidden = false;
+  if (ifcInspectionPsetCard) ifcInspectionPsetCard.hidden = !inMainViewer;
+  if (ifcInspectionDateInput) ifcInspectionDateInput.disabled = !inMainViewer;
+  if (ifcInspectorNameInput) ifcInspectorNameInput.disabled = !inMainViewer;
+  if (ifcInspectorFirmInput) ifcInspectorFirmInput.disabled = !inMainViewer;
+  if (ifcApplyInspectionPsetButton) ifcApplyInspectionPsetButton.disabled = !inMainViewer;
+  if (ifcViewerModeBar) ifcViewerModeBar.hidden = false;
+}
+
+function refreshIfcConditionColoring() {
+  if (!ifcViewer || typeof ifcViewer.setConditionColoring !== "function") return;
+  const bridge = activeBridge();
+  const ratings = ifcConditionAssignViewActive ? latestConditionRatingsByExpress(bridge) : [];
+  ifcViewer.setConditionColoring(ratings, ifcConditionAssignViewActive);
+}
+
+function setIfcConditionAssignView(active) {
+  ifcConditionAssignViewActive = !!active;
+  if (ifcConditionAssignViewToggle) {
+    ifcConditionAssignViewToggle.classList.toggle("is-active", ifcConditionAssignViewActive);
+    ifcConditionAssignViewToggle.textContent = ifcConditionAssignViewActive
+      ? "🎨 Condition assignment view: On"
+      : "🎨 Condition assignment view: Off";
+  }
+  if (ifcConditionColorLegend) ifcConditionColorLegend.hidden = !ifcConditionAssignViewActive;
+  refreshIfcConditionColoring();
+}
+
+function syncExportIfcButtonState() {
+  if (!exportIfcButton) return;
+  const b = activeBridge();
+  if (!b) { exportIfcButton.disabled = true; return; }
+  const hasProject = getBridgeProjectPropertySets(b).length > 0;
+  const hasElement = getBridgeElementPropertySets(b).length > 0;
+  exportIfcButton.disabled = !(hasProject || hasElement);
+}
+
+function latestElementCondition(bridge, expressId) {
+  if (expressId == null) return null;
+  const key = String(expressId);
+  const rows = getBridgeElementPropertySets(bridge);
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i];
+    if (!row) continue;
+    if (row.psetName !== IFC_ELEMENT_PSET_NAME) continue;
+    if (String(row.expressId) !== key) continue;
+    return row;
+  }
+  return null;
+}
+
+function refreshIfcPropertySetUI() {
+  const bridge = activeBridge();
+  if (ifcApplyConditionPsetButton) ifcApplyConditionPsetButton.disabled = !ifcSelectedElements.length;
+  if (ifcConditionSummary) {
+    if (!ifcSelectedElements.length) {
+      ifcConditionSummary.textContent = "No condition rating set for selected element.";
+    } else {
+      const first = ifcSelectedElements[0];
+      const latest = latestElementCondition(bridge, first?.ifcExpressId);
+      const label = first?.elementName || first?.elementId || (first?.ifcExpressId != null ? `#${first.ifcExpressId}` : "selected element");
+      if (latest && latest.conditionRating != null && String(latest.conditionRating).trim()) {
+        const extra = ifcSelectedElements.length > 1 ? ` (+${ifcSelectedElements.length - 1} more selected)` : "";
+        ifcConditionSummary.textContent = `Latest condition for ${label}: ${latest.conditionRating}${extra}`;
+      } else {
+        ifcConditionSummary.textContent = `No condition rating set yet for ${label}.`;
+      }
+    }
+  }
+  if (ifcInspectionSummary) {
+    const rows = getBridgeProjectPropertySets(bridge);
+    const latest = rows.length ? rows[rows.length - 1] : null;
+    if (latest) {
+      ifcInspectionSummary.textContent = `Saved ${rows.length} IFC-wide set${rows.length === 1 ? "" : "s"} (latest: ${latest.inspectionDate || "no date"} · ${latest.inspectorName || "no name"} · ${latest.inspectorFirm || "no firm"}).`;
+      if (ifcInspectionDateInput && !ifcInspectionDateInput.value && latest.inspectionDate) ifcInspectionDateInput.value = latest.inspectionDate;
+      if (ifcInspectorNameInput && !ifcInspectorNameInput.value && latest.inspectorName) ifcInspectorNameInput.value = latest.inspectorName;
+      if (ifcInspectorFirmInput && !ifcInspectorFirmInput.value && latest.inspectorFirm) ifcInspectorFirmInput.value = latest.inspectorFirm;
+    } else {
+      ifcInspectionSummary.textContent = "No IFC-wide inspection property sets saved yet.";
+    }
+  }
+}
+
+async function applyConditionPropertySetToSelection() {
+  if (!ifcSelectedElements.length) { setStatus("Select one or more IFC elements first."); return; }
+  const rating = String(ifcConditionRatingInput?.value || "").trim();
+  if (!rating) { setStatus("Enter a condition rating first."); return; }
+  const bridge = activeBridge();
+  if (!bridge) { setStatus("Open a bridge first."); return; }
+  const rec = (await getBridgeRec(bridge.id)) || bridge;
+  if (!Array.isArray(rec.ifcElementPropertySets)) rec.ifcElementPropertySets = [];
+  const now = new Date().toISOString();
+  for (const sel of ifcSelectedElements) {
+    if (!sel || sel.ifcExpressId == null) continue;
+    rec.ifcElementPropertySets.push({
+      psetName: IFC_ELEMENT_PSET_NAME,
+      expressId: sel.ifcExpressId,
+      elementId: sel.elementId ?? null,
+      elementName: sel.elementName ?? null,
+      elementType: sel.elementType ?? null,
+      conditionRating: rating,
+      appliedAt: now,
+    });
+  }
+  await putBridgeRec(rec);
+  const idx = bridges.findIndex((b) => b.id === rec.id);
+  if (idx >= 0) bridges[idx] = rec;
+  setStatus(`Added ${IFC_ELEMENT_PSET_NAME} to ${ifcSelectedElements.length} selected element${ifcSelectedElements.length === 1 ? "" : "s"} with condition rating “${rating}”.`);
+  syncExportIfcButtonState();
+  refreshIfcPropertySetUI();
+  refreshIfcConditionColoring();
+}
+
+async function addIfcInspectionPropertySet() {
+  const inspectionDate = String(ifcInspectionDateInput?.value || "").trim();
+  const inspectorName = String(ifcInspectorNameInput?.value || "").trim();
+  const inspectorFirm = String(ifcInspectorFirmInput?.value || "").trim();
+  if (!inspectionDate || !inspectorName || !inspectorFirm) {
+    setStatus("Enter inspection date, inspector name, and firm.");
+    return;
+  }
+  const bridge = activeBridge();
+  if (!bridge) { setStatus("Open a bridge first."); return; }
+  const rec = (await getBridgeRec(bridge.id)) || bridge;
+  if (!Array.isArray(rec.ifcProjectPropertySets)) rec.ifcProjectPropertySets = [];
+  rec.ifcProjectPropertySets.push({
+    psetName: IFC_PROJECT_PSET_NAME,
+    inspectionDate,
+    inspectorName,
+    inspectorFirm,
+    appliedAt: new Date().toISOString(),
+  });
+  await putBridgeRec(rec);
+  const idx = bridges.findIndex((b) => b.id === rec.id);
+  if (idx >= 0) bridges[idx] = rec;
+  setStatus(`Added ${IFC_PROJECT_PSET_NAME} (inspection ${inspectionDate}, ${inspectorName}, ${inspectorFirm}) without overwriting previous sets.`);
+  syncExportIfcButtonState();
+  refreshIfcPropertySetUI();
+}
+
 function setIfcSelectedElement(elementData) {
   const selected = Array.isArray(elementData?.selectedElements) ? elementData.selectedElements : (elementData ? [elementData] : []);
   ifcSelectedElements = selected.filter((s) => s && s.ifcExpressId != null);
@@ -705,6 +903,7 @@ function setIfcSelectedElement(elementData) {
     if (ifcSetPhotoLocationButton) ifcSetPhotoLocationButton.disabled = !ifcLinkedPhotoId;
     if (ifcTaggedPhotos) { ifcTaggedPhotos.hidden = true; ifcTaggedPhotos.innerHTML = ""; }
   }
+  refreshIfcPropertySetUI();
 }
 
 // ── Reverse lookup: element → photos tagged to it ──────────────────────────────
@@ -910,6 +1109,7 @@ function registerEvents() {
   });
   // IFC Viewer events
   if (view3dButton) view3dButton.addEventListener("click", () => {
+    ifcViewerContextMode = "main";
     ifcLinkedPhotoId = null;
     if (ifcSetPhotoLocationButton) ifcSetPhotoLocationButton.disabled = true;
     if (ifcLinkToPhotoButton) ifcLinkToPhotoButton.textContent = "🔗 Tag selected elements to photo";
@@ -1063,7 +1263,15 @@ function registerEvents() {
     }
   });
 
+  if (ifcConditionAssignViewToggle) ifcConditionAssignViewToggle.addEventListener("click", () => {
+    setIfcConditionAssignView(!ifcConditionAssignViewActive);
+    setStatus(ifcConditionAssignViewActive
+      ? "Condition assignment view enabled (elements are colored by current rating)."
+      : "Condition assignment view disabled.");
+  });
   if (ifcClearSelectionButton) ifcClearSelectionButton.addEventListener("click", () => clearIfcSelection());
+  if (ifcApplyConditionPsetButton) ifcApplyConditionPsetButton.addEventListener("click", () => { void applyConditionPropertySetToSelection(); });
+  if (ifcApplyInspectionPsetButton) ifcApplyInspectionPsetButton.addEventListener("click", () => { void addIfcInspectionPropertySet(); });
   if (ifcLinkToPhotoButton) ifcLinkToPhotoButton.addEventListener("click", async () => {
     if (!ifcSelectedElements.length) { setStatus("Select one or more elements in the 3D model first."); return; }
     if (!ifcLinkedPhotoId) {
@@ -1241,7 +1449,7 @@ function registerEvents() {
   const editBridgeBtn = document.getElementById("editBridgeButton");
   if (editBridgeBtn) editBridgeBtn.addEventListener("click", () => { const b = activeBridge(); if (b) openBridgeEditor(b); });
   if (wordReportButton) wordReportButton.addEventListener("click", () => generateWordReport());
-  if (exportIfcButton) exportIfcButton.addEventListener("click", () => exportPhotosToIfc());
+  if (exportIfcButton) exportIfcButton.addEventListener("click", () => { void exportPhotosToIfc(); });
   if (taggedElementsButton) taggedElementsButton.addEventListener("click", () => openTaggedElementsModal());
   if (acquireGeoButton) acquireGeoButton.addEventListener("click", () => acquireGeoAndHeading());
   if (scanToggleBtn) scanToggleBtn.addEventListener("click", () => scanActive ? finishScanSession() : startScanSession());
@@ -3214,14 +3422,14 @@ async function renderSavedPhotos() {
   if (!records.length) {
     emptyState.hidden = false; photoGrid.hidden = true; clearAllButton.disabled = true;
     if (wordReportButton) wordReportButton.disabled = true;
-    if (exportIfcButton) exportIfcButton.disabled = true;
+    syncExportIfcButtonState();
     if (taggedElementsButton) taggedElementsButton.disabled = true;
     await renderScanSessions();
     return;
   }
   clearAllButton.disabled = false; emptyState.hidden = true; photoGrid.hidden = false;
   if (wordReportButton) wordReportButton.disabled = false;
-  if (exportIfcButton) exportIfcButton.disabled = false;
+  syncExportIfcButtonState();
   if (taggedElementsButton) taggedElementsButton.disabled = false;
 
   for (const record of records) {
@@ -3258,6 +3466,60 @@ function expandForIfcMerge(records) {
     for (const t of tags) out.push({ ...r, ifcTag: t });
   }
   return out;
+}
+
+function summarizeCompliantIfcPayload(projectSets, elementSets) {
+  const projectRows = Array.isArray(projectSets) ? projectSets : [];
+  const elementRows = Array.isArray(elementSets) ? elementSets : [];
+  const validExpressRows = elementRows.filter((r) => r && r.expressId != null);
+  const uniqueExpress = new Set(validExpressRows.map((r) => String(r.expressId)));
+  return {
+    projectRows: projectRows.length,
+    elementRows: elementRows.length,
+    validExpressRows: validExpressRows.length,
+    uniqueExpressCount: uniqueExpress.size,
+    invalidElementRows: elementRows.length - validExpressRows.length,
+  };
+}
+
+function chooseCompliantIfcExportPreview(summary) {
+  return new Promise((resolve) => {
+    const s = summary || {};
+    const overlay = document.createElement("div");
+    overlay.className = "settings-modal";
+    overlay.style.zIndex = "2400";
+    overlay.innerHTML = `
+      <div class="settings-dialog" style="width:min(560px,100%);">
+        <div class="peer-transfer-modal-head">
+          <span class="scan-title">🧊 Export compliant IFC</span>
+          <button type="button" class="secondary" data-act="cancel">✕ Close</button>
+        </div>
+        <div class="status-bar" style="margin:6px 0 10px;">
+          This export writes IFC property sets only (no embedded image URIs).
+        </div>
+        <div class="ifc-export-choice">
+          <div class="ifc-export-opt" style="cursor:default;">
+            <strong>Preview</strong>
+            <span>IFC-wide sets to write: <strong>${s.projectRows || 0}</strong></span>
+            <span>Element-level set rows to write: <strong>${s.elementRows || 0}</strong></span>
+            <span>Rows with express ID: <strong>${s.validExpressRows || 0}</strong> across <strong>${s.uniqueExpressCount || 0}</strong> unique element(s)</span>
+            <span>${s.invalidElementRows ? `⚠ ${s.invalidElementRows} element row(s) have no express ID and will be skipped.` : "No invalid element rows detected."}</span>
+          </div>
+        </div>
+        <div class="actions-row" style="justify-content:flex-end;margin-top:12px;">
+          <button type="button" class="secondary" data-act="cancel">Cancel</button>
+          <button type="button" data-act="continue">Continue export</button>
+        </div>
+      </div>`;
+    const done = (ok) => { overlay.remove(); resolve(!!ok); };
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) return done(false);
+      const act = e.target.closest("[data-act]")?.dataset.act;
+      if (!act) return;
+      done(act === "continue");
+    });
+    document.body.appendChild(overlay);
+  });
 }
 
 // Small in-app chooser for the two IFC export modes. Resolves to
@@ -3330,55 +3592,45 @@ function downloadTextFile(text, filename, mime) {
   setTimeout(() => URL.revokeObjectURL(a.href), 8000);
 }
 
-// Export the active bridge's photos to IFC. Two modes: merge document links onto
-// the real tagged elements of the original model (so external tools show photos
-// when clicking an element), or a standalone file of directional photo markers.
 async function exportPhotosToIfc() {
-  if (!window.ifcExport || typeof window.ifcExport.buildIFC !== "function") {
-    setStatus("IFC export module not loaded — clear cache & reload.");
+  if (!window.ifcExport || typeof window.ifcExport.writeCompliantIFC !== "function") {
+    setStatus("IFC writer module not loaded — clear cache & reload.");
     return;
   }
-  const records = await getActivePhotos();
-  if (!records.length) { setStatus("No photos to export."); return; }
-
   const bridge = activeBridge();
-  const forExport = prepPhotosForExport(records);
-  const mergeRows = expandForIfcMerge(forExport);
-  const taggedCount = mergeRows.filter((r) => r.ifcTag && r.ifcTag.expressId != null).length;
-
-  const mode = await chooseIfcExportMode(taggedCount);
-  if (!mode) return;
+  if (!bridge) { setStatus("Open a bridge first."); return; }
+  const projectSets = getBridgeProjectPropertySets(bridge);
+  const elementSets = getBridgeElementPropertySets(bridge);
+  if (!projectSets.length && !elementSets.length) {
+    setStatus("No IFC property sets to export yet. Add condition ratings or inspection metadata first.");
+    return;
+  }
+  const preview = summarizeCompliantIfcPayload(projectSets, elementSets);
+  const confirmed = await chooseCompliantIfcExportPreview(preview);
+  if (!confirmed) { setStatus("IFC export canceled."); return; }
 
   const stem = safeStem((bridge && (bridge.title || bridge.name)) || "inspection");
   const stamp = new Date().toISOString().slice(0, 10);
-
   if (exportIfcButton) exportIfcButton.disabled = true;
   try {
-    if (mode === "merge") {
-      if (!taggedCount) {
-        setStatus("No photos are tagged to elements — tag some in the 3D viewer first, or export standalone markers.");
-        return;
-      }
-      setStatus("Reading your IFC model to merge photos…");
-      const originalText = await getOriginalIfcText();
-      if (!originalText) { setStatus("Merge cancelled — no IFC model provided."); return; }
-      const { text, linked, withImages, skipped } =
-        await window.ifcExport.mergeIntoIFC(originalText, mergeRows, { embedImages: true });
-      if (!linked) { setStatus("No matching tagged elements were linked."); return; }
-      downloadTextFile(text, `${stem}-with-photos-${stamp}.ifc`);
-      setStatus(`Merged ${linked} photo link${linked === 1 ? "" : "s"} into your IFC (${withImages} with embedded image${withImages === 1 ? "" : "s"}${skipped ? `, ${skipped} untagged skipped` : ""}). Open it in your BIM tool and click a tagged element to see its photos.`);
-    } else {
-      setStatus(`Building IFC from ${forExport.length} photo${forExport.length === 1 ? "" : "s"}…`);
-      const { text, count, withImages } =
-        await window.ifcExport.buildIFC(forExport, bridge, { embedImages: true });
-      downloadTextFile(text, `${stem}-photos-${stamp}.ifc`);
-      setStatus(`Exported ${count} photo marker${count === 1 ? "" : "s"} to IFC (${withImages} with embedded image${withImages === 1 ? "" : "s"}).`);
+    setStatus("Reading IFC model for compliant property-set export…");
+    const originalText = await getOriginalIfcText();
+    if (!originalText) { setStatus("Export cancelled — no IFC model provided."); return; }
+    const out = window.ifcExport.writeCompliantIFC(originalText, {
+      projectPropertySets: projectSets,
+      elementPropertySets: elementSets,
+    });
+    if (!out || !out.totalAppended) {
+      setStatus(`No property sets were written (${out?.skipped ?? 0} skipped).`);
+      return;
     }
+    downloadTextFile(out.text, `${stem}-inspection-psets-${stamp}.ifc`);
+    setStatus(`Exported compliant IFC with ${out.totalAppended} property set write${out.totalAppended === 1 ? "" : "s"} (${out.appendedProject} IFC-wide, ${out.appendedElement} element-level${out.skipped ? `, ${out.skipped} skipped` : ""}).`);
   } catch (e) {
-    console.error("IFC export failed:", e);
+    console.error("IFC compliant export failed:", e);
     setStatus("IFC export failed: " + e.message);
   } finally {
-    if (exportIfcButton) exportIfcButton.disabled = false;
+    syncExportIfcButtonState();
   }
 }
 
@@ -5705,6 +5957,8 @@ async function downloadBridgeZip(id) {
     title: b.title,
     description: b.description || "",
     reportConfig: b.reportConfig || null,
+    ifcProjectPropertySets: Array.isArray(b.ifcProjectPropertySets) ? b.ifcProjectPropertySets : [],
+    ifcElementPropertySets: Array.isArray(b.ifcElementPropertySets) ? b.ifcElementPropertySets : [],
     createdAt: b.createdAt,
     exportedAt: new Date().toISOString(),
     photoCount: photos.length,
@@ -5872,6 +6126,8 @@ async function importBridgeZipFile(file) {
         description: String(manifest?.description || ""),
         createdAt: String(manifest?.createdAt || nowIso),
         reportConfig: manifest?.reportConfig || null,
+        ifcProjectPropertySets: Array.isArray(manifest?.ifcProjectPropertySets) ? manifest.ifcProjectPropertySets.slice() : [],
+        ifcElementPropertySets: Array.isArray(manifest?.ifcElementPropertySets) ? manifest.ifcElementPropertySets.slice() : [],
         kml: null,
       };
     } else {
@@ -5879,6 +6135,14 @@ async function importBridgeZipFile(file) {
       if (!bridgeRec.description && manifest?.description) bridgeRec.description = String(manifest.description);
       if (!bridgeRec.createdAt) bridgeRec.createdAt = String(manifest?.createdAt || nowIso);
       if (!bridgeRec.reportConfig && manifest?.reportConfig) bridgeRec.reportConfig = manifest.reportConfig;
+      if (!Array.isArray(bridgeRec.ifcProjectPropertySets)) bridgeRec.ifcProjectPropertySets = [];
+      if (!Array.isArray(bridgeRec.ifcElementPropertySets)) bridgeRec.ifcElementPropertySets = [];
+      if (Array.isArray(manifest?.ifcProjectPropertySets) && manifest.ifcProjectPropertySets.length) {
+        bridgeRec.ifcProjectPropertySets.push(...manifest.ifcProjectPropertySets);
+      }
+      if (Array.isArray(manifest?.ifcElementPropertySets) && manifest.ifcElementPropertySets.length) {
+        bridgeRec.ifcElementPropertySets.push(...manifest.ifcElementPropertySets);
+      }
     }
 
     const overlayEntry = Object.values(zip.files).find((e) =>

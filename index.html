@@ -23,14 +23,14 @@
   <!-- proj4 (map projection / georeferencing) -->
   <script src="vendor/proj4.js"></script>
   <!-- web-ifc (IFC parsing) loaded dynamically as ES module in ifc-viewer.js -->
-  <link rel="stylesheet" href="styles.css?v=20260727-074400" />
+  <link rel="stylesheet" href="styles.css?v=20260727-092800" />
 </head>
 <body>
 
 <header>
   <h1>📷 Photo Vault <span id="buildStamp" style="font-size:.55rem;font-weight:400;opacity:.7;vertical-align:middle;">build …</span></h1>
   <div style="display:flex;gap:8px;align-items:center;">
-    <a class="map-nav-link" href="map.html?v=20260727-074400">🗺 Map summary</a>
+    <a class="map-nav-link" href="map.html?v=20260727-092800">🗺 Map summary</a>
     <button id="openSettingsButton" class="secondary" hidden>⚙ Settings</button>
     <button id="openPeerTransferViewTop" class="secondary">🔁 Transfer</button>
     <button id="installButton" class="secondary" hidden>⬇ Install App</button>
@@ -95,7 +95,7 @@
   <div class="actions-row" style="justify-content:flex-end">
     <button id="wordReportButton" class="secondary" disabled>📄 Word Report</button>
     <button id="taggedElementsButton" class="secondary" disabled>🧷 Tagged elements</button>
-    <button id="exportIfcButton" class="secondary" disabled>🧊 Export to IFC</button>
+    <button id="exportIfcButton" class="secondary" disabled title="Export compliant IFC property sets">🧊 Export compliant IFC</button>
     <button id="clearAllButton" class="danger" disabled>🗑 Delete all</button>
   </div>
 
@@ -391,7 +391,34 @@
     </div>
 
     <div class="ifc-viewer-info">
+      <div id="ifcViewerModeBar" class="ifc-viewer-mode-bar">
+        <button id="ifcConditionAssignViewToggle" type="button" class="secondary">🎨 Condition assignment view: Off</button>
+        <span id="ifcConditionColorLegend" class="ifc-condition-legend" hidden>Colors: 0-3 critical, 4-5 poor, 6-7 fair, 8-9 good</span>
+      </div>
       <div id="ifcSelectedElement" class="status-bar" style="margin:8px 0;">No element selected</div>
+      <div id="ifcViewerPsets" class="ifc-viewer-psets" style="display:grid;gap:10px;margin:8px 0 12px;">
+        <div id="ifcConditionPsetCard" style="display:grid;gap:8px;padding:8px;border:1px solid #334155;border-radius:8px;background:#111827;">
+          <div style="font-size:.82rem;font-weight:700;color:#e2e8f0;">Element property set (condition rating)</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+            <label for="ifcConditionRatingInput" style="font-size:.8rem;color:#94a3b8;">Condition rating</label>
+            <input id="ifcConditionRatingInput" class="meta-input" type="text" placeholder="e.g. 6 or Fair" style="min-width:180px;max-width:260px;" />
+            <button id="ifcApplyConditionPsetButton" class="secondary" disabled>🏷 Apply to selected element(s)</button>
+          </div>
+          <div id="ifcConditionSummary" class="status-bar" style="margin:0;">No condition rating set for selected element.</div>
+        </div>
+        <div id="ifcInspectionPsetCard" style="display:grid;gap:8px;padding:8px;border:1px solid #334155;border-radius:8px;background:#111827;">
+          <div style="font-size:.82rem;font-weight:700;color:#e2e8f0;">IFC-wide inspection property set</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;">
+            <label class="labeled-field"><span class="field-label">Inspection date</span><input id="ifcInspectionDateInput" type="date" class="meta-input" /></label>
+            <label class="labeled-field"><span class="field-label">Inspector name</span><input id="ifcInspectorNameInput" type="text" class="meta-input" placeholder="Inspector name" /></label>
+            <label class="labeled-field"><span class="field-label">Firm</span><input id="ifcInspectorFirmInput" type="text" class="meta-input" placeholder="Firm name" /></label>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <button id="ifcApplyInspectionPsetButton" class="secondary">🧾 Add inspection property set</button>
+            <div id="ifcInspectionSummary" class="status-bar" style="margin:0;flex:1;">No IFC-wide inspection property sets saved yet.</div>
+          </div>
+        </div>
+      </div>
       <div id="ifcTaggedPhotos" class="ifc-tagged-photos" hidden></div>
       <div class="actions-row" style="justify-content:flex-end;margin-top:12px;">
         <button id="ifcSetPhotoLocationButton" class="secondary" disabled>📍 Set photo location from camera</button>
@@ -440,8 +467,8 @@
 <script src="vendor/cv.js?v=20260716-211500"></script>
 <script src="vendor/aruco.js?v=20260716-211500"></script>
 <script src="vendor/apriltag_36h11.js?v=20260716-211500"></script>
-<script src="ifc-viewer.js?v=20260727-074400"></script>
-<script src="ifc-export.js?v=20260727-074400"></script>
-<script src="app.js?v=20260727-074400"></script>
+<script src="ifc-viewer.js?v=20260727-092800"></script>
+<script src="ifc-export.js?v=20260727-092800"></script>
+<script src="app.js?v=20260727-092800"></script>
 </body>
 </html>
