@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v161";
+const BUILD_VERSION = "v162";
 const BUILD_STAMP = "2026-07-30 17:21:30";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -297,6 +297,7 @@ let arRendererScene        = null;
 let arRendererCamera       = null;
 let arModelClone           = null;
 let arTestBoxHelper        = null;
+let arTestMaterial         = null;
 let arRenderLoopId         = null;
 let arSelectedLocation      = null; // {lat, lng}
 let arSelectedLocationIsManual = false;
@@ -1684,6 +1685,9 @@ async function openArViewModal() {
   
   arViewModal.hidden = false;
   arActive = true;
+  if (arOverlayCanvas) arOverlayCanvas.style.opacity = "1";
+  if (arOpacitySlider) arOpacitySlider.value = "100";
+  if (arOpacityValue) arOpacityValue.textContent = "1.00";
   
   // Initialize the location picker map if needed
   if (!arLocationPickerMap && document.getElementById("arLocationPickerMap")) {
@@ -1795,39 +1799,59 @@ function syncArCanvasSize() {
 }
 
 function ensureArModelClone() {
-  if (!ifcViewer || !ifcViewer.model || !arRendererScene) return false;
+  if (!ifcViewer || !ifcViewer.model || !arRendererScene || typeof THREE === "undefined") return false;
   if (arModelClone) return true;
   arModelClone = ifcViewer.model.clone(true);
   arModelClone.rotation.set(0, 0, 0);
+  arTestMaterial = new THREE.MeshBasicMaterial({
+    color: 0x00ffff,
+    side: THREE.DoubleSide,
+    transparent: false,
+    depthTest: false,
+    depthWrite: false,
+  });
+  arModelClone.traverse((child) => {
+    if (child.isMesh) {
+      child.material = arTestMaterial;
+      child.visible = true;
+      child.frustumCulled = false;
+      child.renderOrder = 10;
+    }
+  });
   arRendererScene.add(arModelClone);
   return true;
 }
 
 function frameArModelForTest() {
-  if (!ifcViewer || !arRendererCamera || !ensureArModelClone()) return false;
-  const radius = ifcViewer.modelRadius || 50;
-  arModelClone.position.set(0, 0, 0);
-  arModelClone.rotation.set(0, 0, 0);
-  arModelClone.scale.set(1, 1, 1);
+  if (!ifcViewer || !arRendererCamera || !ensureArModelClone() || typeof THREE === "undefined") return false;
+  const box = new THREE.Box3().setFromObject(arModelClone);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const radius = Math.max(size.x, size.y, size.z, ifcViewer.modelRadius || 50);
   arModelClone.visible = true;
   if (arTestBoxHelper && arTestBoxHelper.parent !== arRendererScene) {
     arRendererScene.add(arTestBoxHelper);
   }
-  if (!arTestBoxHelper && typeof THREE !== "undefined") {
+  if (!arTestBoxHelper) {
     arTestBoxHelper = new THREE.BoxHelper(arModelClone, 0xff00ff);
+    arTestBoxHelper.renderOrder = 20;
+    if (arTestBoxHelper.material) {
+      arTestBoxHelper.material.depthTest = false;
+      arTestBoxHelper.material.depthWrite = false;
+      arTestBoxHelper.material.linewidth = 4;
+    }
     arRendererScene.add(arTestBoxHelper);
-  } else if (arTestBoxHelper) {
+  } else {
     arTestBoxHelper.setFromObject(arModelClone);
     if (arTestBoxHelper.material) arTestBoxHelper.material.color.set(0xff00ff);
     arTestBoxHelper.visible = true;
   }
-  // Scale clip planes to the model so large (mm-unit) bridges are not clipped
-  // out of view by a fixed far plane.
-  arRendererCamera.near = Math.max(radius / 1000, 0.01);
-  arRendererCamera.far = radius * 100;
+  // Scale clip planes to the actual IFC bounds so large mm-unit bridges render.
+  arRendererCamera.near = Math.max(radius / 10000, 0.01);
+  arRendererCamera.far = radius * 50;
   arRendererCamera.up.set(0, 0, 1);
-  arRendererCamera.position.set(radius * 1.6, -radius * 1.6, radius * 1.1);
-  arRendererCamera.lookAt(0, 0, 0);
+  arRendererCamera.position.set(center.x + radius * 1.8, center.y - radius * 1.8, center.z + radius * 1.2);
+  arRendererCamera.lookAt(center);
   arRendererCamera.updateProjectionMatrix();
   return true;
 }
@@ -1947,7 +1971,7 @@ function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
   if (frameArModelForTest()) {
     if (arStatusMessage) {
       const r = Math.round(ifcViewer.modelRadius || 0);
-      arStatusMessage.textContent = `AR test framing - model boxed (size ~${r} units).`;
+      arStatusMessage.textContent = `AR test framing - cyan IFC + magenta box (size ~${r} units).`;
     }
     arRenderer.render(arRendererScene, arRendererCamera);
     return;
