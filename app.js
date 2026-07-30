@@ -726,6 +726,7 @@ function closeIfcViewerModal() {
   if (!ifcViewerModal) return;
   ifcViewerModal.hidden = true;
   // Don't destroy the viewer here; keep it in memory for reuse
+  syncArViewButtonState();
 }
 
 function normalizeIfcTags(record) {
@@ -1276,6 +1277,7 @@ function registerEvents() {
         const detail = (ifcViewer && ifcViewer.lastLoadError) ? ifcViewer.lastLoadError : `Error loading ${file.name}`;
         if (ifcFileStatus) ifcFileStatus.textContent = detail;
         setStatus("Failed to load IFC file");
+        syncArViewButtonState();
       }
     } catch (error) {
       console.error("IFC file loading error:", error);
