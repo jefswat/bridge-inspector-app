@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v158";
-const BUILD_STAMP = "2026-07-30 17:16:30";
+const BUILD_VERSION = "v161";
+const BUILD_STAMP = "2026-07-30 17:21:30";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -296,6 +296,7 @@ let arRenderer             = null;
 let arRendererScene        = null;
 let arRendererCamera       = null;
 let arModelClone           = null;
+let arTestBoxHelper        = null;
 let arRenderLoopId         = null;
 let arSelectedLocation      = null; // {lat, lng}
 let arSelectedLocationIsManual = false;
@@ -1689,6 +1690,7 @@ async function openArViewModal() {
     initArLocationPickerMap();
   }
   
+  setStatus("AR test framing starting...");
   // Start camera feed
   await startArCameraFeed();
   
@@ -1778,9 +1780,9 @@ function ensureArRenderer() {
 }
 
 function syncArCanvasSize() {
-  if (!arOverlayCanvas || !arRenderer || !arCameraVideo) return;
-  const width = arCameraVideo.videoWidth || arCameraVideo.clientWidth || 1280;
-  const height = arCameraVideo.videoHeight || arCameraVideo.clientHeight || 720;
+  if (!arOverlayCanvas || !arRenderer) return;
+  const width = (arCameraVideo && (arCameraVideo.videoWidth || arCameraVideo.clientWidth)) || arOverlayCanvas.clientWidth || 1280;
+  const height = (arCameraVideo && (arCameraVideo.videoHeight || arCameraVideo.clientHeight)) || arOverlayCanvas.clientHeight || 720;
   if (arOverlayCanvas.width !== width || arOverlayCanvas.height !== height) {
     arOverlayCanvas.width = width;
     arOverlayCanvas.height = height;
@@ -1808,6 +1810,17 @@ function frameArModelForTest() {
   arModelClone.rotation.set(0, 0, 0);
   arModelClone.scale.set(1, 1, 1);
   arModelClone.visible = true;
+  if (arTestBoxHelper && arTestBoxHelper.parent !== arRendererScene) {
+    arRendererScene.add(arTestBoxHelper);
+  }
+  if (!arTestBoxHelper && typeof THREE !== "undefined") {
+    arTestBoxHelper = new THREE.BoxHelper(arModelClone, 0xff00ff);
+    arRendererScene.add(arTestBoxHelper);
+  } else if (arTestBoxHelper) {
+    arTestBoxHelper.setFromObject(arModelClone);
+    if (arTestBoxHelper.material) arTestBoxHelper.material.color.set(0xff00ff);
+    arTestBoxHelper.visible = true;
+  }
   // Scale clip planes to the model so large (mm-unit) bridges are not clipped
   // out of view by a fixed far plane.
   arRendererCamera.near = Math.max(radius / 1000, 0.01);
@@ -1892,7 +1905,7 @@ function startArRenderLoop() {
 }
 
 function updateArRender() {
-  if (!arCameraVideo || !arRenderer || !arRendererCamera) return;
+  if (!arRenderer || !arRendererCamera) return;
   syncArCanvasSize();
   
   // Get current location (optional — test framing renders even without one)
@@ -1930,8 +1943,15 @@ function updateArRender() {
 function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
   if (!ifcViewer || !arRenderer || !ensureArModelClone()) return;
   // Test-first: always frame the loaded model so it is guaranteed visible,
-  // regardless of georeference. Manual geo placement is only attempted when the
-  // user explicitly picked a location AND the model is georeferenced.
+  // regardless of georeference.
+  if (frameArModelForTest()) {
+    if (arStatusMessage) {
+      const r = Math.round(ifcViewer.modelRadius || 0);
+      arStatusMessage.textContent = `AR test framing - model boxed (size ~${r} units).`;
+    }
+    arRenderer.render(arRendererScene, arRendererCamera);
+    return;
+  }
   if (arSelectedLocationIsManual) {
     const posed = positionArCameraFromGeo(lat, lon, heading, pitch, alt);
     if (posed) {
@@ -1939,14 +1959,6 @@ function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
       arRenderer.render(arRendererScene, arRendererCamera);
       return;
     }
-  }
-  if (frameArModelForTest()) {
-    if (arStatusMessage) {
-      const r = Math.round(ifcViewer.modelRadius || 0);
-      arStatusMessage.textContent = `AR test framing — model centered (size ~${r} units).`;
-    }
-    arRenderer.render(arRendererScene, arRendererCamera);
-    return;
   }
   if (arStatusMessage) arStatusMessage.textContent = "Model not ready for AR yet.";
 }
