@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v157";
-const BUILD_STAMP = "2026-07-30 17:13:30";
+const BUILD_VERSION = "v158";
+const BUILD_STAMP = "2026-07-30 17:16:30";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -1807,8 +1807,13 @@ function frameArModelForTest() {
   arModelClone.position.set(0, 0, 0);
   arModelClone.rotation.set(0, 0, 0);
   arModelClone.scale.set(1, 1, 1);
+  arModelClone.visible = true;
+  // Scale clip planes to the model so large (mm-unit) bridges are not clipped
+  // out of view by a fixed far plane.
+  arRendererCamera.near = Math.max(radius / 1000, 0.01);
+  arRendererCamera.far = radius * 100;
   arRendererCamera.up.set(0, 0, 1);
-  arRendererCamera.position.set(radius * 1.15, -radius * 1.15, radius * 0.85);
+  arRendererCamera.position.set(radius * 1.6, -radius * 1.6, radius * 1.1);
   arRendererCamera.lookAt(0, 0, 0);
   arRendererCamera.updateProjectionMatrix();
   return true;
@@ -1873,8 +1878,8 @@ function onDeviceOrientation(event) {
 }
 
 function startArRenderLoop() {
-  const b = activeBridge();
-  if (!b || !b.ifcFootprint) return;
+  // Note: intentionally do NOT require b.ifcFootprint here — test framing can
+  // render the loaded model even when the bridge has no saved georeference.
   if (!ensureArRenderer()) return;
   syncArCanvasSize();
   
@@ -1890,8 +1895,8 @@ function updateArRender() {
   if (!arCameraVideo || !arRenderer || !arRendererCamera) return;
   syncArCanvasSize();
   
-  // Get current location
-  let lat, lon, alt;
+  // Get current location (optional — test framing renders even without one)
+  let lat = NaN, lon = NaN, alt = null;
   if (arUseCurrentLocation.checked && currentLocation) {
     lat = currentLocation.lat;
     lon = currentLocation.lng;
@@ -1900,19 +1905,17 @@ function updateArRender() {
     lat = arSelectedLocation.lat;
     lon = arSelectedLocation.lng;
     alt = null;
-  } else {
-    if (arStatusMessage) arStatusMessage.textContent = "No location set. Select a location or enable current location.";
-    return;
   }
   
+  const heading = Math.round(arDeviceOrientation.alpha);
+  const pitch = Math.round(arDeviceOrientation.beta);
+  const roll = Math.round(arDeviceOrientation.gamma);
+
   // Update display text
   if (arLocationText) {
-    arLocationText.textContent = `📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+    arLocationText.textContent = isFinite(lat) ? `📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}` : "📍 test framing (no location)";
   }
   if (arAttitudeText) {
-    const heading = Math.round(arDeviceOrientation.alpha);
-    const pitch = Math.round(arDeviceOrientation.beta);
-    const roll = Math.round(arDeviceOrientation.gamma);
     arAttitudeText.textContent = `Heading: ${heading}° | Pitch: ${pitch}° | Roll: ${roll}°`;
   }
   
@@ -1922,26 +1925,30 @@ function updateArRender() {
   } else if (arStatusMessage) {
     arStatusMessage.textContent = "Load the 3D model first, then reopen AR view.";
   }
-  
-  if (arStatusMessage) arStatusMessage.textContent = arSelectedLocation ? "AR view rendering near the bridge (~30Hz)" : "AR view rendering at ~30Hz";
 }
 
 function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
   if (!ifcViewer || !arRenderer || !ensureArModelClone()) return;
-  if (!arSelectedLocationIsManual) {
-    if (frameArModelForTest()) {
-      if (arStatusMessage) arStatusMessage.textContent = "AR test framing active — bridge centered on screen.";
+  // Test-first: always frame the loaded model so it is guaranteed visible,
+  // regardless of georeference. Manual geo placement is only attempted when the
+  // user explicitly picked a location AND the model is georeferenced.
+  if (arSelectedLocationIsManual) {
+    const posed = positionArCameraFromGeo(lat, lon, heading, pitch, alt);
+    if (posed) {
+      if (arStatusMessage) arStatusMessage.textContent = "AR geo overlay active.";
       arRenderer.render(arRendererScene, arRendererCamera);
       return;
     }
   }
-  const posed = positionArCameraFromGeo(lat, lon, heading, pitch, alt);
-  if (!posed && !frameArModelForTest()) {
-    if (arStatusMessage) arStatusMessage.textContent = "This model is not georeferenced for AR overlay yet.";
+  if (frameArModelForTest()) {
+    if (arStatusMessage) {
+      const r = Math.round(ifcViewer.modelRadius || 0);
+      arStatusMessage.textContent = `AR test framing — model centered (size ~${r} units).`;
+    }
+    arRenderer.render(arRendererScene, arRendererCamera);
     return;
   }
-  if (!posed && arStatusMessage) arStatusMessage.textContent = "AR test framing active — bridge centered on screen.";
-  arRenderer.render(arRendererScene, arRendererCamera);
+  if (arStatusMessage) arStatusMessage.textContent = "Model not ready for AR yet.";
 }
 
 function initArLocationPickerMap() {
