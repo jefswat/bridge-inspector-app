@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v156";
-const BUILD_STAMP = "2026-07-30 17:10:30";
+const BUILD_VERSION = "v157";
+const BUILD_STAMP = "2026-07-30 17:13:30";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -1952,7 +1952,17 @@ function initArLocationPickerMap() {
     arLocationPickerMap.remove();
   }
   
-  arLocationPickerMap = L.map(container).setView([41.2326, -95.4036], 17);
+  const bridge = activeBridge();
+  const fp = bridge && bridge.ifcFootprint;
+  const bridgeLoc = activeBridgeLocation();
+  const defaultCenter =
+    (arSelectedLocation && isFinite(arSelectedLocation.lat) && isFinite(arSelectedLocation.lng)) ? [arSelectedLocation.lat, arSelectedLocation.lng] :
+    (fp && fp.center && isFinite(fp.center.lat) && isFinite(fp.center.lon)) ? [fp.center.lat, fp.center.lon] :
+    (bridgeLoc && isFinite(bridgeLoc.lat) && isFinite(bridgeLoc.lng)) ? [bridgeLoc.lat, bridgeLoc.lng] :
+    (currentLocation && isFinite(currentLocation.lat) && isFinite(currentLocation.lng)) ? [currentLocation.lat, currentLocation.lng] :
+    [41.2326, -95.4036];
+
+  arLocationPickerMap = L.map(container).setView(defaultCenter, 17);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "© OpenStreetMap",
     maxZoom: 19,
