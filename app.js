@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v154";
-const BUILD_STAMP = "2026-07-30 16:51:26";
+const BUILD_VERSION = "v155";
+const BUILD_STAMP = "2026-07-30 17:00:31";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -298,6 +298,7 @@ let arRendererCamera       = null;
 let arModelClone           = null;
 let arRenderLoopId         = null;
 let arSelectedLocation      = null; // {lat, lng}
+let arSelectedLocationIsManual = false;
 let arSelectedLocationName  = "";
 let arLocationPickerMap    = null;
 let arPickerSelectedLat    = null;
@@ -1613,6 +1614,7 @@ function registerEvents() {
   if (arLocationPickerApplyBtn) arLocationPickerApplyBtn.addEventListener("click", () => {
     if (arPickerSelectedLat != null && arPickerSelectedLng != null) {
       arSelectedLocation = { lat: arPickerSelectedLat, lng: arPickerSelectedLng };
+      arSelectedLocationIsManual = true;
       arSelectedLocationName = `${arPickerSelectedLat.toFixed(5)}, ${arPickerSelectedLng.toFixed(5)}`;
       arUseCurrentLocation.checked = false;
       closeArLocationPickerModal();
@@ -1661,6 +1663,22 @@ async function openArViewModal() {
   if (!b) { setStatus("Open a bridge first."); return; }
   if (!ifcViewer || !ifcViewer.model) { setStatus("Open the 3D view and load the bridge IFC once, then reopen AR."); return; }
   if (!arViewModal) return;
+  if (!arSelectedLocationIsManual) {
+    const bridgeLoc = activeBridgeLocation();
+    const fp = b.ifcFootprint;
+    if (bridgeLoc && isFinite(bridgeLoc.lat) && isFinite(bridgeLoc.lng)) {
+      arSelectedLocation = { lat: bridgeLoc.lat, lng: bridgeLoc.lng };
+      arSelectedLocationIsManual = false;
+      if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
+    } else if (fp && fp.center && isFinite(fp.center.lat) && isFinite(fp.center.lon)) {
+      arSelectedLocation = { lat: fp.center.lat, lng: fp.center.lon };
+      arSelectedLocationIsManual = false;
+      if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
+    } else if (currentLocation && isFinite(currentLocation.lat) && isFinite(currentLocation.lng)) {
+      arSelectedLocation = { lat: currentLocation.lat, lng: currentLocation.lng };
+      arSelectedLocationIsManual = false;
+    }
+  }
   if (ifcViewerModal && !ifcViewerModal.hidden) closeIfcViewerModal();
   
   arViewModal.hidden = false;
@@ -1681,7 +1699,7 @@ async function openArViewModal() {
       if (permission === "granted") {
         arPermissionGranted = true;
         window.addEventListener("deviceorientation", onDeviceOrientation);
-        setStatus("AR view ready. Select a location or enable current location.");
+        setStatus(arSelectedLocation ? "AR view ready. Using bridge location for testing." : "AR view ready. Select a location or enable current location.");
       } else {
         setStatus("Device orientation permission denied. Using estimated orientation.");
         window.addEventListener("deviceorientation", onDeviceOrientation);
@@ -1892,7 +1910,7 @@ function updateArRender() {
     arStatusMessage.textContent = "Load the 3D model first, then reopen AR view.";
   }
   
-  if (arStatusMessage) arStatusMessage.textContent = "AR view rendering at ~30Hz";
+  if (arStatusMessage) arStatusMessage.textContent = arSelectedLocation ? "AR view rendering near the bridge (~30Hz)" : "AR view rendering at ~30Hz";
 }
 
 function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
