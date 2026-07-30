@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v153";
-const BUILD_STAMP = "2026-07-30 16:19:43";
+const BUILD_VERSION = "v154";
+const BUILD_STAMP = "2026-07-30 16:51:26";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -836,7 +836,7 @@ function syncExportIfcButtonState() {
 
 function syncArViewButtonState() {
   const b = activeBridge();
-  const enabled = !!(b && b.ifcFootprint);
+  const enabled = !!b;
   if (openArViewButton) openArViewButton.disabled = !enabled;
 }
 
@@ -1659,7 +1659,6 @@ function updatePeerTransferUi() {
 async function openArViewModal() {
   const b = activeBridge();
   if (!b) { setStatus("Open a bridge first."); return; }
-  if (!b.ifcFootprint) { setStatus("Load a georeferenced IFC model first."); return; }
   if (!ifcViewer || !ifcViewer.model) { setStatus("Open the 3D view and load the bridge IFC once, then reopen AR."); return; }
   if (!arViewModal) return;
   if (ifcViewerModal && !ifcViewerModal.hidden) closeIfcViewerModal();
