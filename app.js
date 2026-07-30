@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v163";
-const BUILD_STAMP = "2026-07-30 18:51:30";
+const BUILD_VERSION = "v164";
+const BUILD_STAMP = "2026-07-30 18:55:30";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -275,6 +275,7 @@ const arCameraVideo        = document.getElementById("arCameraVideo");
 const arOverlayCanvas      = document.getElementById("arOverlayCanvas");
 const arLocationText       = document.querySelector("#arLocationText");
 const arAttitudeText       = document.querySelector("#arAttitudeText");
+const arFpsText            = document.querySelector("#arFpsText");
 const arOpacitySlider      = document.getElementById("arOpacitySlider");
 const arOpacityValue       = document.getElementById("arOpacityValue");
 const arPanLeftBtn         = document.getElementById("arPanLeftBtn");
@@ -299,6 +300,9 @@ let arModelClone           = null;
 let arTestBoxHelper        = null;
 let arTestMaterial         = null;
 let arRenderLoopId         = null;
+let arRenderFrames         = 0;
+let arRenderSampleStartMs  = 0;
+let arRenderFps            = 0;
 let arSelectedLocation      = null; // {lat, lng}
 let arSelectedLocationIsManual = false;
 let arSelectedLocationName  = "";
@@ -1660,6 +1664,10 @@ function updatePeerTransferUi() {
 }
 
 // ── AR Overlay View Functions ──
+function offsetLocationNorth(lat, lng, meters) {
+  return { lat: lat + (meters / 111320), lng };
+}
+
 async function openArViewModal() {
   const b = activeBridge();
   if (!b) { setStatus("Open a bridge first."); return; }
@@ -1668,7 +1676,11 @@ async function openArViewModal() {
   if (!arSelectedLocationIsManual) {
     const bridgeLoc = activeBridgeLocation();
     const fp = b.ifcFootprint;
-    if (bridgeLoc && isFinite(bridgeLoc.lat) && isFinite(bridgeLoc.lng)) {
+    if (currentLocation && isFinite(currentLocation.lat) && isFinite(currentLocation.lng)) {
+      arSelectedLocation = offsetLocationNorth(currentLocation.lat, currentLocation.lng, 4.572);
+      arSelectedLocationIsManual = false;
+      if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
+    } else if (bridgeLoc && isFinite(bridgeLoc.lat) && isFinite(bridgeLoc.lng)) {
       arSelectedLocation = { lat: bridgeLoc.lat, lng: bridgeLoc.lng };
       arSelectedLocationIsManual = false;
       if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
@@ -1676,15 +1688,15 @@ async function openArViewModal() {
       arSelectedLocation = { lat: fp.center.lat, lng: fp.center.lon };
       arSelectedLocationIsManual = false;
       if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
-    } else if (currentLocation && isFinite(currentLocation.lat) && isFinite(currentLocation.lng)) {
-      arSelectedLocation = { lat: currentLocation.lat, lng: currentLocation.lng };
-      arSelectedLocationIsManual = false;
     }
   }
   if (ifcViewerModal && !ifcViewerModal.hidden) closeIfcViewerModal();
   
   arViewModal.hidden = false;
   arActive = true;
+  arRenderFrames = 0;
+  arRenderSampleStartMs = performance.now();
+  arRenderFps = 0;
   stopArCameraFeed();
   if (arCameraVideo) arCameraVideo.style.display = "none";
   if (arOverlayCanvas) {
@@ -1944,6 +1956,18 @@ function startArRenderLoop() {
 function updateArRender() {
   if (!arRenderer || !arRendererCamera) return;
   syncArCanvasSize();
+  arRenderFrames += 1;
+  const now = performance.now();
+  if (!arRenderSampleStartMs) arRenderSampleStartMs = now;
+  const elapsed = now - arRenderSampleStartMs;
+  if (elapsed >= 1000) {
+    arRenderFps = arRenderFrames * 1000 / elapsed;
+    arRenderFrames = 0;
+    arRenderSampleStartMs = now;
+  }
+  if (arFpsText) {
+    arFpsText.textContent = arRenderFps > 0 ? `Render FPS: ${arRenderFps.toFixed(1)}` : "Render FPS: measuring...";
+  }
   
   // Get current location (optional — test framing renders even without one)
   let lat = NaN, lon = NaN, alt = null;
