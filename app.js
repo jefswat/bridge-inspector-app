@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v151";
-const BUILD_STAMP = "2026-07-27 10:15:00";
+const BUILD_VERSION = "v152";
+const BUILD_STAMP = "2026-07-30 15:35:44";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -628,6 +628,7 @@ function openIfcViewerModal() {
   // Initialize the viewer, then auto-load this bridge's saved IFC (if any) so
   // the user doesn't have to re-pick the model for every photo / session.
   ensureIfcViewer().then((ok) => { if (ok) void autoLoadBridgeIfc(); });
+  syncArViewButtonState();
 }
 
 // Shared post-load UI: hide the placeholder, reveal the view/elev/move
@@ -830,7 +831,7 @@ function syncArViewButtonState() {
   const b = activeBridge();
   const enabled = !!(b && b.ifcFootprint);
   if (openArViewButton) openArViewButton.disabled = !enabled;
-  if (openArViewFromViewerButton) openArViewFromViewerButton.disabled = !enabled;
+  if (openArViewFromViewerButton) openArViewFromViewerButton.disabled = !(ifcViewerModal && !ifcViewerModal.hidden);
 }
 
 function latestElementCondition(bridge, expressId) {

@@ -1,4 +1,4 @@
-const CACHE_NAME = "photo-vault-v151";
+const CACHE_NAME = "photo-vault-v152";
 const ASSETS = [
   "./",
   "./index.html",
