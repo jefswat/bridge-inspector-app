@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v155";
-const BUILD_STAMP = "2026-07-30 17:00:31";
+const BUILD_VERSION = "v156";
+const BUILD_STAMP = "2026-07-30 17:10:30";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -1801,6 +1801,19 @@ function ensureArModelClone() {
   return true;
 }
 
+function frameArModelForTest() {
+  if (!ifcViewer || !arRendererCamera || !ensureArModelClone()) return false;
+  const radius = ifcViewer.modelRadius || 50;
+  arModelClone.position.set(0, 0, 0);
+  arModelClone.rotation.set(0, 0, 0);
+  arModelClone.scale.set(1, 1, 1);
+  arRendererCamera.up.set(0, 0, 1);
+  arRendererCamera.position.set(radius * 1.15, -radius * 1.15, radius * 0.85);
+  arRendererCamera.lookAt(0, 0, 0);
+  arRendererCamera.updateProjectionMatrix();
+  return true;
+}
+
 function positionArCameraFromGeo(lat, lon, heading, attitude, altitude) {
   const g = ifcViewer?.georef;
   if (!g || !ifcViewer?.modelToScene || !window.proj4 || !g.epsg || !arRendererCamera) return false;
@@ -1915,11 +1928,19 @@ function updateArRender() {
 
 function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
   if (!ifcViewer || !arRenderer || !ensureArModelClone()) return;
+  if (!arSelectedLocationIsManual) {
+    if (frameArModelForTest()) {
+      if (arStatusMessage) arStatusMessage.textContent = "AR test framing active — bridge centered on screen.";
+      arRenderer.render(arRendererScene, arRendererCamera);
+      return;
+    }
+  }
   const posed = positionArCameraFromGeo(lat, lon, heading, pitch, alt);
-  if (!posed) {
+  if (!posed && !frameArModelForTest()) {
     if (arStatusMessage) arStatusMessage.textContent = "This model is not georeferenced for AR overlay yet.";
     return;
   }
+  if (!posed && arStatusMessage) arStatusMessage.textContent = "AR test framing active — bridge centered on screen.";
   arRenderer.render(arRendererScene, arRendererCamera);
 }
 
