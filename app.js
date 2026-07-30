@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v150";
-const BUILD_STAMP = "2026-07-27 09:28:00";
+const BUILD_VERSION = "v151";
+const BUILD_STAMP = "2026-07-27 10:15:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -265,6 +265,50 @@ let aprilPreviewLoopId     = null;
 let aprilPreviewBusy       = false;
 const APRIL_PREVIEW_MAX_DIM = 420;
 const APRIL_PREVIEW_INTERVAL_MS = 1200;
+
+// ── AR Overlay View ──────────────────────────────────────────────────────────
+const arViewModal          = document.getElementById("arViewModal");
+const arViewContainer      = document.querySelector(".ar-view-container");
+const closeArViewButton    = document.getElementById("closeArViewButton");
+const openArViewButton     = document.getElementById("openArViewButton");
+const arCameraVideo        = document.getElementById("arCameraVideo");
+const arOverlayCanvas      = document.getElementById("arOverlayCanvas");
+const arLocationText       = document.querySelector("#arLocationText");
+const arAttitudeText       = document.querySelector("#arAttitudeText");
+const arOpacitySlider      = document.getElementById("arOpacitySlider");
+const arOpacityValue       = document.getElementById("arOpacityValue");
+const arPanLeftBtn         = document.getElementById("arPanLeftBtn");
+const arPanRightBtn        = document.getElementById("arPanRightBtn");
+const arPanUpBtn           = document.getElementById("arPanUpBtn");
+const arPanDownBtn         = document.getElementById("arPanDownBtn");
+const arStatusMessage      = document.getElementById("arStatusMessage");
+const arUseCurrentLocation = document.getElementById("arUseCurrentLocation");
+const arSelectLocationButton = document.getElementById("arSelectLocationButton");
+const arLocationPickerModal = document.getElementById("arLocationPickerModal");
+const closeArLocationPickerButton = document.getElementById("closeArLocationPickerButton");
+const arLocationPickerApplyBtn = document.getElementById("arLocationPickerApplyBtn");
+const arLocationPickerStatus = document.getElementById("arLocationPickerStatus");
+
+// AR state
+let arActive               = false;
+let arStream               = null;
+let arCanvasCtx            = null;
+let arRendererCanvas       = null;
+let arRendererScene        = null;
+let arRendererCamera       = null;
+let arRenderLoopId         = null;
+let arSelectedLocation      = null; // {lat, lng}
+let arSelectedLocationName  = "";
+let arLocationPickerMap    = null;
+let arPickerSelectedLat    = null;
+let arPickerSelectedLng    = null;
+let arPanX                 = 0;  // manual pan in scene space (metres)
+let arPanY                 = 0;  // manual pan in scene space (metres)
+let arPivotOffsetM         = 0.6; // 0.6 metres behind the camera position
+let arDeviceOrientation    = { alpha: 0, beta: 0, gamma: 0 }; // from DeviceOrientationEvent
+let arPermissionGranted    = false;
+const AR_RENDER_HZ         = 30;
+const AR_RENDER_INTERVAL_MS = 1000 / AR_RENDER_HZ;
 
 // ── Guided scan (photogrammetry burst) state ──────────────────────────────────
 let scanActive     = false;
@@ -598,6 +642,7 @@ function onIfcModelLoaded(fileName) {
   if (ifcMoveControls) ifcMoveControls.hidden = false;
   void refreshIfcTaggedSymbols();
   refreshIfcConditionColoring();
+  syncArViewButtonState();
 }
 
 function clearIfcLoadedModel(message) {
@@ -777,6 +822,13 @@ function syncExportIfcButtonState() {
   const hasProject = getBridgeProjectPropertySets(b).length > 0;
   const hasElement = getBridgeElementPropertySets(b).length > 0;
   exportIfcButton.disabled = !(hasProject || hasElement);
+}
+
+function syncArViewButtonState() {
+  if (!openArViewButton) return;
+  const b = activeBridge();
+  if (!b || !b.ifcFootprint) { openArViewButton.disabled = true; return; }
+  openArViewButton.disabled = false;
 }
 
 function latestElementCondition(bridge, expressId) {
@@ -1257,6 +1309,7 @@ function registerEvents() {
     };
     try {
       await putBridgeRec(b);
+      syncArViewButtonState();
       setStatus(`Bridge footprint georeferenced at ${g.center.lat.toFixed(5)}, ${g.center.lon.toFixed(5)} — open the map to see it.`);
     } catch (err) {
       console.warn("Failed to save IFC footprint:", err);
@@ -1538,7 +1591,43 @@ function registerEvents() {
     peerState.autoSend = !!peerAutoSendCheck.checked;
     localStorage.setItem("peer-auto-send-captures", peerState.autoSend ? "1" : "0");
   });
+
+  // ── AR Overlay View events ──
+  if (openArViewButton) openArViewButton.addEventListener("click", () => { void openArViewModal(); });
+  if (closeArViewButton) closeArViewButton.addEventListener("click", () => closeArViewModal());
+  if (arViewModal) arViewModal.addEventListener("click", (e) => {
+    if (e.target === arViewModal) closeArViewModal();
+  });
+  if (arSelectLocationButton) arSelectLocationButton.addEventListener("click", () => openArLocationPickerModal());
+  if (closeArLocationPickerButton) closeArLocationPickerButton.addEventListener("click", () => closeArLocationPickerModal());
+  if (arLocationPickerApplyBtn) arLocationPickerApplyBtn.addEventListener("click", () => {
+    if (arPickerSelectedLat != null && arPickerSelectedLng != null) {
+      arSelectedLocation = { lat: arPickerSelectedLat, lng: arPickerSelectedLng };
+      arSelectedLocationName = `${arPickerSelectedLat.toFixed(5)}, ${arPickerSelectedLng.toFixed(5)}`;
+      arUseCurrentLocation.checked = false;
+      closeArLocationPickerModal();
+      setStatus(`AR location set to ${arSelectedLocationName}`);
+    }
+  });
+  if (arUseCurrentLocation) arUseCurrentLocation.addEventListener("change", () => {
+    if (arUseCurrentLocation.checked) {
+      setStatus("AR view will use current device location when available.");
+    } else {
+      if (!arSelectedLocation) setStatus("Please select a location for AR view.");
+    }
+  });
+  if (arOpacitySlider) arOpacitySlider.addEventListener("input", () => {
+    const opacity = parseFloat(arOpacitySlider.value) / 100;
+    if (arOverlayCanvas) arOverlayCanvas.style.opacity = opacity;
+    if (arOpacityValue) arOpacityValue.textContent = opacity.toFixed(2);
+  });
+  const arPanStep = 2; // metres per pan button press
+  if (arPanLeftBtn) arPanLeftBtn.addEventListener("click", () => { arPanX -= arPanStep; });
+  if (arPanRightBtn) arPanRightBtn.addEventListener("click", () => { arPanX += arPanStep; });
+  if (arPanUpBtn) arPanUpBtn.addEventListener("click", () => { arPanY += arPanStep; });
+  if (arPanDownBtn) arPanDownBtn.addEventListener("click", () => { arPanY -= arPanStep; });
 }
+
 
 function updatePeerTransferUi() {
   peerState.autoSend = localStorage.getItem("peer-auto-send-captures") !== "0";
@@ -1556,7 +1645,242 @@ function updatePeerTransferUi() {
   setPeerConnState("Transfer link: idle");
 }
 
+// ── AR Overlay View Functions ──
+async function openArViewModal() {
+  const b = activeBridge();
+  if (!b) { setStatus("Open a bridge first."); return; }
+  if (!b.ifcFootprint) { setStatus("Load an IFC model first."); return; }
+  if (!arViewModal) return;
+  
+  arViewModal.hidden = false;
+  arActive = true;
+  
+  // Initialize the location picker map if needed
+  if (!arLocationPickerMap && document.getElementById("arLocationPickerMap")) {
+    initArLocationPickerMap();
+  }
+  
+  // Start camera feed
+  await startArCameraFeed();
+  
+  // Start device orientation listener
+  if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+    try {
+      const permission = await DeviceOrientationEvent.requestPermission();
+      if (permission === "granted") {
+        arPermissionGranted = true;
+        window.addEventListener("deviceorientation", onDeviceOrientation);
+        setStatus("AR view ready. Select a location or enable current location.");
+      } else {
+        setStatus("Device orientation permission denied. Using estimated orientation.");
+        window.addEventListener("deviceorientation", onDeviceOrientation);
+      }
+    } catch (error) {
+      console.log("DeviceOrientation request:", error);
+      window.addEventListener("deviceorientation", onDeviceOrientation);
+    }
+  } else if (typeof DeviceOrientationEvent !== "undefined") {
+    // Non-iOS: just attach the listener
+    window.addEventListener("deviceorientation", onDeviceOrientation);
+    setStatus("AR view ready. Select a location or enable current location.");
+  } else {
+    setStatus("Device orientation not available on this device.");
+  }
+  
+  // Start render loop
+  startArRenderLoop();
+}
+
+function closeArViewModal() {
+  if (!arViewModal) return;
+  arViewModal.hidden = true;
+  arActive = false;
+  stopArCameraFeed();
+  window.removeEventListener("deviceorientation", onDeviceOrientation);
+  if (arRenderLoopId) cancelAnimationFrame(arRenderLoopId);
+}
+
+async function startArCameraFeed() {
+  try {
+    if (arStream) stopArCameraFeed();
+    arStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }
+    });
+    if (arCameraVideo) {
+      arCameraVideo.srcObject = arStream;
+      arCameraVideo.onloadedmetadata = () => {
+        arCameraVideo.play().catch((e) => console.log("AR video play:", e));
+      };
+    }
+  } catch (error) {
+    console.error("AR camera start failed:", error);
+    setStatus("Camera access failed: " + error.message);
+  }
+}
+
+function stopArCameraFeed() {
+  if (arStream) {
+    arStream.getTracks().forEach((track) => track.stop());
+    arStream = null;
+  }
+  if (arCameraVideo) arCameraVideo.srcObject = null;
+}
+
+function onDeviceOrientation(event) {
+  arDeviceOrientation = {
+    alpha: event.alpha || 0,  // Z rotation (yaw), 0-360
+    beta: event.beta || 0,    // X rotation (pitch), -180 to 180
+    gamma: event.gamma || 0   // Y rotation (roll), -90 to 90
+  };
+}
+
+function startArRenderLoop() {
+  const b = activeBridge();
+  if (!b || !b.ifcFootprint) return;
+  
+  if (!arCanvasCtx) {
+    if (arOverlayCanvas) {
+      arCanvasCtx = arOverlayCanvas.getContext("2d");
+      // Size canvas to match video
+      const rect = arCameraVideo.getBoundingClientRect();
+      arOverlayCanvas.width = arCameraVideo.videoWidth || 1920;
+      arOverlayCanvas.height = arCameraVideo.videoHeight || 1080;
+    }
+  }
+  
+  const renderFrame = () => {
+    if (!arActive) return;
+    updateArRender();
+    arRenderLoopId = setTimeout(() => renderFrame(), AR_RENDER_INTERVAL_MS);
+  };
+  renderFrame();
+}
+
+function updateArRender() {
+  if (!arCanvasCtx || !arCameraVideo) return;
+  
+  // Get current location
+  let lat, lon, alt;
+  if (arUseCurrentLocation.checked && currentLocation) {
+    lat = currentLocation.lat;
+    lon = currentLocation.lng;
+    alt = currentLocation.alt;
+  } else if (arSelectedLocation) {
+    lat = arSelectedLocation.lat;
+    lon = arSelectedLocation.lng;
+    alt = null;
+  } else {
+    if (arStatusMessage) arStatusMessage.textContent = "No location set. Select a location or enable current location.";
+    return;
+  }
+  
+  // Update display text
+  if (arLocationText) {
+    arLocationText.textContent = `📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+  }
+  if (arAttitudeText) {
+    const heading = Math.round(arDeviceOrientation.alpha);
+    const pitch = Math.round(arDeviceOrientation.beta);
+    const roll = Math.round(arDeviceOrientation.gamma);
+    arAttitudeText.textContent = `Heading: ${heading}° | Pitch: ${pitch}° | Roll: ${roll}°`;
+  }
+  
+  // Render IFC to canvas
+  if (ifcViewer && ifcViewer.model) {
+    renderIfcToArCanvas(lat, lon, heading, pitch, alt);
+  }
+  
+  if (arStatusMessage) arStatusMessage.textContent = "AR view rendering at ~30Hz";
+}
+
+function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
+  if (!arCanvasCtx || !ifcViewer) return;
+  
+  // Clear canvas
+  arCanvasCtx.clearRect(0, 0, arOverlayCanvas.width, arOverlayCanvas.height);
+  
+  // Create or update Three.js scene for AR
+  if (!arRendererScene) {
+    arRendererScene = new THREE.Scene();
+    arRendererScene.background = null;
+    arRendererCamera = new THREE.PerspectiveCamera(60, arOverlayCanvas.width / arOverlayCanvas.height, 0.1, 10000);
+    arRendererCamera.up.set(0, 0, 1);
+  }
+  
+  // Clone the IFC model and position it based on georeference
+  // Position the camera with 0.6m pivot offset
+  const heading_rad = (heading || 0) * Math.PI / 180;
+  const pitch_rad = (pitch || 0) * Math.PI / 180;
+  
+  // For now, render the IFC model centered with dynamic attitude
+  if (ifcViewer.model) {
+    arRendererScene.children = []; // clear previous
+    const modelClone = ifcViewer.model.clone();
+    modelClone.rotation.order = 'ZXY';
+    modelClone.rotation.z = heading_rad;
+    modelClone.rotation.x = pitch_rad;
+    arRendererScene.add(modelClone);
+  }
+  
+  // Add basic lighting
+  if (arRendererScene.children.filter((c) => c.isLight).length === 0) {
+    const light = new THREE.AmbientLight(0xffffff, 0.8);
+    arRendererScene.add(light);
+  }
+  
+  // Position camera 0.6m back, looking at origin
+  const dist = 50;
+  arRendererCamera.position.set(0, -arPivotOffsetM, 0);
+  arRendererCamera.lookAt(0, 0, 0);
+  arRendererCamera.updateProjectionMatrix();
+  
+  // Render to offscreen canvas and composite to arCanvasCtx
+  // For simplicity, just clear and draw status
+  arCanvasCtx.fillStyle = "rgba(0,0,0,0.2)";
+  arCanvasCtx.fillRect(0, 0, arOverlayCanvas.width, arOverlayCanvas.height);
+  arCanvasCtx.fillStyle = "#38bdf8";
+  arCanvasCtx.font = "16px sans-serif";
+  arCanvasCtx.fillText("IFC model overlay (development)", 10, 30);
+}
+
+function initArLocationPickerMap() {
+  const container = document.getElementById("arLocationPickerMap");
+  if (!container) return;
+  
+  if (arLocationPickerMap) {
+    arLocationPickerMap.remove();
+  }
+  
+  arLocationPickerMap = L.map(container).setView([41.2326, -95.4036], 17);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "© OpenStreetMap",
+    maxZoom: 19,
+  }).addTo(arLocationPickerMap);
+  
+  arLocationPickerMap.on("click", (e) => {
+    arPickerSelectedLat = e.latlng.lat;
+    arPickerSelectedLng = e.latlng.lng;
+    if (arLocationPickerApplyBtn) arLocationPickerApplyBtn.disabled = false;
+    if (arLocationPickerStatus) {
+      arLocationPickerStatus.textContent = `Selected: ${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`;
+    }
+  });
+}
+
+function openArLocationPickerModal() {
+  if (!arLocationPickerModal) return;
+  arLocationPickerModal.hidden = false;
+  if (!arLocationPickerMap) initArLocationPickerMap();
+  setTimeout(() => arLocationPickerMap?.invalidateSize(), 100);
+}
+
+function closeArLocationPickerModal() {
+  if (!arLocationPickerModal) return;
+  arLocationPickerModal.hidden = true;
+}
+
 function openPeerTransferView() {
+
   if (!peerTransferCard) return;
   peerTransferCard.hidden = false;
 }

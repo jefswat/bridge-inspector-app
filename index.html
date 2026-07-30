@@ -23,14 +23,14 @@
   <!-- proj4 (map projection / georeferencing) -->
   <script src="vendor/proj4.js"></script>
   <!-- web-ifc (IFC parsing) loaded dynamically as ES module in ifc-viewer.js -->
-  <link rel="stylesheet" href="styles.css?v=20260727-092800" />
+  <link rel="stylesheet" href="styles.css?v=20260727-101500" />
 </head>
 <body>
 
 <header>
   <h1>📷 Photo Vault <span id="buildStamp" style="font-size:.55rem;font-weight:400;opacity:.7;vertical-align:middle;">build …</span></h1>
   <div style="display:flex;gap:8px;align-items:center;">
-    <a class="map-nav-link" href="map.html?v=20260727-092800">🗺 Map summary</a>
+    <a class="map-nav-link" href="map.html?v=20260727-101500">🗺 Map summary</a>
     <button id="openSettingsButton" class="secondary" hidden>⚙ Settings</button>
     <button id="openPeerTransferViewTop" class="secondary">🔁 Transfer</button>
     <button id="installButton" class="secondary" hidden>⬇ Install App</button>
@@ -68,6 +68,7 @@
       <button id="editBridgeButton" class="secondary">✎ Edit</button>
       <button id="downloadBridgeZip" class="secondary">⬇ Download ZIP</button>
       <button id="view3dButton" class="secondary">🎯 View 3D</button>
+      <button id="openArViewButton" class="secondary" disabled>🔍 AR Overlay</button>
       <button id="openPeerTransferView" class="secondary">🔁 Transfer view</button>
     </div>
   </div>
@@ -429,6 +430,63 @@
   </div>
 </div>
 
+<!-- ── AR Overlay View ── -->
+<div id="arViewModal" class="ar-view-modal" hidden>
+  <div class="ar-view-container">
+    <div class="ar-view-header">
+      <span class="scan-title">🔍 AR Overlay View</span>
+      <div class="ar-view-controls-top">
+        <label class="ar-use-location-label">
+          <input id="arUseCurrentLocation" type="checkbox" />
+          <span>Use current location</span>
+        </label>
+        <button id="arSelectLocationButton" class="secondary">📍 Select location</button>
+        <button id="closeArViewButton" type="button" class="secondary">✕ Close</button>
+      </div>
+    </div>
+    
+    <div class="ar-view-body">
+      <video id="arCameraVideo" playsinline autoplay muted></video>
+      <canvas id="arOverlayCanvas" style="position:absolute;top:0;left:0;width:100%;height:100%;"></canvas>
+      
+      <div class="ar-location-display">
+        <div id="arLocationText" style="font-size:.85rem;color:#e2e8f0;"></div>
+        <div id="arAttitudeText" style="font-size:.75rem;color:#94a3b8;margin-top:3px;"></div>
+      </div>
+      
+      <div class="ar-opacity-controls">
+        <label for="arOpacitySlider" style="font-size:.8rem;color:#94a3b8;margin-right:6px;">Model opacity</label>
+        <input id="arOpacitySlider" type="range" min="0" max="100" value="60" style="width:120px;" />
+        <span id="arOpacityValue" style="font-size:.75rem;color:#cbd5e1;margin-left:6px;width:2.4em;">0.60</span>
+      </div>
+      
+      <div class="ar-pan-controls">
+        <button id="arPanLeftBtn" type="button" class="ar-control-btn" title="Pan left">◀</button>
+        <button id="arPanRightBtn" type="button" class="ar-control-btn" title="Pan right">▶</button>
+        <button id="arPanUpBtn" type="button" class="ar-control-btn" title="Move up">▲</button>
+        <button id="arPanDownBtn" type="button" class="ar-control-btn" title="Move down">▼</button>
+      </div>
+      
+      <div id="arStatusMessage" class="status-bar" style="position:absolute;bottom:8px;left:8px;right:8px;">Initializing AR view…</div>
+    </div>
+  </div>
+</div>
+
+<!-- Location picker modal for AR -->
+<div id="arLocationPickerModal" class="settings-modal" hidden>
+  <div class="settings-dialog">
+    <div class="peer-transfer-modal-head">
+      <span class="scan-title">📍 Select AR view location</span>
+      <button id="closeArLocationPickerButton" type="button" class="secondary">✕ Close</button>
+    </div>
+    <div id="arLocationPickerMap" style="width:100%;height:400px;border:1px solid #334155;border-radius:8px;margin:12px 0;"></div>
+    <div style="display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:12px;">
+      <span id="arLocationPickerStatus" style="font-size:.8rem;color:#94a3b8;flex:1;">Click on map to select location</span>
+      <button id="arLocationPickerApplyBtn" class="secondary" disabled>📍 Use this location</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Photo card template ── -->
 <template id="photoCardTemplate">
   <article class="photo-card">
@@ -467,8 +525,8 @@
 <script src="vendor/cv.js?v=20260716-211500"></script>
 <script src="vendor/aruco.js?v=20260716-211500"></script>
 <script src="vendor/apriltag_36h11.js?v=20260716-211500"></script>
-<script src="ifc-viewer.js?v=20260727-092800"></script>
-<script src="ifc-export.js?v=20260727-092800"></script>
-<script src="app.js?v=20260727-092800"></script>
+<script src="ifc-viewer.js?v=20260727-101500"></script>
+<script src="ifc-export.js?v=20260727-101500"></script>
+<script src="app.js?v=20260727-101500"></script>
 </body>
 </html>
