@@ -1655,8 +1655,10 @@ select {
 }
 
 #arOverlayCanvas {
-  opacity: 0.6;
+  opacity: 1;
   mix-blend-mode: normal;
+  z-index: 2;
+  background: #020617;
 }
 
 .ar-location-display {

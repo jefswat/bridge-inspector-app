@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v162";
-const BUILD_STAMP = "2026-07-30 17:21:30";
+const BUILD_VERSION = "v163";
+const BUILD_STAMP = "2026-07-30 18:51:30";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -1685,7 +1685,17 @@ async function openArViewModal() {
   
   arViewModal.hidden = false;
   arActive = true;
-  if (arOverlayCanvas) arOverlayCanvas.style.opacity = "1";
+  stopArCameraFeed();
+  if (arCameraVideo) arCameraVideo.style.display = "none";
+  if (arOverlayCanvas) {
+    arOverlayCanvas.style.opacity = "1";
+    arOverlayCanvas.style.zIndex = "2";
+    arOverlayCanvas.style.background = "#020617";
+  }
+  if (arStatusMessage) {
+    arStatusMessage.style.zIndex = "5";
+    arStatusMessage.textContent = "AR 3D-only test mode - camera off";
+  }
   if (arOpacitySlider) arOpacitySlider.value = "100";
   if (arOpacityValue) arOpacityValue.textContent = "1.00";
   
@@ -1694,9 +1704,8 @@ async function openArViewModal() {
     initArLocationPickerMap();
   }
   
-  setStatus("AR test framing starting...");
-  // Start camera feed
-  await startArCameraFeed();
+  setStatus("AR 3D-only test mode starting...");
+  // Camera intentionally disabled for IFC visibility testing.
   
   // Start device orientation listener
   if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
@@ -1758,18 +1767,22 @@ function stopArCameraFeed() {
     arStream.getTracks().forEach((track) => track.stop());
     arStream = null;
   }
-  if (arCameraVideo) arCameraVideo.srcObject = null;
+  if (arCameraVideo) {
+    arCameraVideo.srcObject = null;
+    arCameraVideo.style.display = "";
+  }
 }
 
 function ensureArRenderer() {
   if (!arOverlayCanvas || typeof THREE === "undefined") return false;
   if (!arRenderer) {
-    arRenderer = new THREE.WebGLRenderer({ canvas: arOverlayCanvas, alpha: true, antialias: true, preserveDrawingBuffer: false });
+    arRenderer = new THREE.WebGLRenderer({ canvas: arOverlayCanvas, alpha: false, antialias: true, preserveDrawingBuffer: false });
     arRenderer.setPixelRatio(window.devicePixelRatio || 1);
+    arRenderer.setClearColor(0x020617, 1);
   }
   if (!arRendererScene) {
     arRendererScene = new THREE.Scene();
-    arRendererScene.background = null;
+    arRendererScene.background = new THREE.Color(0x020617);
     const ambient = new THREE.AmbientLight(0xffffff, 0.85);
     const dir = new THREE.DirectionalLight(0xffffff, 0.7);
     dir.position.set(50, -50, 80);
@@ -1971,7 +1984,7 @@ function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
   if (frameArModelForTest()) {
     if (arStatusMessage) {
       const r = Math.round(ifcViewer.modelRadius || 0);
-      arStatusMessage.textContent = `AR test framing - cyan IFC + magenta box (size ~${r} units).`;
+      arStatusMessage.textContent = `AR 3D-only test - cyan IFC + magenta box (size ~${r} units).`;
     }
     arRenderer.render(arRendererScene, arRendererCamera);
     return;
