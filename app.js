@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v152";
-const BUILD_STAMP = "2026-07-30 15:35:44";
+const BUILD_VERSION = "v153";
+const BUILD_STAMP = "2026-07-30 16:19:43";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -271,7 +271,6 @@ const arViewModal          = document.getElementById("arViewModal");
 const arViewContainer      = document.querySelector(".ar-view-container");
 const closeArViewButton    = document.getElementById("closeArViewButton");
 const openArViewButton     = document.getElementById("openArViewButton");
-const openArViewFromViewerButton = document.getElementById("openArViewFromViewerButton");
 const arCameraVideo        = document.getElementById("arCameraVideo");
 const arOverlayCanvas      = document.getElementById("arOverlayCanvas");
 const arLocationText       = document.querySelector("#arLocationText");
@@ -293,10 +292,10 @@ const arLocationPickerStatus = document.getElementById("arLocationPickerStatus")
 // AR state
 let arActive               = false;
 let arStream               = null;
-let arCanvasCtx            = null;
-let arRendererCanvas       = null;
+let arRenderer             = null;
 let arRendererScene        = null;
 let arRendererCamera       = null;
+let arModelClone           = null;
 let arRenderLoopId         = null;
 let arSelectedLocation      = null; // {lat, lng}
 let arSelectedLocationName  = "";
@@ -636,6 +635,10 @@ function openIfcViewerModal() {
 // auto-loads.
 function onIfcModelLoaded(fileName) {
   ifcLoadedBridgeId = activeBridgeId || null;
+  if (arModelClone && arRendererScene) {
+    arRendererScene.remove(arModelClone);
+    arModelClone = null;
+  }
   if (ifcViewerPlaceholder) ifcViewerPlaceholder.hidden = true;
   if (ifcFileStatus) ifcFileStatus.textContent = `Loaded: ${fileName}`;
   setStatus(`3D model loaded: ${fileName}`);
@@ -649,6 +652,10 @@ function onIfcModelLoaded(fileName) {
 
 function clearIfcLoadedModel(message) {
   if (!ifcViewer) return;
+  if (arModelClone && arRendererScene) {
+    arRendererScene.remove(arModelClone);
+    arModelClone = null;
+  }
   if (typeof ifcViewer.clearSelection === "function") ifcViewer.clearSelection();
   if (typeof ifcViewer.setTaggedElementIds === "function") ifcViewer.setTaggedElementIds([]);
   if (ifcViewer.model && ifcViewer.scene) ifcViewer.scene.remove(ifcViewer.model);
@@ -831,7 +838,6 @@ function syncArViewButtonState() {
   const b = activeBridge();
   const enabled = !!(b && b.ifcFootprint);
   if (openArViewButton) openArViewButton.disabled = !enabled;
-  if (openArViewFromViewerButton) openArViewFromViewerButton.disabled = !(ifcViewerModal && !ifcViewerModal.hidden);
 }
 
 function latestElementCondition(bridge, expressId) {
@@ -1598,7 +1604,6 @@ function registerEvents() {
 
   // ── AR Overlay View events ──
   if (openArViewButton) openArViewButton.addEventListener("click", () => { void openArViewModal(); });
-  if (openArViewFromViewerButton) openArViewFromViewerButton.addEventListener("click", () => { void openArViewModal(); });
   if (closeArViewButton) closeArViewButton.addEventListener("click", () => closeArViewModal());
   if (arViewModal) arViewModal.addEventListener("click", (e) => {
     if (e.target === arViewModal) closeArViewModal();
@@ -1654,7 +1659,8 @@ function updatePeerTransferUi() {
 async function openArViewModal() {
   const b = activeBridge();
   if (!b) { setStatus("Open a bridge first."); return; }
-  if (!b.ifcFootprint) { setStatus("Load an IFC model first."); return; }
+  if (!b.ifcFootprint) { setStatus("Load a georeferenced IFC model first."); return; }
+  if (!ifcViewer || !ifcViewer.model) { setStatus("Open the 3D view and load the bridge IFC once, then reopen AR."); return; }
   if (!arViewModal) return;
   if (ifcViewerModal && !ifcViewerModal.hidden) closeIfcViewerModal();
   
@@ -1703,7 +1709,7 @@ function closeArViewModal() {
   arActive = false;
   stopArCameraFeed();
   window.removeEventListener("deviceorientation", onDeviceOrientation);
-  if (arRenderLoopId) cancelAnimationFrame(arRenderLoopId);
+  if (arRenderLoopId) clearTimeout(arRenderLoopId);
 }
 
 async function startArCameraFeed() {
@@ -1732,6 +1738,102 @@ function stopArCameraFeed() {
   if (arCameraVideo) arCameraVideo.srcObject = null;
 }
 
+function ensureArRenderer() {
+  if (!arOverlayCanvas || typeof THREE === "undefined") return false;
+  if (!arRenderer) {
+    arRenderer = new THREE.WebGLRenderer({ canvas: arOverlayCanvas, alpha: true, antialias: true, preserveDrawingBuffer: false });
+    arRenderer.setPixelRatio(window.devicePixelRatio || 1);
+  }
+  if (!arRendererScene) {
+    arRendererScene = new THREE.Scene();
+    arRendererScene.background = null;
+    const ambient = new THREE.AmbientLight(0xffffff, 0.85);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.7);
+    dir.position.set(50, -50, 80);
+    arRendererScene.add(ambient);
+    arRendererScene.add(dir);
+  }
+  if (!arRendererCamera) {
+    arRendererCamera = new THREE.PerspectiveCamera(75, 1, 0.1, 10000);
+    arRendererCamera.up.set(0, 0, 1);
+  }
+  return true;
+}
+
+function syncArCanvasSize() {
+  if (!arOverlayCanvas || !arRenderer || !arCameraVideo) return;
+  const width = arCameraVideo.videoWidth || arCameraVideo.clientWidth || 1280;
+  const height = arCameraVideo.videoHeight || arCameraVideo.clientHeight || 720;
+  if (arOverlayCanvas.width !== width || arOverlayCanvas.height !== height) {
+    arOverlayCanvas.width = width;
+    arOverlayCanvas.height = height;
+    arRenderer.setSize(width, height, false);
+    if (arRendererCamera) {
+      arRendererCamera.aspect = width / Math.max(1, height);
+      arRendererCamera.updateProjectionMatrix();
+    }
+  }
+}
+
+function ensureArModelClone() {
+  if (!ifcViewer || !ifcViewer.model || !arRendererScene) return false;
+  if (arModelClone) return true;
+  arModelClone = ifcViewer.model.clone(true);
+  arModelClone.rotation.set(0, 0, 0);
+  arRendererScene.add(arModelClone);
+  return true;
+}
+
+function positionArCameraFromGeo(lat, lon, heading, attitude, altitude) {
+  const g = ifcViewer?.georef;
+  if (!g || !ifcViewer?.modelToScene || !window.proj4 || !g.epsg || !arRendererCamera) return false;
+  if (!isFinite(lat) || !isFinite(lon)) return false;
+
+  const def = IFCViewer.CRS_DEFS[g.epsg];
+  if (def && !window.proj4.defs(g.epsg)) window.proj4.defs(g.epsg, def);
+
+  let E, N;
+  try {
+    const r = window.proj4("WGS84", g.epsg, [lon, lat]);
+    E = r[0];
+    N = r[1];
+  } catch (e) {
+    console.warn("positionArCameraFromGeo: proj4 failed", e);
+    return false;
+  }
+
+  const rot = (g.rotationDeg || 0) * Math.PI / 180;
+  const cosT = Math.cos(rot);
+  const sinT = Math.sin(rot);
+  const scale = g.scale || 1;
+  const ep = E - (g.eastings || 0);
+  const np = N - (g.northings || 0);
+  const xE = (ep * cosT + np * sinT) / scale;
+  const yN = (-ep * sinT + np * cosT) / scale;
+  const elev = (altitude != null && isFinite(altitude))
+    ? altitude
+    : (ifcViewer.modelElevCenterM != null ? ifcViewer.modelElevCenterM : 0);
+
+  const eyeScene = new THREE.Vector3(xE + arPanX, elev, -(yN + arPanY)).applyMatrix4(ifcViewer.modelToScene);
+  const th = (heading != null && isFinite(heading) ? heading : 0) * Math.PI / 180;
+  const phi = (attitude != null && isFinite(attitude) ? attitude : 0) * Math.PI / 180;
+  const dirM = new THREE.Vector3(
+    Math.sin(th) * Math.cos(phi),
+    Math.sin(phi),
+    -Math.cos(th) * Math.cos(phi)
+  );
+  const rotM = new THREE.Matrix3().setFromMatrix4(ifcViewer.modelToScene);
+  const dirScene = dirM.applyMatrix3(rotM).normalize();
+
+  const eyeOffset = eyeScene.clone().addScaledVector(dirScene, -arPivotOffsetM);
+  arRendererCamera.up.set(0, 0, 1);
+  arRendererCamera.position.copy(eyeOffset);
+  const look = eyeScene.clone().addScaledVector(dirScene, ifcViewer.modelRadius || 50);
+  arRendererCamera.lookAt(look);
+  arRendererCamera.updateProjectionMatrix();
+  return true;
+}
+
 function onDeviceOrientation(event) {
   arDeviceOrientation = {
     alpha: event.alpha || 0,  // Z rotation (yaw), 0-360
@@ -1743,16 +1845,8 @@ function onDeviceOrientation(event) {
 function startArRenderLoop() {
   const b = activeBridge();
   if (!b || !b.ifcFootprint) return;
-  
-  if (!arCanvasCtx) {
-    if (arOverlayCanvas) {
-      arCanvasCtx = arOverlayCanvas.getContext("2d");
-      // Size canvas to match video
-      const rect = arCameraVideo.getBoundingClientRect();
-      arOverlayCanvas.width = arCameraVideo.videoWidth || 1920;
-      arOverlayCanvas.height = arCameraVideo.videoHeight || 1080;
-    }
-  }
+  if (!ensureArRenderer()) return;
+  syncArCanvasSize();
   
   const renderFrame = () => {
     if (!arActive) return;
@@ -1763,7 +1857,8 @@ function startArRenderLoop() {
 }
 
 function updateArRender() {
-  if (!arCanvasCtx || !arCameraVideo) return;
+  if (!arCameraVideo || !arRenderer || !arRendererCamera) return;
+  syncArCanvasSize();
   
   // Get current location
   let lat, lon, alt;
@@ -1794,59 +1889,21 @@ function updateArRender() {
   // Render IFC to canvas
   if (ifcViewer && ifcViewer.model) {
     renderIfcToArCanvas(lat, lon, heading, pitch, alt);
+  } else if (arStatusMessage) {
+    arStatusMessage.textContent = "Load the 3D model first, then reopen AR view.";
   }
   
   if (arStatusMessage) arStatusMessage.textContent = "AR view rendering at ~30Hz";
 }
 
 function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
-  if (!arCanvasCtx || !ifcViewer) return;
-  
-  // Clear canvas
-  arCanvasCtx.clearRect(0, 0, arOverlayCanvas.width, arOverlayCanvas.height);
-  
-  // Create or update Three.js scene for AR
-  if (!arRendererScene) {
-    arRendererScene = new THREE.Scene();
-    arRendererScene.background = null;
-    arRendererCamera = new THREE.PerspectiveCamera(60, arOverlayCanvas.width / arOverlayCanvas.height, 0.1, 10000);
-    arRendererCamera.up.set(0, 0, 1);
+  if (!ifcViewer || !arRenderer || !ensureArModelClone()) return;
+  const posed = positionArCameraFromGeo(lat, lon, heading, pitch, alt);
+  if (!posed) {
+    if (arStatusMessage) arStatusMessage.textContent = "This model is not georeferenced for AR overlay yet.";
+    return;
   }
-  
-  // Clone the IFC model and position it based on georeference
-  // Position the camera with 0.6m pivot offset
-  const heading_rad = (heading || 0) * Math.PI / 180;
-  const pitch_rad = (pitch || 0) * Math.PI / 180;
-  
-  // For now, render the IFC model centered with dynamic attitude
-  if (ifcViewer.model) {
-    arRendererScene.children = []; // clear previous
-    const modelClone = ifcViewer.model.clone();
-    modelClone.rotation.order = 'ZXY';
-    modelClone.rotation.z = heading_rad;
-    modelClone.rotation.x = pitch_rad;
-    arRendererScene.add(modelClone);
-  }
-  
-  // Add basic lighting
-  if (arRendererScene.children.filter((c) => c.isLight).length === 0) {
-    const light = new THREE.AmbientLight(0xffffff, 0.8);
-    arRendererScene.add(light);
-  }
-  
-  // Position camera 0.6m back, looking at origin
-  const dist = 50;
-  arRendererCamera.position.set(0, -arPivotOffsetM, 0);
-  arRendererCamera.lookAt(0, 0, 0);
-  arRendererCamera.updateProjectionMatrix();
-  
-  // Render to offscreen canvas and composite to arCanvasCtx
-  // For simplicity, just clear and draw status
-  arCanvasCtx.fillStyle = "rgba(0,0,0,0.2)";
-  arCanvasCtx.fillRect(0, 0, arOverlayCanvas.width, arOverlayCanvas.height);
-  arCanvasCtx.fillStyle = "#38bdf8";
-  arCanvasCtx.font = "16px sans-serif";
-  arCanvasCtx.fillText("IFC model overlay (development)", 10, 30);
+  arRenderer.render(arRendererScene, arRendererCamera);
 }
 
 function initArLocationPickerMap() {
@@ -6669,6 +6726,8 @@ function buildCard(record, photoNo) {
   renderTagsArea(card.querySelector(".photo-tags-area"), record);
   const navBtn = card.querySelector(".edit-nav-btn");
   if (navBtn) navBtn.addEventListener("click", () => openPhotoNavModal(record));
+  const view3dBtn = card.querySelector(".view-3d-btn");
+  if (view3dBtn) view3dBtn.addEventListener("click", () => openIfcForPhoto(record));
 
   const dlBtn = card.querySelector(".download-btn");
   if (displayOverlayBlob) dlBtn.textContent = "⬇ Photo only";
