@@ -271,6 +271,7 @@ const arViewModal          = document.getElementById("arViewModal");
 const arViewContainer      = document.querySelector(".ar-view-container");
 const closeArViewButton    = document.getElementById("closeArViewButton");
 const openArViewButton     = document.getElementById("openArViewButton");
+const openArViewFromViewerButton = document.getElementById("openArViewFromViewerButton");
 const arCameraVideo        = document.getElementById("arCameraVideo");
 const arOverlayCanvas      = document.getElementById("arOverlayCanvas");
 const arLocationText       = document.querySelector("#arLocationText");
@@ -826,10 +827,10 @@ function syncExportIfcButtonState() {
 }
 
 function syncArViewButtonState() {
-  if (!openArViewButton) return;
   const b = activeBridge();
-  if (!b || !b.ifcFootprint) { openArViewButton.disabled = true; return; }
-  openArViewButton.disabled = false;
+  const enabled = !!(b && b.ifcFootprint);
+  if (openArViewButton) openArViewButton.disabled = !enabled;
+  if (openArViewFromViewerButton) openArViewFromViewerButton.disabled = !enabled;
 }
 
 function latestElementCondition(bridge, expressId) {
@@ -1596,6 +1597,7 @@ function registerEvents() {
 
   // ── AR Overlay View events ──
   if (openArViewButton) openArViewButton.addEventListener("click", () => { void openArViewModal(); });
+  if (openArViewFromViewerButton) openArViewFromViewerButton.addEventListener("click", () => { void openArViewModal(); });
   if (closeArViewButton) closeArViewButton.addEventListener("click", () => closeArViewModal());
   if (arViewModal) arViewModal.addEventListener("click", (e) => {
     if (e.target === arViewModal) closeArViewModal();
@@ -1653,6 +1655,7 @@ async function openArViewModal() {
   if (!b) { setStatus("Open a bridge first."); return; }
   if (!b.ifcFootprint) { setStatus("Load an IFC model first."); return; }
   if (!arViewModal) return;
+  if (ifcViewerModal && !ifcViewerModal.hidden) closeIfcViewerModal();
   
   arViewModal.hidden = false;
   arActive = true;
