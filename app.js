@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v177";
-const BUILD_STAMP = "2026-07-31 00:00:00";
+const BUILD_VERSION = "v178";
+const BUILD_STAMP = "2026-07-31 00:30:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -2104,14 +2104,17 @@ function frameArModelForTest() {
     // overflows the view up close - you only see part of it, exactly as in life.
     // (This is the non-GPS test viewpoint; georeferenced live mode overrides it.)
     const standoffM = 12;                 // stand 12 m off the near side
-    arOrbitAz = Math.PI / 2;              // look toward +Y, across at the bridge
-    arOrbitEl = 0;
     const eyeHeightU = arMetersToUnits(arEyeHeightM + arElevOffsetM);
     arEyePos = new THREE.Vector3(
       arOrbitCenter.x,
       box.min.y - arMetersToUnits(standoffM),
       box.min.z + eyeHeightU
     );
+    // Start AIMED at the bridge so it is on-screen immediately (in manual test
+    // mode the compass no longer points the camera, so we set the look here).
+    const look0 = arOrbitCenter.clone().sub(arEyePos);
+    arOrbitAz = Math.atan2(look0.y, look0.x);
+    arOrbitEl = Math.max(-1.4, Math.min(1.4, Math.atan2(look0.z, Math.hypot(look0.x, look0.y))));
     arOrbitInitialized = true;
   }
   applyArViewCamera();
@@ -2185,12 +2188,21 @@ function onArOrbitPointerMove(e) {
     return;
   }
 
-  // One finger / mouse drag: fine-tune position (strafe on the ground plane).
+  // One finger / mouse drag:
+  //  - manual TEST mode: LOOK around (yaw + pitch) so you can find/aim at the
+  //    bridge, since the compass no longer steers the camera.
+  //  - live GPS mode: fine-tune position (strafe) on the ground plane.
   if (!arOrbitDragging || !arEyePos) return;
   const dx = e.clientX - arOrbitLastX;
   const dy = e.clientY - arOrbitLastY;
   arOrbitLastX = e.clientX;
   arOrbitLastY = e.clientY;
+  if (!arLiveGpsActive()) {
+    const lookSpeed = 0.005;             // radians per pixel
+    arOrbitAz -= dx * lookSpeed;         // drag right -> look right
+    arOrbitEl = Math.max(-1.4, Math.min(1.4, arOrbitEl - dy * lookSpeed)); // drag up -> look up
+    return;
+  }
   const { fwd, right } = arGroundVectors();
   const s = (arOrbitRadius || 1) / Math.max(160, arOverlayCanvas.clientHeight || 400);
   arEyePos.addScaledVector(right, dx * s);   // drag right -> strafe right
@@ -2231,6 +2243,16 @@ function arGeoReady() {
 function arMetersToUnits(m) {
   const mpu = (ifcViewer && ifcViewer.metersPerUnit) || 1;
   return (isFinite(m) ? m : 0) / (mpu || 1);
+}
+
+// True only when live GPS/RTK anchoring is active (checkbox ticked AND a real
+// fix exists). In that mode the phone's compass/tilt drives the look direction
+// (real AR). Otherwise we're in manual TEST mode: the look is controlled by the
+// on-screen Turn/Elevation buttons and by dragging, so the compass must NOT
+// hijack it (that made the Turn buttons dead and pointed you away from the model).
+function arLiveGpsActive() {
+  return !!(arUseCurrentLocation && arUseCurrentLocation.checked
+    && currentLocation && isFinite(currentLocation.lat) && isFinite(currentLocation.lng));
 }
 
 // Scene-world point -> map easting/northing (metres) + model elevation.
@@ -2639,8 +2661,12 @@ function onDeviceOrientation(event) {
   arYawSmoothed = smoothAngle(arYawSmoothed, rawAz, 0.25);
   arPitchSmoothed = (arPitchSmoothed == null || !isFinite(arPitchSmoothed))
     ? rawEl : (arPitchSmoothed + 0.25 * (rawEl - arPitchSmoothed));
-  arOrbitAz = arYawSmoothed;
-  arOrbitEl = Math.max(-1.4, Math.min(1.4, arPitchSmoothed));
+  // Only let the phone drive the view in live GPS/RTK mode. In manual TEST mode
+  // the Turn / Elevation buttons and drag control the look, so leave them alone.
+  if (arLiveGpsActive()) {
+    arOrbitAz = arYawSmoothed;
+    arOrbitEl = Math.max(-1.4, Math.min(1.4, arPitchSmoothed));
+  }
 }
 
 function startArRenderLoop() {
@@ -2767,8 +2793,8 @@ function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
     if (arStatusMessage) {
       const unit = (ifcViewer && ifcViewer.lengthUnitName) ? ifcViewer.lengthUnitName : "metre";
       arStatusMessage.textContent = arGeoReady()
-        ? "Test mode (no GPS) - true scale. Use Move / Turn / Elevation to walk around; drag the plan-view dots to reposition."
-        : "Test mode (no GPS) - true 1:1 scale (model unit: " + unit + "). Standing 12 m off the bridge; use Move / Turn / Elevation to walk around.";
+        ? "Test mode (no GPS) - true scale. Drag to look; Move/Turn/Elevation to walk; drag the plan-view dot to reposition."
+        : "Test mode (no GPS) - true 1:1 scale (unit: " + unit + "). Drag to look around; Forward/Back to get closer; Turn/Elevation and the plan-view dot to move.";
     }
     renderArScene();
     drawArMiniMap();
