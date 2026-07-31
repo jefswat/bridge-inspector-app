@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v178";
-const BUILD_STAMP = "2026-07-31 00:30:00";
+const BUILD_VERSION = "v179";
+const BUILD_STAMP = "2026-07-31 00:55:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -2098,16 +2098,32 @@ function frameArModelForTest() {
       const half = Math.max(fmaxx - fminx, fmaxy - fminy, 1) / 2 * 2.4;
       arMiniView = { minx: cx - half, maxx: cx + half, miny: cy - half, maxy: cy + half };
     }
-    // Place YOUR eye at TRUE human scale: stand a fixed real distance to the side
-    // of the bridge at real eye height above its lowest point. Because the standoff
-    // is a real metre distance (not proportional to model size), a large bridge
-    // overflows the view up close - you only see part of it, exactly as in life.
+    // Place YOUR eye at real human height, but far enough back on the FIRST
+    // frame that the WHOLE bridge frames on screen. Standing 12 m from a 150 m
+    // structure at true scale just shows a featureless close-up (or a gap) -
+    // that looked like "nothing is there". Scale stays 1:1: Forward/Back and
+    // pinch walk you in by real metres, so up close you only see part of it.
     // (This is the non-GPS test viewpoint; georeferenced live mode overrides it.)
-    const standoffM = 12;                 // stand 12 m off the near side
     const eyeHeightU = arMetersToUnits(arEyeHeightM + arElevOffsetM);
+    // Stand off perpendicular to the LONGEST horizontal axis so you face the
+    // broad side - the recognizable elevation view of the bridge.
+    const alongX = size.x >= size.y;
+    const longHoriz = alongX ? size.x : size.y;  // extent across the view
+    const perpHoriz = alongX ? size.y : size.x;  // depth (toward/away from you)
+    // Fit distance from the camera's field of view (fall back to sane angles if
+    // the camera fov has not been applied yet at framing time).
+    const vfov = ((arRendererCamera && isFinite(arRendererCamera.fov) && arRendererCamera.fov > 1)
+      ? arRendererCamera.fov : 55) * Math.PI / 180;
+    const aspect = (arRendererCamera && isFinite(arRendererCamera.aspect) && arRendererCamera.aspect > 0.1)
+      ? arRendererCamera.aspect : 0.6;            // portrait phone default
+    const hfov = 2 * Math.atan(Math.tan(vfov / 2) * aspect);
+    const fitW = (longHoriz / 2) / Math.max(0.05, Math.tan(hfov / 2));
+    const fitH = (size.z / 2) / Math.max(0.05, Math.tan(vfov / 2));
+    let standoff = Math.max(fitW, fitH) * 1.35 + perpHoriz / 2;
+    standoff = Math.max(standoff, arMetersToUnits(8)); // never absurdly close
     arEyePos = new THREE.Vector3(
-      arOrbitCenter.x,
-      box.min.y - arMetersToUnits(standoffM),
+      alongX ? arOrbitCenter.x : (arOrbitCenter.x - standoff),
+      alongX ? (arOrbitCenter.y - standoff) : arOrbitCenter.y,
       box.min.z + eyeHeightU
     );
     // Start AIMED at the bridge so it is on-screen immediately (in manual test
@@ -2794,7 +2810,7 @@ function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
       const unit = (ifcViewer && ifcViewer.lengthUnitName) ? ifcViewer.lengthUnitName : "metre";
       arStatusMessage.textContent = arGeoReady()
         ? "Test mode (no GPS) - true scale. Drag to look; Move/Turn/Elevation to walk; drag the plan-view dot to reposition."
-        : "Test mode (no GPS) - true 1:1 scale (unit: " + unit + "). Drag to look around; Forward/Back to get closer; Turn/Elevation and the plan-view dot to move.";
+        : "Test mode (no GPS) - true 1:1 scale (unit: " + unit + "). Whole bridge is framed; PINCH or Forward to walk in (up close you only see part). Drag to look; Turn/Elevation and the plan-view dot to move.";
     }
     renderArScene();
     drawArMiniMap();
