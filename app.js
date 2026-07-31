@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v168";
-const BUILD_STAMP = "2026-07-30 20:20:00";
+const BUILD_VERSION = "v169";
+const BUILD_STAMP = "2026-07-30 21:05:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -337,9 +337,12 @@ let arOrbitControlsBound   = false;
 // AR first-person controls
 let arCameraEnabled        = true;  // live camera overlay default ON
 let arHasOrientation       = false; // true once device orientation drives the look
-let arModelBoundsXY        = null;  // {minx,maxx,miny,maxy} model footprint (scene X/Y)
-let arModelFootprintXY     = null;  // convex-hull outline [{x,y}...] of the model footprint (model X=E, Y=N)
-let arMiniView             = null;  // {minx,maxx,miny,maxy} square plan-view extent (zoomed out past the bridge)
+let arModelBoundsXY        = null;  // {minx,maxx,miny,maxy} model footprint (scene X/Y) — fallback mode
+let arModelFootprintXY     = null;  // convex-hull outline [{x,y}...] of the model footprint (scene X/Y) — fallback
+let arMiniView             = null;  // {minx,maxx,miny,maxy} square plan-view extent (E/N metres, or scene X/Y fallback)
+let arMiniGeoMode          = false; // true when the plan view is drawn in georeferenced E/N (matches Map summary)
+let arMiniGeoPolys         = null;  // [{key,pts:[{E,N}...]}] projection polygons in E/N (from bridge.ifcFootprint)
+let arMiniDragTarget       = null;  // 'pos' | 'dir' — which dot is being dragged
 let arMiniCtx              = null;
 let arMiniDragging         = false;
 const arPointers           = new Map(); // active pointerId -> {x,y} for pinch
@@ -1793,6 +1796,9 @@ async function openArViewModal() {
   arModelBoundsXY = null;
   arModelFootprintXY = null;
   arMiniView = null;
+  arMiniGeoMode = false;
+  arMiniGeoPolys = null;
+  arMiniDragTarget = null;
   arPointers.clear();
   arPinchLastDist = 0;
   arEyePos = null;
@@ -1917,26 +1923,32 @@ function frameArModelForTest() {
     box.getCenter(arOrbitCenter);
     const size = box.getSize(new THREE.Vector3());
     arOrbitRadius = Math.max(size.x, size.y, size.z, ifcViewer.modelRadius || 1) || 1;
-    // Model footprint (top-down X/Y) for the mini plan view.
-    arModelBoundsXY = { minx: box.min.x, maxx: box.max.x, miny: box.min.y, maxy: box.max.y };
-    // True footprint outline (convex hull of the model in X=E/Y=N), so the plan
-    // view matches the diagonal shape/orientation seen on the Map summary rather
-    // than an axis-aligned box.
-    arModelFootprintXY = computeArFootprintHull() || [
-      { x: box.min.x, y: box.min.y }, { x: box.max.x, y: box.min.y },
-      { x: box.max.x, y: box.max.y }, { x: box.min.x, y: box.max.y },
-    ];
-    // Plan-view extent, zoomed OUT past the bridge so there is room to roam
-    // around it (the map is larger than the structure itself). Square + centered
-    // on the footprint so X and Y keep equal scale (no distortion).
-    {
+    // ── Plan-view setup ──────────────────────────────────────────────
+    // Preferred: georeferenced mode. Reuse the EXACT projection polygons the
+    // Map summary draws (bridge.ifcFootprint, in map E/N metres) so the plan
+    // view shape/orientation matches the summary exactly. Fall back to a scene
+    // X/Y convex hull only when no georeference is available.
+    arMiniGeoMode = false;
+    arMiniGeoPolys = null;
+    const geo = buildArMiniGeoData();
+    if (geo) {
+      arMiniGeoMode = true;
+      arMiniGeoPolys = geo.polys;
+      arMiniView = geo.view; // in E/N metres
+    } else {
+      // Fallback: model footprint (scene X/Y) as a convex hull.
+      arModelBoundsXY = { minx: box.min.x, maxx: box.max.x, miny: box.min.y, maxy: box.max.y };
+      arModelFootprintXY = computeArFootprintHull() || [
+        { x: box.min.x, y: box.min.y }, { x: box.max.x, y: box.min.y },
+        { x: box.max.x, y: box.max.y }, { x: box.min.x, y: box.max.y },
+      ];
       let fminx = Infinity, fmaxx = -Infinity, fminy = Infinity, fmaxy = -Infinity;
       for (const p of arModelFootprintXY) {
         if (p.x < fminx) fminx = p.x; if (p.x > fmaxx) fmaxx = p.x;
         if (p.y < fminy) fminy = p.y; if (p.y > fmaxy) fmaxy = p.y;
       }
       const cx = (fminx + fmaxx) / 2, cy = (fminy + fmaxy) / 2;
-      const half = Math.max(fmaxx - fminx, fmaxy - fminy, 1) / 2 * 2.4; // 2.4x -> bridge ~40% of map
+      const half = Math.max(fmaxx - fminx, fmaxy - fminy, 1) / 2 * 2.4;
       arMiniView = { minx: cx - half, maxx: cx + half, miny: cy - half, maxy: cy + half };
     }
     // Place YOUR eye a standoff back from the model center, looking toward it.
@@ -1984,7 +1996,7 @@ function setupArOrbitControls() {
     arMiniMap.style.touchAction = "none";
     arMiniMap.addEventListener("pointerdown", onArMiniPointerDown);
     arMiniMap.addEventListener("pointermove", onArMiniPointerMove);
-    window.addEventListener("pointerup", () => { arMiniDragging = false; });
+    window.addEventListener("pointerup", () => { arMiniDragging = false; arMiniDragTarget = null; });
   }
 }
 
@@ -2045,13 +2057,85 @@ function onArOrbitWheel(e) {
   arMoveForward(-Math.sign(e.deltaY) * (arOrbitRadius * 0.08));
 }
 
-// ── Mini plan-view (top-down) with draggable position arrow ──
-// The plan view uses a zoomed-out SQUARE extent (arMiniView) centered on the
-// bridge so there is roaming room around the structure, and X/Y keep equal
-// scale (no distortion). Falls back to the raw footprint box if needed.
+// ── Mini plan-view (top-down) with two draggable dots (position + direction) ──
+// Preferred GEOREF mode: the plan view is drawn in map E/N metres using the
+// SAME projection polygons as the Map summary (bridge.ifcFootprint), so the
+// shape/orientation match exactly. Fallback mode uses a scene-XY convex hull.
+// In both modes the "world" axes are (x=east/right, y=north/up); arMiniView is
+// {minx,maxx,miny,maxy} in those units.
 function arMiniExtent() {
   return arMiniView || arModelBoundsXY;
 }
+
+function arGeoReady() {
+  return !!(ifcViewer && ifcViewer.georef && ifcViewer.modelToScene && ifcViewer.sceneToModel
+    && window.proj4 && ifcViewer.georef.epsg && typeof THREE !== "undefined");
+}
+
+// Scene-world point -> map easting/northing (metres) + model elevation.
+function arSceneToEN(vec) {
+  const g = ifcViewer.georef;
+  const m = vec.clone().applyMatrix4(ifcViewer.sceneToModel);
+  const xE = m.x, yN = -m.z, mY = m.y;
+  const rot = (g.rotationDeg || 0) * Math.PI / 180, c = Math.cos(rot), s = Math.sin(rot);
+  const scale = g.scale || 1;
+  const eS = xE * scale, nS = yN * scale;
+  return {
+    E: (g.eastings || 0) + (eS * c - nS * s),
+    N: (g.northings || 0) + (eS * s + nS * c),
+    mY,
+  };
+}
+
+// Map easting/northing (metres) + model elevation -> scene-world point.
+function arENToScene(E, N, mY) {
+  const g = ifcViewer.georef;
+  const rot = (g.rotationDeg || 0) * Math.PI / 180, c = Math.cos(rot), s = Math.sin(rot);
+  const scale = g.scale || 1;
+  const ep = E - (g.eastings || 0), np = N - (g.northings || 0);
+  const xE = (ep * c + np * s) / scale;
+  const yN = (-ep * s + np * c) / scale;
+  return new THREE.Vector3(xE, mY, -yN).applyMatrix4(ifcViewer.modelToScene);
+}
+
+// Build georeferenced plan-view data (projection polygons + square view extent)
+// from the active bridge's saved footprint, matching the Map summary exactly.
+function buildArMiniGeoData() {
+  if (!arGeoReady()) return null;
+  const b = (typeof activeBridge === "function") ? activeBridge() : null;
+  const fp = b && b.ifcFootprint;
+  const src = (fp && Array.isArray(fp.projections) && fp.projections.length) ? fp : ifcViewer.georef;
+  if (!src) return null;
+  const polys = [];
+  const allPts = [];
+  const pushPoly = (key, arr) => {
+    const pts = (arr || [])
+      .filter((p) => p && isFinite(p.E) && isFinite(p.N))
+      .map((p) => ({ E: p.E, N: p.N }));
+    if (pts.length >= 3) { polys.push({ key, pts }); allPts.push(...pts); }
+  };
+  const projs = Array.isArray(src.projections) ? src.projections : [];
+  for (const pr of projs) if (pr && Array.isArray(pr.footprint)) pushPoly(pr.key || "other", pr.footprint);
+  if (Array.isArray(src.footprint)) pushPoly("__outline", src.footprint);
+  if (allPts.length < 3) return null;
+  let minE = Infinity, maxE = -Infinity, minN = Infinity, maxN = -Infinity;
+  for (const p of allPts) {
+    if (p.E < minE) minE = p.E; if (p.E > maxE) maxE = p.E;
+    if (p.N < minN) minN = p.N; if (p.N > maxN) maxN = p.N;
+  }
+  const cE = (minE + maxE) / 2, cN = (minN + maxN) / 2;
+  const half = Math.max(maxE - minE, maxN - minN, 1) / 2 * 2.4; // bridge ~40% of map
+  return { polys, view: { minx: cE - half, maxx: cE + half, miny: cN - half, maxy: cN + half } };
+}
+
+const AR_MINI_PROJ_STYLES = {
+  deck:    { line: "#38bdf8", fill: "rgba(14,165,233,0.16)" },
+  barrier: { line: "#8b5cf6", fill: "rgba(139,92,246,0.16)" },
+  girder:  { line: "#f59e0b", fill: "rgba(245,158,11,0.20)" },
+  pier:    { line: "#f43f5e", fill: "rgba(244,63,94,0.24)" },
+  other:   { line: "#64748b", fill: "rgba(100,116,139,0.10)" },
+  __outline: { line: "rgba(168,85,247,0.9)", fill: "rgba(192,132,252,0.10)" },
+};
 
 function arMiniToModel(cx, cy) {
   const b = arMiniExtent();
@@ -2062,7 +2146,7 @@ function arMiniToModel(cx, cy) {
   const fy = Math.min(1, Math.max(0, (cy - pad) / Math.max(1, H - 2 * pad)));
   return {
     x: b.minx + fx * (b.maxx - b.minx),
-    y: b.maxy - fy * (b.maxy - b.miny), // invert: north (max Y) at top
+    y: b.maxy - fy * (b.maxy - b.miny), // invert: north (max) at top
   };
 }
 
@@ -2075,24 +2159,90 @@ function arModelToMini(x, y) {
   return { cx: pad + fx * (W - 2 * pad), cy: pad + fy * (H - 2 * pad) };
 }
 
+// Eye position in plan-view world units (E/N in geo mode, else scene X/Y).
+function arEyeWorld() {
+  if (!arEyePos) return null;
+  if (arMiniGeoMode) { const g = arSceneToEN(arEyePos); return { x: g.E, y: g.N, mY: g.mY }; }
+  return { x: arEyePos.x, y: arEyePos.y };
+}
+
+// Unit heading vector in plan-view world units for the current look azimuth.
+function arHeadingWorld() {
+  if (arMiniGeoMode && arEyePos) {
+    const step = Math.max(arOrbitRadius * 0.2, 1);
+    const fwdScene = arEyePos.clone().add(new THREE.Vector3(Math.cos(arOrbitAz), Math.sin(arOrbitAz), 0).multiplyScalar(step));
+    const a = arSceneToEN(arEyePos), b = arSceneToEN(fwdScene);
+    let dx = b.E - a.E, dy = b.N - a.N;
+    const L = Math.hypot(dx, dy) || 1;
+    return { x: dx / L, y: dy / L };
+  }
+  return { x: Math.cos(arOrbitAz), y: Math.sin(arOrbitAz) };
+}
+
+// Screen (mini-canvas) position of the direction dot.
+function arDirDotMini() {
+  const eye = arEyeWorld();
+  if (!eye) return null;
+  const b = arMiniExtent();
+  const W = arMiniMap.width, pad = 14;
+  const worldPerPx = (b.maxx - b.minx) / Math.max(1, W - 2 * pad);
+  const dist = worldPerPx * 42; // ~42 px in front of the eye
+  const h = arHeadingWorld();
+  return arModelToMini(eye.x + h.x * dist, eye.y + h.y * dist);
+}
+
 function onArMiniPointerDown(e) {
+  if (!arMiniMap || !arEyePos) return;
+  const { cx, cy } = arMiniEventXY(e);
+  // Choose the nearer dot (position vs direction) within grab radius.
+  const eye = arEyeWorld();
+  const pe = eye ? arModelToMini(eye.x, eye.y) : null;
+  const pd = arDirDotMini();
+  const dEye = pe ? Math.hypot(cx - pe.cx, cy - pe.cy) : Infinity;
+  const dDir = pd ? Math.hypot(cx - pd.cx, cy - pd.cy) : Infinity;
+  arMiniDragTarget = (dDir < dEye && dDir < 26) ? "dir" : "pos";
   arMiniDragging = true;
-  arMiniSetFromEvent(e);
+  arMiniApply(cx, cy);
   try { arMiniMap.setPointerCapture(e.pointerId); } catch (_) {}
 }
 
 function onArMiniPointerMove(e) {
   if (!arMiniDragging) return;
-  arMiniSetFromEvent(e);
+  const { cx, cy } = arMiniEventXY(e);
+  arMiniApply(cx, cy);
 }
 
-function arMiniSetFromEvent(e) {
-  if (!arEyePos || !arMiniMap) return;
+function arMiniEventXY(e) {
   const rect = arMiniMap.getBoundingClientRect();
-  const cx = (e.clientX - rect.left) * (arMiniMap.width / rect.width);
-  const cy = (e.clientY - rect.top) * (arMiniMap.height / rect.height);
-  const m = arMiniToModel(cx, cy);
-  if (m) { arEyePos.x = m.x; arEyePos.y = m.y; }
+  return {
+    cx: (e.clientX - rect.left) * (arMiniMap.width / rect.width),
+    cy: (e.clientY - rect.top) * (arMiniMap.height / rect.height),
+  };
+}
+
+function arMiniApply(cx, cy) {
+  if (!arEyePos) return;
+  const w = arMiniToModel(cx, cy);
+  if (!w) return;
+  if (arMiniDragTarget === "dir") {
+    // Point the look direction toward the dragged spot.
+    if (arMiniGeoMode) {
+      const eyeEN = arSceneToEN(arEyePos);
+      const target = arENToScene(w.x, w.y, eyeEN.mY);
+      arOrbitAz = Math.atan2(target.y - arEyePos.y, target.x - arEyePos.x);
+    } else {
+      arOrbitAz = Math.atan2(w.y - arEyePos.y, w.x - arEyePos.x);
+    }
+  } else {
+    // Move the eye (keep current elevation).
+    if (arMiniGeoMode) {
+      const eyeEN = arSceneToEN(arEyePos);
+      const s = arENToScene(w.x, w.y, eyeEN.mY);
+      arEyePos.x = s.x; arEyePos.y = s.y; arEyePos.z = s.z;
+    } else {
+      arEyePos.x = w.x; arEyePos.y = w.y;
+    }
+  }
 }
 
 // Convex hull (Andrew's monotone chain) over [ [x,y], ... ]; returns [{x,y}...].
@@ -2146,56 +2296,76 @@ function computeArFootprintHull() {
 function drawArMiniMap() {
   if (!arMiniCtx || !arMiniExtent() || !arEyePos) return;
   const ctx = arMiniCtx;
-  const W = arMiniMap.width, H = arMiniMap.height, pad = 14;
+  const W = arMiniMap.width, H = arMiniMap.height;
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = "rgba(2,6,23,0.72)";
   ctx.fillRect(0, 0, W, H);
-  // Map border
   ctx.strokeStyle = "rgba(148,163,184,0.35)";
   ctx.lineWidth = 1;
   ctx.strokeRect(0.5, 0.5, W - 1, H - 1);
-  // True bridge footprint outline (matches the Map summary orientation/shape).
-  if (arModelFootprintXY && arModelFootprintXY.length >= 3) {
+
+  const drawPoly = (points, mapFn, style) => {
+    if (!points || points.length < 3) return;
     ctx.beginPath();
-    arModelFootprintXY.forEach((p, i) => {
-      const q = arModelToMini(p.x, p.y);
+    points.forEach((p, i) => {
+      const q = mapFn(p);
       if (i === 0) ctx.moveTo(q.cx, q.cy); else ctx.lineTo(q.cx, q.cy);
     });
     ctx.closePath();
-    ctx.fillStyle = "rgba(56,189,248,0.18)";
-    ctx.fill();
-    ctx.strokeStyle = "#38bdf8";
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
+    if (style.fill) { ctx.fillStyle = style.fill; ctx.fill(); }
+    ctx.strokeStyle = style.line; ctx.lineWidth = style.width || 1.4; ctx.stroke();
+  };
+
+  if (arMiniGeoMode && arMiniGeoPolys) {
+    // Detailed per-element projection polygons in map E/N — identical to the
+    // Map summary. Draw outline first, then filled elements on top.
+    const order = ["__outline", "deck", "barrier", "girder", "pier", "other"];
+    const sorted = arMiniGeoPolys.slice().sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
+    for (const poly of sorted) {
+      const st = AR_MINI_PROJ_STYLES[poly.key] || AR_MINI_PROJ_STYLES.other;
+      const style = poly.key === "__outline" ? { line: st.line, fill: null, width: 1.6 } : { line: st.line, fill: st.fill, width: 1.3 };
+      drawPoly(poly.pts, (p) => arModelToMini(p.E, p.N), style);
+    }
+  } else if (arModelFootprintXY && arModelFootprintXY.length >= 3) {
+    // Fallback: scene-XY convex hull.
+    drawPoly(arModelFootprintXY, (p) => arModelToMini(p.x, p.y),
+      { line: "#38bdf8", fill: "rgba(56,189,248,0.18)", width: 1.5 });
   }
-  // "N" indicator (north = +Y = top)
+
+  // "N" indicator (north up)
   ctx.fillStyle = "#94a3b8";
   ctx.font = "10px sans-serif";
-  ctx.fillText("N", W / 2 - 3, 11);
-  // Position arrow
-  const p = arModelToMini(arEyePos.x, arEyePos.y);
-  const az = arOrbitAz;
-  const hx = Math.cos(az), hy = -Math.sin(az); // screen: +Y is down
-  const L = 15;
-  ctx.strokeStyle = "#f59e0b";
-  ctx.fillStyle = "#f59e0b";
+  ctx.fillText("N", W / 2 - 3, 12);
+
+  // ── Two dots: position (orange) + direction (green) ──
+  const eye = arEyeWorld();
+  if (!eye) return;
+  const pe = arModelToMini(eye.x, eye.y);
+  const pd = arDirDotMini() || pe;
+
+  // Connector line eye -> direction
+  ctx.strokeStyle = "rgba(245,158,11,0.9)";
   ctx.lineWidth = 2.5;
   ctx.beginPath();
-  ctx.arc(p.cx, p.cy, 5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(p.cx, p.cy);
-  ctx.lineTo(p.cx + hx * L, p.cy + hy * L);
+  ctx.moveTo(pe.cx, pe.cy);
+  ctx.lineTo(pd.cx, pd.cy);
   ctx.stroke();
-  // Arrow head
-  const ah = 6;
-  const ang = Math.atan2(hy, hx);
+
+  // Direction dot (green) — drag to aim
+  ctx.fillStyle = "#22c55e";
+  ctx.strokeStyle = "#052e16";
+  ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.moveTo(p.cx + hx * L, p.cy + hy * L);
-  ctx.lineTo(p.cx + hx * L - ah * Math.cos(ang - 0.5), p.cy + hy * L - ah * Math.sin(ang - 0.5));
-  ctx.lineTo(p.cx + hx * L - ah * Math.cos(ang + 0.5), p.cy + hy * L - ah * Math.sin(ang + 0.5));
-  ctx.closePath();
-  ctx.fill();
+  ctx.arc(pd.cx, pd.cy, 6, 0, Math.PI * 2);
+  ctx.fill(); ctx.stroke();
+
+  // Position dot (orange) — drag to move
+  ctx.fillStyle = "#f59e0b";
+  ctx.strokeStyle = "#422006";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(pe.cx, pe.cy, 6.5, 0, Math.PI * 2);
+  ctx.fill(); ctx.stroke();
 }
 
 function setArCameraEnabled(on) {
@@ -2270,7 +2440,10 @@ function onDeviceOrientation(event) {
   // On a phone, physically turning/tilting the device drives the look direction.
   if (event.alpha != null || event.beta != null) {
     arHasOrientation = true;
-    arOrbitAz = -(event.alpha || 0) * Math.PI / 180;           // compass heading
+    // event.alpha is CCW-positive about vertical; turning the device right (CW)
+    // must turn the view right, so the scene azimuth follows +alpha (previously
+    // negated, which made everything rotate backwards).
+    arOrbitAz = (event.alpha || 0) * Math.PI / 180;           // compass heading
     const el = ((event.beta || 0) - 90) * Math.PI / 180;       // 90 = horizon
     arOrbitEl = Math.max(-1.4, Math.min(1.4, el));
   }
