@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v170";
-const BUILD_STAMP = "2026-07-30 21:25:00";
+const BUILD_VERSION = "v171";
+const BUILD_STAMP = "2026-07-30 21:36:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -224,6 +224,12 @@ let debugLogEntries      = [];
 // ── State ─────────────────────────────────────────────────────────────────────
 let db;
 let stream, thermalStream;
+let cameraZoomCaps = null;    // {min,max,step} from track capabilities, or null
+let cameraNativeZoom = false; // true when the video track supports real zoom
+let cameraDigitalZoom = 1;    // digital fallback factor (>=1)
+let cameraZoomBound = false;  // slider/pinch listeners attached once
+const cameraZoomPointers = new Map();
+let cameraZoomPinchDist = 0;
 let facingMode            = "environment";
 let mainCameraId          = localStorage.getItem("mainCameraId") || null; // preferred main device
 let deferredInstallPrompt = null;
@@ -322,6 +328,10 @@ let arPanY                 = 0;  // manual pan in scene space (metres)
 let arPivotOffsetM         = 0.6; // 0.6 metres behind the camera position
 let arDeviceOrientation    = { alpha: 0, beta: 0, gamma: 0 }; // from DeviceOrientationEvent
 let arPermissionGranted    = false;
+let arOrientAbsolute       = false; // true once an absolute/compass orientation source is active
+let arYawSmoothed          = null;  // low-pass filtered yaw (radians)
+let arPitchSmoothed        = null;  // low-pass filtered pitch (radians)
+let arScreenAngleRad       = 0;     // screen-orientation offset (radians)
 // AR orbit controls (drag to rotate / wheel to zoom the test view)
 let arOrbitInitialized     = false;
 let arOrbitCenter          = null; // THREE.Vector3 (lazy) - model center
@@ -1172,6 +1182,7 @@ async function openCaptureModal(opts = {}) {
   setCaptureModalMode(scanMode);
   captureModal.hidden = false;
   if (!stream) await startMainCamera();
+  else void setupCameraZoom();
   if (!scanMode) void acquireGeoAndHeading();
 }
 
@@ -1788,11 +1799,17 @@ async function openArViewModal() {
   } else {
     setStatus("Device orientation not available on this device.");
   }
+  // Absolute (true-north) orientation — Android Chrome fires this; preferred
+  // over the relative "deviceorientation" event to avoid drift.
+  try { window.addEventListener("deviceorientationabsolute", onDeviceOrientation); } catch (_) {}
   
   // Reset AR view for this session and enable first-person controls.
   arOrbitInitialized = false;
   arOrbitDragging = false;
   arHasOrientation = false;
+  arOrientAbsolute = false;
+  arYawSmoothed = null;
+  arPitchSmoothed = null;
   arModelBoundsXY = null;
   arModelFootprintXY = null;
   arMiniView = null;
@@ -1814,6 +1831,7 @@ function closeArViewModal() {
   arActive = false;
   stopArCameraFeed();
   window.removeEventListener("deviceorientation", onDeviceOrientation);
+  try { window.removeEventListener("deviceorientationabsolute", onDeviceOrientation); } catch (_) {}
   if (arRenderLoopId) clearTimeout(arRenderLoopId);
 }
 
@@ -2431,22 +2449,55 @@ function positionArCameraFromGeo(lat, lon, heading, attitude, altitude) {
   return true;
 }
 
+// Shortest-arc exponential smoothing for angles (radians).
+function smoothAngle(prev, target, a) {
+  if (prev == null || !isFinite(prev)) return target;
+  let d = target - prev;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return prev + a * d;
+}
+
 function onDeviceOrientation(event) {
-  arDeviceOrientation = {
-    alpha: event.alpha || 0,  // Z rotation (yaw), 0-360
-    beta: event.beta || 0,    // X rotation (pitch), -180 to 180
-    gamma: event.gamma || 0   // Y rotation (roll), -90 to 90
-  };
-  // On a phone, physically turning/tilting the device drives the look direction.
-  if (event.alpha != null || event.beta != null) {
-    arHasOrientation = true;
-    // event.alpha is CCW-positive about vertical; turning the device right (CW)
-    // must turn the view right, so the scene azimuth follows +alpha (previously
-    // negated, which made everything rotate backwards).
-    arOrbitAz = (event.alpha || 0) * Math.PI / 180;           // compass heading
-    const el = ((event.beta || 0) - 90) * Math.PI / 180;       // 90 = horizon
-    arOrbitEl = Math.max(-1.4, Math.min(1.4, el));
+  const alpha = event.alpha, beta = event.beta, gamma = event.gamma;
+  arDeviceOrientation = { alpha: alpha || 0, beta: beta || 0, gamma: gamma || 0 };
+  if (alpha == null && beta == null) return;
+
+  // Prefer an absolute (true-north) source. Once we have one, ignore relative
+  // events so the heading can't drift back to an arbitrary origin.
+  const isAbs = event.absolute === true || typeof event.webkitCompassHeading === "number";
+  if (isAbs) arOrientAbsolute = true;
+  else if (arOrientAbsolute) return;
+
+  arHasOrientation = true;
+
+  // Correct for the screen's own rotation (portrait vs landscape).
+  let scrAngle = 0;
+  try {
+    scrAngle = (screen.orientation && typeof screen.orientation.angle === "number")
+      ? screen.orientation.angle : (window.orientation || 0);
+  } catch (_) { scrAngle = 0; }
+  arScreenAngleRad = (scrAngle || 0) * Math.PI / 180;
+
+  // Absolute compass heading. iOS exposes webkitCompassHeading (clockwise from
+  // north); Android's absolute alpha is CCW. Keep the existing +alpha (CCW)
+  // convention so the plan view — which already tracks correctly — is unchanged.
+  let rawAz;
+  if (typeof event.webkitCompassHeading === "number" && !isNaN(event.webkitCompassHeading)) {
+    rawAz = (-event.webkitCompassHeading) * Math.PI / 180;
+  } else {
+    rawAz = (alpha || 0) * Math.PI / 180;
   }
+  rawAz -= arScreenAngleRad;
+  const rawEl = ((beta || 0) - 90) * Math.PI / 180;
+
+  // Low-pass smoothing removes the frame-to-frame jitter and the gimbal spikes
+  // that appear when the phone is tilted up (beta near 90) to view the bridge.
+  arYawSmoothed = smoothAngle(arYawSmoothed, rawAz, 0.25);
+  arPitchSmoothed = (arPitchSmoothed == null || !isFinite(arPitchSmoothed))
+    ? rawEl : (arPitchSmoothed + 0.25 * (rawEl - arPitchSmoothed));
+  arOrbitAz = arYawSmoothed;
+  arOrbitEl = Math.max(-1.4, Math.min(1.4, arPitchSmoothed));
 }
 
 function startArRenderLoop() {
@@ -2509,6 +2560,7 @@ function updateArRender() {
   } else if (arStatusMessage) {
     arStatusMessage.textContent = "Load the 3D model first, then reopen AR view.";
   }
+  updateArDebugHud();
 }
 
 function renderArScene() {
@@ -3388,6 +3440,7 @@ async function startMainCamera() {
     const isFront = (trackFacing ?? facingMode) === "user";
     cameraPreview.closest(".camera-preview-wrap")?.classList.toggle("front-facing", isFront);
     setStatus(`Camera ready (${facingLabel(facingMode)} lens).`);
+    void setupCameraZoom();
     startAprilTagPreviewLoop();
     await populateMainSelector();
     await populateThermalSelector();
@@ -3842,7 +3895,7 @@ async function capturePhoto() {
   const w = cameraPreview.videoWidth, h = cameraPreview.videoHeight;
   if (!w || !h) { setStatus("Camera warming up \u2014 try again."); return; }
   snapshotCanvas.width = w; snapshotCanvas.height = h;
-  snapshotCanvas.getContext("2d").drawImage(cameraPreview, 0, 0, w, h);
+  drawMainCameraFrame(snapshotCanvas.getContext("2d"), w, h);
   const mainBlob = await canvasToBlob(snapshotCanvas);
   const aprilTagResult = findAprilTagsInCanvas(snapshotCanvas);
 
@@ -10024,6 +10077,139 @@ function wireGridRectifyControls() {
   });
 }
 wireGridRectifyControls();
+
+// ── Camera zoom (optical/native via MediaStreamTrack, digital crop fallback) ──
+function mainVideoTrack() {
+  return (stream && stream.getVideoTracks && stream.getVideoTracks()[0]) || null;
+}
+
+function zoomPinchDist() {
+  const p = Array.from(cameraZoomPointers.values());
+  if (p.length < 2) return 0;
+  return Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+}
+
+function applyCameraZoom(z, valEl) {
+  if (!isFinite(z) || z < 1) z = 1;
+  if (cameraNativeZoom) {
+    const track = mainVideoTrack();
+    if (track && track.applyConstraints) {
+      track.applyConstraints({ advanced: [{ zoom: z }] }).catch((e) => console.warn("[zoom] applyConstraints:", e));
+    }
+    cameraDigitalZoom = 1;
+    if (cameraPreview) cameraPreview.style.transform = "";
+  } else {
+    cameraDigitalZoom = z;
+    if (cameraPreview) {
+      cameraPreview.style.transformOrigin = "center center";
+      cameraPreview.style.transform = z > 1 ? `scale(${z})` : "";
+    }
+  }
+  if (valEl) valEl.textContent = z.toFixed(1) + "\u00d7";
+}
+
+// Draw the current main-camera frame into ctx, applying a center-crop when
+// digital zoom is active so the saved photo matches the zoomed preview.
+function drawMainCameraFrame(ctx, w, h) {
+  const z = cameraNativeZoom ? 1 : (cameraDigitalZoom || 1);
+  if (z > 1) {
+    const sw = w / z, sh = h / z;
+    const sx = (w - sw) / 2, sy = (h - sh) / 2;
+    ctx.drawImage(cameraPreview, sx, sy, sw, sh, 0, 0, w, h);
+  } else {
+    ctx.drawImage(cameraPreview, 0, 0, w, h);
+  }
+}
+
+function setupCameraZoom() {
+  const row = document.getElementById("cameraZoomRow");
+  const slider = document.getElementById("cameraZoomSlider");
+  const valEl = document.getElementById("cameraZoomValue");
+  if (!row || !slider) return;
+  const track = mainVideoTrack();
+  const caps = (track && track.getCapabilities) ? track.getCapabilities() : null;
+  if (caps && caps.zoom && typeof caps.zoom.max === "number" && caps.zoom.max > (caps.zoom.min || 1)) {
+    cameraNativeZoom = true;
+    cameraZoomCaps = { min: caps.zoom.min || 1, max: caps.zoom.max, step: caps.zoom.step || 0.1 };
+    const cur = (track.getSettings && track.getSettings().zoom) || cameraZoomCaps.min;
+    slider.min = String(cameraZoomCaps.min);
+    slider.max = String(cameraZoomCaps.max);
+    slider.step = String(cameraZoomCaps.step || 0.1);
+    slider.value = String(cur);
+    cameraDigitalZoom = 1;
+    if (cameraPreview) cameraPreview.style.transform = "";
+  } else {
+    cameraNativeZoom = false;
+    cameraZoomCaps = null;
+    slider.min = "1"; slider.max = "5"; slider.step = "0.1";
+    slider.value = String(cameraDigitalZoom || 1);
+  }
+  row.hidden = false;
+  applyCameraZoom(parseFloat(slider.value), valEl);
+
+  if (!cameraZoomBound) {
+    cameraZoomBound = true;
+    slider.addEventListener("input", () => applyCameraZoom(parseFloat(slider.value), valEl));
+    const pv = cameraPreview;
+    if (pv) {
+      pv.style.touchAction = "none";
+      pv.addEventListener("pointerdown", (e) => {
+        cameraZoomPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (cameraZoomPointers.size === 2) cameraZoomPinchDist = zoomPinchDist();
+      });
+      pv.addEventListener("pointermove", (e) => {
+        if (!cameraZoomPointers.has(e.pointerId)) return;
+        cameraZoomPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (cameraZoomPointers.size >= 2) {
+          const d = zoomPinchDist();
+          if (cameraZoomPinchDist > 0 && d > 0) {
+            const cur = parseFloat(slider.value) || 1;
+            const mn = parseFloat(slider.min), mx = parseFloat(slider.max);
+            const next = Math.max(mn, Math.min(mx, cur * (d / cameraZoomPinchDist)));
+            slider.value = String(next);
+            applyCameraZoom(next, valEl);
+          }
+          cameraZoomPinchDist = d;
+        }
+      });
+      const up = (e) => { cameraZoomPointers.delete(e.pointerId); if (cameraZoomPointers.size < 2) cameraZoomPinchDist = 0; };
+      pv.addEventListener("pointerup", up);
+      pv.addEventListener("pointercancel", up);
+    }
+  }
+}
+
+// ── AR debug HUD (diagnose frozen-model-vs-arrow) ──────────────────────────
+let arHudEl = null;
+function updateArDebugHud() {
+  if (!arActive) { if (arHudEl) arHudEl.style.display = "none"; return; }
+  if (!arHudEl) {
+    arHudEl = document.createElement("div");
+    arHudEl.id = "arDebugHud";
+    arHudEl.style.cssText =
+      "position:fixed;left:8px;top:8px;z-index:100000;padding:6px 8px;" +
+      "font:11px/1.35 monospace;color:#e2e8f0;background:rgba(2,6,23,0.72);" +
+      "border:1px solid rgba(148,163,184,0.4);border-radius:6px;white-space:pre;" +
+      "pointer-events:none;max-width:70vw;";
+    (arViewModal || document.body).appendChild(arHudEl);
+  }
+  arHudEl.style.display = "block";
+  const azDeg = (arOrbitAz * 180 / Math.PI);
+  const elDeg = (arOrbitEl * 180 / Math.PI);
+  let fwd = "n/a";
+  if (arRendererCamera && typeof THREE !== "undefined") {
+    const v = arRendererCamera.getWorldDirection(new THREE.Vector3());
+    fwd = `${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)}`;
+  }
+  const src = arOrientAbsolute ? "ABS/compass" : (arHasOrientation ? "relative" : "none");
+  const rawA = (arDeviceOrientation && isFinite(arDeviceOrientation.alpha)) ? arDeviceOrientation.alpha.toFixed(0) : "-";
+  const rawB = (arDeviceOrientation && isFinite(arDeviceOrientation.beta)) ? arDeviceOrientation.beta.toFixed(0) : "-";
+  arHudEl.textContent =
+    `AZ ${azDeg.toFixed(1)}\u00b0  EL ${elDeg.toFixed(1)}\u00b0\n` +
+    `raw alpha ${rawA}  beta ${rawB}\n` +
+    `cam fwd ${fwd}\n` +
+    `src ${src}  scr ${(arScreenAngleRad*180/Math.PI).toFixed(0)}\u00b0  fps ${arRenderFps.toFixed(1)}`;
+}
 
 // ── DOM helpers ───────────────────────────────────────────────────────────────
 function makeButton(text, cls = "") { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = text; return b; }
