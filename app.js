@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v171";
-const BUILD_STAMP = "2026-07-30 21:36:00";
+const BUILD_VERSION = "v172";
+const BUILD_STAMP = "2026-07-30 21:49:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -10196,19 +10196,28 @@ function updateArDebugHud() {
   arHudEl.style.display = "block";
   const azDeg = (arOrbitAz * 180 / Math.PI);
   const elDeg = (arOrbitEl * 180 / Math.PI);
-  let fwd = "n/a";
+  let fwd = "n/a", model = "n/a";
   if (arRendererCamera && typeof THREE !== "undefined") {
     const v = arRendererCamera.getWorldDirection(new THREE.Vector3());
-    fwd = `${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)}`;
+    fwd = `${v.x.toFixed(3)}, ${v.y.toFixed(3)}, ${v.z.toFixed(3)}`;
+    // Project the model center to normalized device coords. If the model is on
+    // screen, ndc x,y are within [-1,1] and z<1. As you rotate, ndc.x should
+    // sweep across the screen — that proves the model tracks the camera.
+    if (arOrbitCenter) {
+      const p = arOrbitCenter.clone().project(arRendererCamera);
+      const onScreen = p.x >= -1 && p.x <= 1 && p.y >= -1 && p.y <= 1 && p.z < 1;
+      model = `${onScreen ? "ON " : "off"} x${p.x.toFixed(2)} y${p.y.toFixed(2)}`;
+    }
   }
   const src = arOrientAbsolute ? "ABS/compass" : (arHasOrientation ? "relative" : "none");
   const rawA = (arDeviceOrientation && isFinite(arDeviceOrientation.alpha)) ? arDeviceOrientation.alpha.toFixed(0) : "-";
   const rawB = (arDeviceOrientation && isFinite(arDeviceOrientation.beta)) ? arDeviceOrientation.beta.toFixed(0) : "-";
   arHudEl.textContent =
-    `AZ ${azDeg.toFixed(1)}\u00b0  EL ${elDeg.toFixed(1)}\u00b0\n` +
+    `AZ ${azDeg.toFixed(2)}\u00b0  EL ${elDeg.toFixed(2)}\u00b0\n` +
     `raw alpha ${rawA}  beta ${rawB}\n` +
     `cam fwd ${fwd}\n` +
-    `src ${src}  scr ${(arScreenAngleRad*180/Math.PI).toFixed(0)}\u00b0  fps ${arRenderFps.toFixed(1)}`;
+    `model ${model}\n` +
+    `src ${src}  fps ${arRenderFps.toFixed(1)}`;
 }
 
 // ── DOM helpers ───────────────────────────────────────────────────────────────
