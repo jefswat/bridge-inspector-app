@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v173";
-const BUILD_STAMP = "2026-07-30 21:58:00";
+const BUILD_VERSION = "v174";
+const BUILD_STAMP = "2026-07-30 22:05:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -339,6 +339,8 @@ let arScreenAngleRad       = 0;     // screen-orientation offset (radians)
 const AR_DEFAULT_CAMERA_HFOV_DEG = 82;
 let arCameraHFovDeg        = (() => { const v = parseFloat(localStorage.getItem("arCameraHFovDeg")); return isFinite(v) && v > 20 && v < 160 ? v : AR_DEFAULT_CAMERA_HFOV_DEG; })();
 let arCameraFovSource      = "default 82\u00b0 (H)";
+let arPoseMode             = "init";  // "geo" = anchored to your GPS position, "test" = fallback framing
+let arEyeHeightM           = 1.6;     // standing eye height above the reference elevation
 // AR orbit controls (drag to rotate / wheel to zoom the test view)
 let arOrbitInitialized     = false;
 let arOrbitCenter          = null; // THREE.Vector3 (lazy) - model center
@@ -1969,6 +1971,30 @@ function detectArCameraHFovDeg(track) {
   return null;
 }
 
+// Anchor the AR eye to YOUR real world position. Returns true when the eye was
+// successfully placed from geographic coordinates. Keeps the same scene-space
+// eye/az/el model used by applyArViewCamera so the plan view stays in sync.
+function updateArEyeFromGeo(lat, lon, alt) {
+  if (!arGeoReady() || !isFinite(lat) || !isFinite(lon)) return false;
+  const g = ifcViewer.georef;
+  const def = IFCViewer.CRS_DEFS[g.epsg];
+  if (def && !window.proj4.defs(g.epsg)) window.proj4.defs(g.epsg, def);
+  let E, N;
+  try {
+    const r = window.proj4("WGS84", g.epsg, [lon, lat]);
+    E = r[0]; N = r[1];
+  } catch (e) { console.warn("[ar] proj4 failed:", e); return false; }
+  if (!isFinite(E) || !isFinite(N)) return false;
+  const baseElev = (alt != null && isFinite(alt))
+    ? alt
+    : (ifcViewer.modelElevCenterM != null ? ifcViewer.modelElevCenterM : 0);
+  const p = arENToScene(E + arPanX, N + arPanY, baseElev + arEyeHeightM);
+  if (!p || !isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) return false;
+  if (!arEyePos) arEyePos = new THREE.Vector3();
+  arEyePos.copy(p);
+  return true;
+}
+
 function applyArViewCamera() {
   // True AR: camera stays at YOUR fixed eye position; dragging only rotates the
   // view direction (yaw/pitch) about that eye — like turning your head.
@@ -2631,24 +2657,29 @@ function renderArScene() {
 
 function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
   if (!ifcViewer || !ifcViewer.scene || !arRenderer) return;
-  // Test-first: always frame the loaded model so it is guaranteed visible,
-  // regardless of georeference. We render ifcViewer.scene directly (no clone).
-  if (frameArModelForTest()) {
+  // Ensure model bounds / plan-view data exist (also seeds a fallback eye).
+  const framed = frameArModelForTest();
+  // GEO-FIRST: stand the camera at your true position so the overlay lines up
+  // with the real world. Falls back to test framing when there is no location
+  // or no georeference, so the model can never disappear entirely.
+  if (updateArEyeFromGeo(lat, lon, alt)) {
+    arPoseMode = "geo";
+    applyArViewCamera();
+    if (arStatusMessage) arStatusMessage.textContent = "AR geo overlay active - anchored to your GPS position.";
+    renderArScene();
+    drawArMiniMap();
+    return;
+  }
+  if (framed) {
+    arPoseMode = "test";
     if (arStatusMessage) {
-      arStatusMessage.textContent = "AR active - drag to move, pinch/wheel forward, use buttons for elevation & turn.";
+      arStatusMessage.textContent = "AR test framing (no GPS/georeference) - drag to move, pinch to walk.";
     }
     renderArScene();
     drawArMiniMap();
     return;
   }
-  if (arSelectedLocationIsManual) {
-    const posed = positionArCameraFromGeo(lat, lon, heading, pitch, alt);
-    if (posed) {
-      if (arStatusMessage) arStatusMessage.textContent = "AR geo overlay active.";
-      renderArScene();
-      return;
-    }
-  }
+  arPoseMode = "none";
   if (arStatusMessage) arStatusMessage.textContent = "Model not ready for AR yet.";
 }
 
@@ -10274,6 +10305,7 @@ function updateArDebugHud() {
     `cam fwd ${fwd}\n` +
     `model ${model}\n` +
     `fov H${(arCameraHFovDeg||0).toFixed(0)} V${arRendererCamera ? arRendererCamera.fov.toFixed(0) : "-"} ${arCameraFovSource}\n` +
+    `pose ${arPoseMode}\n` +
     `src ${src}  fps ${arRenderFps.toFixed(1)}`;
 }
 
