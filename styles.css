@@ -1658,7 +1658,72 @@ select {
   opacity: 1;
   mix-blend-mode: normal;
   z-index: 2;
-  background: #020617;
+  background: transparent;
+}
+
+.ar-minimap-wrap {
+  position: absolute;
+  bottom: 46px;
+  left: 8px;
+  z-index: 4;
+  background: rgba(0, 0, 0, 0.65);
+  padding: 6px;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  backdrop-filter: blur(4px);
+  text-align: center;
+}
+
+#arMiniMap {
+  display: block;
+  width: 130px;
+  height: 130px;
+  border-radius: 4px;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.ar-minimap-label {
+  font-size: 0.62rem;
+  color: #94a3b8;
+  margin-top: 3px;
+}
+
+.ar-move-controls {
+  position: absolute;
+  bottom: 46px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  z-index: 4;
+  background: rgba(0, 0, 0, 0.65);
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  backdrop-filter: blur(4px);
+}
+
+.ar-move-group {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+}
+
+.ar-move-group .ar-move-title {
+  flex-basis: 100%;
+  text-align: center;
+  font-size: 0.6rem;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.ar-move-group .ar-control-btn {
+  width: 36px;
+  height: 32px;
 }
 
 .ar-location-display {

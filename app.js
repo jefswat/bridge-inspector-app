@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v166";
-const BUILD_STAMP = "2026-07-30 19:12:00";
+const BUILD_VERSION = "v167";
+const BUILD_STAMP = "2026-07-30 19:24:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -282,6 +282,14 @@ const arPanLeftBtn         = document.getElementById("arPanLeftBtn");
 const arPanRightBtn        = document.getElementById("arPanRightBtn");
 const arPanUpBtn           = document.getElementById("arPanUpBtn");
 const arPanDownBtn         = document.getElementById("arPanDownBtn");
+const arCameraToggleBtn    = document.getElementById("arCameraToggleBtn");
+const arMiniMap            = document.getElementById("arMiniMap");
+const arElevUpBtn          = document.getElementById("arElevUpBtn");
+const arElevDownBtn        = document.getElementById("arElevDownBtn");
+const arTurnLeftBtn        = document.getElementById("arTurnLeftBtn");
+const arTurnRightBtn       = document.getElementById("arTurnRightBtn");
+const arFwdBtn             = document.getElementById("arFwdBtn");
+const arBackBtn            = document.getElementById("arBackBtn");
 const arStatusMessage      = document.getElementById("arStatusMessage");
 const arUseCurrentLocation = document.getElementById("arUseCurrentLocation");
 const arSelectLocationButton = document.getElementById("arSelectLocationButton");
@@ -326,6 +334,14 @@ let arOrbitDragging        = false;
 let arOrbitLastX           = 0;
 let arOrbitLastY           = 0;
 let arOrbitControlsBound   = false;
+// AR first-person controls
+let arCameraEnabled        = true;  // live camera overlay default ON
+let arHasOrientation       = false; // true once device orientation drives the look
+let arModelBoundsXY        = null;  // {minx,maxx,miny,maxy} model footprint (scene X/Y)
+let arMiniCtx              = null;
+let arMiniDragging         = false;
+const arPointers           = new Map(); // active pointerId -> {x,y} for pinch
+let arPinchLastDist        = 0;
 const AR_RENDER_HZ         = 30;
 const AR_RENDER_INTERVAL_MS = 1000 / AR_RENDER_HZ;
 
@@ -1656,6 +1672,14 @@ function registerEvents() {
   if (arPanRightBtn) arPanRightBtn.addEventListener("click", () => { arPanX += arPanStep; });
   if (arPanUpBtn) arPanUpBtn.addEventListener("click", () => { arPanY += arPanStep; });
   if (arPanDownBtn) arPanDownBtn.addEventListener("click", () => { arPanY -= arPanStep; });
+  // First-person AR controls
+  if (arCameraToggleBtn) arCameraToggleBtn.addEventListener("click", () => setArCameraEnabled(!arCameraEnabled));
+  if (arElevUpBtn) arElevUpBtn.addEventListener("click", () => { if (arEyePos) arEyePos.z += (arOrbitRadius || 1) * 0.05; });
+  if (arElevDownBtn) arElevDownBtn.addEventListener("click", () => { if (arEyePos) arEyePos.z -= (arOrbitRadius || 1) * 0.05; });
+  if (arTurnLeftBtn) arTurnLeftBtn.addEventListener("click", () => { arOrbitAz += 0.15; });
+  if (arTurnRightBtn) arTurnRightBtn.addEventListener("click", () => { arOrbitAz -= 0.15; });
+  if (arFwdBtn) arFwdBtn.addEventListener("click", () => arMoveForward((arOrbitRadius || 1) * 0.08));
+  if (arBackBtn) arBackBtn.addEventListener("click", () => arMoveForward(-(arOrbitRadius || 1) * 0.08));
 }
 
 
@@ -1710,11 +1734,13 @@ async function openArViewModal() {
   arRenderSampleStartMs = performance.now();
   arRenderFps = 0;
   // Camera ON: live feed behind a transparent 3D overlay (true AR).
+  arCameraEnabled = true;
   startArCameraFeed();
   if (arCameraVideo) {
     arCameraVideo.style.display = "";
     arCameraVideo.style.zIndex = "1";
   }
+  if (arCameraToggleBtn) arCameraToggleBtn.textContent = "📷 Camera: On";
   if (arOverlayCanvas) {
     arOverlayCanvas.style.opacity = "1";
     arOverlayCanvas.style.zIndex = "2";
@@ -1758,9 +1784,13 @@ async function openArViewModal() {
     setStatus("Device orientation not available on this device.");
   }
   
-  // Reset AR view for this session and enable drag-to-look controls.
+  // Reset AR view for this session and enable first-person controls.
   arOrbitInitialized = false;
   arOrbitDragging = false;
+  arHasOrientation = false;
+  arModelBoundsXY = null;
+  arPointers.clear();
+  arPinchLastDist = 0;
   arEyePos = null;
   setupArOrbitControls();
 
@@ -1883,6 +1913,8 @@ function frameArModelForTest() {
     box.getCenter(arOrbitCenter);
     const size = box.getSize(new THREE.Vector3());
     arOrbitRadius = Math.max(size.x, size.y, size.z, ifcViewer.modelRadius || 1) || 1;
+    // Model footprint (top-down X/Y) for the mini plan view.
+    arModelBoundsXY = { minx: box.min.x, maxx: box.max.x, miny: box.min.y, maxy: box.max.y };
     // Place YOUR eye a standoff back from the model center, looking toward it.
     arOrbitAz = 0;   // look along +X initially
     arOrbitEl = 0;
@@ -1898,6 +1930,21 @@ function frameArModelForTest() {
   return true;
 }
 
+// Ground-plane forward/right unit vectors for the current heading (world Z-up).
+function arGroundVectors() {
+  const az = arOrbitAz;
+  return {
+    fwd: new THREE.Vector3(Math.cos(az), Math.sin(az), 0),
+    right: new THREE.Vector3(Math.sin(az), -Math.cos(az), 0),
+  };
+}
+
+function arMoveForward(dist) {
+  if (!arEyePos) return;
+  const { fwd } = arGroundVectors();
+  arEyePos.addScaledVector(fwd, dist);
+}
+
 function setupArOrbitControls() {
   if (!arOverlayCanvas || arOrbitControlsBound) return;
   arOrbitControlsBound = true;
@@ -1905,45 +1952,173 @@ function setupArOrbitControls() {
   arOverlayCanvas.addEventListener("pointerdown", onArOrbitPointerDown);
   arOverlayCanvas.addEventListener("pointermove", onArOrbitPointerMove);
   window.addEventListener("pointerup", onArOrbitPointerUp);
+  window.addEventListener("pointercancel", onArOrbitPointerUp);
   arOverlayCanvas.addEventListener("wheel", onArOrbitWheel, { passive: false });
+  // Mini plan-view: drag the arrow to change AR position.
+  if (arMiniMap) {
+    arMiniCtx = arMiniMap.getContext("2d");
+    arMiniMap.style.touchAction = "none";
+    arMiniMap.addEventListener("pointerdown", onArMiniPointerDown);
+    arMiniMap.addEventListener("pointermove", onArMiniPointerMove);
+    window.addEventListener("pointerup", () => { arMiniDragging = false; });
+  }
 }
 
 function onArOrbitPointerDown(e) {
-  arOrbitDragging = true;
-  arOrbitLastX = e.clientX;
-  arOrbitLastY = e.clientY;
+  arPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (arPointers.size === 1) {
+    arOrbitDragging = true;
+    arOrbitLastX = e.clientX;
+    arOrbitLastY = e.clientY;
+  } else if (arPointers.size === 2) {
+    arOrbitDragging = false; // second finger down -> pinch mode
+    arPinchLastDist = arPinchDistance();
+  }
   try { arOverlayCanvas.setPointerCapture(e.pointerId); } catch (_) {}
 }
 
+function arPinchDistance() {
+  const pts = Array.from(arPointers.values());
+  if (pts.length < 2) return 0;
+  return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+}
+
 function onArOrbitPointerMove(e) {
-  if (!arOrbitDragging) return;
+  if (arPointers.has(e.pointerId)) arPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  // Two fingers: pinch = move forward/back (zoom).
+  if (arPointers.size >= 2) {
+    const d = arPinchDistance();
+    if (arPinchLastDist > 0 && d > 0) {
+      const delta = d - arPinchLastDist;
+      arMoveForward(delta * (arOrbitRadius / 300));
+    }
+    arPinchLastDist = d;
+    return;
+  }
+
+  // One finger / mouse drag: fine-tune position (strafe on the ground plane).
+  if (!arOrbitDragging || !arEyePos) return;
   const dx = e.clientX - arOrbitLastX;
   const dy = e.clientY - arOrbitLastY;
   arOrbitLastX = e.clientX;
   arOrbitLastY = e.clientY;
-  // Turn your head: drag rotates the view direction about your fixed position.
-  arOrbitAz -= dx * 0.005;
-  arOrbitEl += dy * 0.005;
-  arOrbitEl = Math.max(-1.4, Math.min(1.4, arOrbitEl));
+  const { fwd, right } = arGroundVectors();
+  const s = (arOrbitRadius || 1) / Math.max(160, arOverlayCanvas.clientHeight || 400);
+  arEyePos.addScaledVector(right, dx * s);   // drag right -> strafe right
+  arEyePos.addScaledVector(fwd, -dy * s);    // drag up -> move forward
 }
 
-function onArOrbitPointerUp() {
-  arOrbitDragging = false;
+function onArOrbitPointerUp(e) {
+  if (e && arPointers.has(e.pointerId)) arPointers.delete(e.pointerId);
+  if (arPointers.size < 2) arPinchLastDist = 0;
+  if (arPointers.size === 0) arOrbitDragging = false;
 }
 
 function onArOrbitWheel(e) {
-  // Wheel = step forward/back along your current view direction (walk).
+  // Wheel = step forward/back along your current heading (walk).
   e.preventDefault();
-  if (!arEyePos) return;
-  const el = Math.max(-1.4, Math.min(1.4, arOrbitEl));
-  const dir = new THREE.Vector3(
-    Math.cos(el) * Math.cos(arOrbitAz),
-    Math.cos(el) * Math.sin(arOrbitAz),
-    Math.sin(el)
-  );
-  const step = -Math.sign(e.deltaY) * (arOrbitRadius * 0.08);
-  arEyePos.addScaledVector(dir, step);
+  arMoveForward(-Math.sign(e.deltaY) * (arOrbitRadius * 0.08));
 }
+
+// ── Mini plan-view (top-down) with draggable position arrow ──
+function arMiniToModel(cx, cy) {
+  if (!arModelBoundsXY || !arMiniMap) return null;
+  const pad = 14;
+  const W = arMiniMap.width, H = arMiniMap.height;
+  const b = arModelBoundsXY;
+  const fx = Math.min(1, Math.max(0, (cx - pad) / Math.max(1, W - 2 * pad)));
+  const fy = Math.min(1, Math.max(0, (cy - pad) / Math.max(1, H - 2 * pad)));
+  return {
+    x: b.minx + fx * (b.maxx - b.minx),
+    y: b.maxy - fy * (b.maxy - b.miny), // invert: north (max Y) at top
+  };
+}
+
+function arModelToMini(x, y) {
+  const pad = 14;
+  const W = arMiniMap.width, H = arMiniMap.height;
+  const b = arModelBoundsXY;
+  const fx = (x - b.minx) / Math.max(1e-6, b.maxx - b.minx);
+  const fy = (b.maxy - y) / Math.max(1e-6, b.maxy - b.miny);
+  return { cx: pad + fx * (W - 2 * pad), cy: pad + fy * (H - 2 * pad) };
+}
+
+function onArMiniPointerDown(e) {
+  arMiniDragging = true;
+  arMiniSetFromEvent(e);
+  try { arMiniMap.setPointerCapture(e.pointerId); } catch (_) {}
+}
+
+function onArMiniPointerMove(e) {
+  if (!arMiniDragging) return;
+  arMiniSetFromEvent(e);
+}
+
+function arMiniSetFromEvent(e) {
+  if (!arEyePos || !arMiniMap) return;
+  const rect = arMiniMap.getBoundingClientRect();
+  const cx = (e.clientX - rect.left) * (arMiniMap.width / rect.width);
+  const cy = (e.clientY - rect.top) * (arMiniMap.height / rect.height);
+  const m = arMiniToModel(cx, cy);
+  if (m) { arEyePos.x = m.x; arEyePos.y = m.y; }
+}
+
+function drawArMiniMap() {
+  if (!arMiniCtx || !arModelBoundsXY || !arEyePos) return;
+  const ctx = arMiniCtx;
+  const W = arMiniMap.width, H = arMiniMap.height, pad = 14;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "rgba(2,6,23,0.72)";
+  ctx.fillRect(0, 0, W, H);
+  // Footprint rectangle
+  ctx.strokeStyle = "#38bdf8";
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(pad, pad, W - 2 * pad, H - 2 * pad);
+  ctx.fillStyle = "rgba(56,189,248,0.12)";
+  ctx.fillRect(pad, pad, W - 2 * pad, H - 2 * pad);
+  // "N" indicator (north = +Y = top)
+  ctx.fillStyle = "#94a3b8";
+  ctx.font = "10px sans-serif";
+  ctx.fillText("N", W / 2 - 3, 11);
+  // Position arrow
+  const p = arModelToMini(arEyePos.x, arEyePos.y);
+  const az = arOrbitAz;
+  const hx = Math.cos(az), hy = -Math.sin(az); // screen: +Y is down
+  const L = 12;
+  ctx.strokeStyle = "#f59e0b";
+  ctx.fillStyle = "#f59e0b";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(p.cx, p.cy, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(p.cx, p.cy);
+  ctx.lineTo(p.cx + hx * L, p.cy + hy * L);
+  ctx.stroke();
+  // Arrow head
+  const ah = 4;
+  const ang = Math.atan2(hy, hx);
+  ctx.beginPath();
+  ctx.moveTo(p.cx + hx * L, p.cy + hy * L);
+  ctx.lineTo(p.cx + hx * L - ah * Math.cos(ang - 0.5), p.cy + hy * L - ah * Math.sin(ang - 0.5));
+  ctx.lineTo(p.cx + hx * L - ah * Math.cos(ang + 0.5), p.cy + hy * L - ah * Math.sin(ang + 0.5));
+  ctx.closePath();
+  ctx.fill();
+}
+
+function setArCameraEnabled(on) {
+  arCameraEnabled = on;
+  if (on) {
+    startArCameraFeed();
+    if (arCameraVideo) arCameraVideo.style.display = "";
+  } else {
+    stopArCameraFeed();
+    if (arCameraVideo) arCameraVideo.style.display = "none";
+  }
+  if (arCameraToggleBtn) arCameraToggleBtn.textContent = on ? "📷 Camera: On" : "📷 Camera: Off";
+}
+
 
 function positionArCameraFromGeo(lat, lon, heading, attitude, altitude) {
   const g = ifcViewer?.georef;
@@ -2001,6 +2176,13 @@ function onDeviceOrientation(event) {
     beta: event.beta || 0,    // X rotation (pitch), -180 to 180
     gamma: event.gamma || 0   // Y rotation (roll), -90 to 90
   };
+  // On a phone, physically turning/tilting the device drives the look direction.
+  if (event.alpha != null || event.beta != null) {
+    arHasOrientation = true;
+    arOrbitAz = -(event.alpha || 0) * Math.PI / 180;           // compass heading
+    const el = ((event.beta || 0) - 90) * Math.PI / 180;       // 90 = horizon
+    arOrbitEl = Math.max(-1.4, Math.min(1.4, el));
+  }
 }
 
 function startArRenderLoop() {
@@ -2081,9 +2263,10 @@ function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
   // regardless of georeference. We render ifcViewer.scene directly (no clone).
   if (frameArModelForTest()) {
     if (arStatusMessage) {
-      arStatusMessage.textContent = "AR active - drag to look around, wheel to step forward/back.";
+      arStatusMessage.textContent = "AR active - drag to move, pinch/wheel forward, use buttons for elevation & turn.";
     }
     renderArScene();
+    drawArMiniMap();
     return;
   }
   if (arSelectedLocationIsManual) {
