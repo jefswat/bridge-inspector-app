@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v175";
-const BUILD_STAMP = "2026-07-30 22:20:00";
+const BUILD_VERSION = "v176";
+const BUILD_STAMP = "2026-07-30 22:55:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -345,7 +345,8 @@ let arGeoFailReason        = "";
 // which renders a tabletop-sized scale model - useful only for desk demos, so
 // it is OFF by default and must be explicitly enabled.
 let arDemoFraming          = (localStorage.getItem("arDemoFraming") === "1");
-let arPoseMode             = "init";  // "geo" = anchored to your GPS position, "test" = fallback framing
+let arPoseMode             = "init";  // "geo" = live GPS/RTK anchor, "test" = manual true-scale placement, "demo" = tabletop, "none"
+let arEyeSeeded            = false;    // test mode: true once the eye has been placed, so Move/Turn/Elev persist frame-to-frame
 let arEyeHeightM           = 1.6;     // standing eye height above the reference elevation
 let arElevOffsetM          = 0;       // manual elevation trim from the ELEVATION buttons
 // AR orbit controls (drag to rotate / wheel to zoom the test view)
@@ -1683,15 +1684,23 @@ function registerEvents() {
       arSelectedLocationIsManual = true;
       arSelectedLocationName = `${arPickerSelectedLat.toFixed(5)}, ${arPickerSelectedLng.toFixed(5)}`;
       arUseCurrentLocation.checked = false;
+      arEyeSeeded = false; // re-teleport the test eye to the newly picked spot
       closeArLocationPickerModal();
       setStatus(`AR location set to ${arSelectedLocationName}`);
     }
   });
   if (arUseCurrentLocation) arUseCurrentLocation.addEventListener("change", () => {
     if (arUseCurrentLocation.checked) {
-      setStatus("AR view will use current device location when available.");
+      setStatus("AR view will use live device GPS (best with an RTK fix).");
+      if (typeof acquireGeoAndHeading === "function" && !currentLocation) {
+        try { void acquireGeoAndHeading(); } catch (e) { console.warn("[ar] geo acquire:", e); }
+      }
     } else {
-      if (!arSelectedLocation) setStatus("Please select a location for AR view.");
+      // Switching to manual/test mode: keep wherever the eye currently is so the
+      // view doesn't jump, then let the Move/Turn/Elev controls walk from there.
+      arEyeSeeded = !!arEyePos;
+      if (!arSelectedLocation) setStatus("Test mode: use 📍 Select location to stand near the bridge, then Move/Turn/Elev to walk around.");
+      else setStatus("Test mode (no GPS): true-scale placement — Move/Turn/Elev to walk around.");
     }
   });
   if (arOpacitySlider) arOpacitySlider.addEventListener("input", () => {
@@ -1819,14 +1828,10 @@ async function openArViewModal() {
   // over the relative "deviceorientation" event to avoid drift.
   try { window.addEventListener("deviceorientationabsolute", onDeviceOrientation); } catch (_) {}
   
-  // Prefer real-world anchoring: if we have (or can get) a GPS fix and no
-  // manual location was chosen, turn on "Use current location" automatically.
-  if (arUseCurrentLocation && !arSelectedLocationIsManual && !arUseCurrentLocation.checked) {
-    arUseCurrentLocation.checked = true;
-  }
-  if (typeof acquireGeoAndHeading === "function" && !currentLocation) {
-    try { void acquireGeoAndHeading(); } catch (e) { console.warn("[ar] geo acquire:", e); }
-  }
+  // Default to the stable, true-scale TEST mode (no GPS) so the overlay is
+  // usable without an RTK fix. The user ticks "Use current location" to switch
+  // to live GPS/RTK anchoring when they have a good fix.
+  if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
 
   // Reset AR view for this session and enable first-person controls.
   arOrbitInitialized = false;
@@ -1844,6 +1849,8 @@ async function openArViewModal() {
   arPointers.clear();
   arPinchLastDist = 0;
   arEyePos = null;
+  arEyeSeeded = false;
+  arElevOffsetM = 0;
   setupArOrbitControls();
 
   // Start render loop
@@ -2699,33 +2706,72 @@ function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
   if (!ifcViewer || !ifcViewer.scene || !arRenderer) return;
   // Ensure model bounds / plan-view data exist (also seeds a fallback eye).
   const framed = frameArModelForTest();
-  // GEO ONLY: stand the camera at your true GPS position so the overlay lines
-  // up with the real bridge at real scale. There is deliberately no automatic
-  // scale-model fallback - a plausible-looking tabletop render would hide the
-  // fact that the overlay is not actually anchored to anything.
-  if (updateArEyeFromGeo(lat, lon, alt)) {
-    arPoseMode = "geo";
-    applyArViewCamera();
-    if (arStatusMessage) arStatusMessage.textContent = "AR geo overlay active - anchored to your GPS position.";
-    renderArScene();
+
+  // Live GPS/RTK mode: only when the user asked for it AND a real fix exists.
+  const liveGps = !!(arUseCurrentLocation && arUseCurrentLocation.checked
+    && currentLocation && isFinite(currentLocation.lat) && isFinite(currentLocation.lng));
+
+  if (liveGps) {
+    // Anchor the eye to your true position every frame so the overlay lines up
+    // with the real bridge at real scale. Without RTK the fix jitters, hence the
+    // manual test mode below.
+    if (updateArEyeFromGeo(lat, lon, alt)) {
+      arPoseMode = "geo";
+      arEyeSeeded = true;
+      applyArViewCamera();
+      if (arStatusMessage) arStatusMessage.textContent = "AR geo overlay active - anchored to your live GPS position.";
+      renderArScene();
+      drawArMiniMap();
+      return;
+    }
+    if (arStatusMessage) {
+      arStatusMessage.textContent = "AR needs your position: " + (arGeoFailReason || "waiting for GPS")
+        + ". Stand near the bridge with location enabled, or untick 'Use current location' to test.";
+    }
+    arPoseMode = "none";
+    if (arRenderer) arRenderer.clear();
     drawArMiniMap();
     return;
   }
-  if (arDemoFraming && framed) {
-    arPoseMode = "demo";
+
+  // ── Non-GPS TEST mode (true scale) ──────────────────────────────────────
+  // Place the eye ONCE at the selected location using the same real-world georef
+  // transform (so scale is 1:1 and, standing close, you only see part of the
+  // structure). After that the eye persists, so the Move / Turn / Elevation
+  // buttons, drag, and the plan-view dots walk you around without being reset
+  // to the anchor each frame.
+  if (!arEyeSeeded) {
+    if (updateArEyeFromGeo(lat, lon, alt)) {
+      arEyeSeeded = true;              // seeded at true real-world scale
+    } else if (arEyePos) {
+      arEyeSeeded = true;              // no georef: fall back to the scene-space eye from framing
+    }
+  }
+  if (arEyePos) {
+    arPoseMode = "test";
+    applyArViewCamera();
     if (arStatusMessage) {
-      arStatusMessage.textContent = "DEMO framing (not real scale) - for desk testing only.";
+      arStatusMessage.textContent = arGeoReady()
+        ? "Test mode (no GPS) - true scale. Use Move / Turn / Elevation to walk around; drag the plan-view dots to reposition."
+        : "Test mode - model has no georeference, so scale is approximate. Use Move / Turn / Elevation to walk around.";
     }
     renderArScene();
     drawArMiniMap();
     return;
   }
-  // Real-world AR could not be anchored. Say exactly why instead of silently
-  // drawing a tabletop-sized model that looks plausible but is meaningless.
+
+  // Optional legacy tabletop demo (off by default; not true scale).
+  if (arDemoFraming && framed) {
+    arPoseMode = "demo";
+    if (arStatusMessage) arStatusMessage.textContent = "DEMO framing (not real scale) - for desk testing only.";
+    renderArScene();
+    drawArMiniMap();
+    return;
+  }
+
   arPoseMode = "none";
   if (arStatusMessage) {
-    arStatusMessage.textContent = "AR needs your position: " + (arGeoFailReason || "waiting for GPS")
-      + ". Stand near the bridge with location enabled.";
+    arStatusMessage.textContent = "AR could not place a viewpoint. Load the 3D model, then use 📍 Select location.";
   }
   if (arRenderer) arRenderer.clear();
   drawArMiniMap();
