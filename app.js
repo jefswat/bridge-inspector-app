@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v180";
-const BUILD_STAMP = "2026-07-31 01:20:00";
+const BUILD_VERSION = "v181";
+const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -364,6 +364,15 @@ let arOrbitControlsBound   = false;
 // AR first-person controls
 let arCameraEnabled        = true;  // live camera overlay default ON
 let arHasOrientation       = false; // true once device orientation drives the look
+// Test-mode phone-look anchoring: the phone's orientation drives the look, but
+// as a RELATIVE offset so "straight ahead" starts aimed at the bridge (instead
+// of pointing you off into empty space). Turn/drag adjust the offset so they
+// stack with the phone motion instead of being overwritten each sensor event.
+let arTestYawOffset        = 0;     // radians added to the phone yaw
+let arTestPitchOffset      = 0;     // radians added to the phone pitch
+let arTestLookAnchored     = false; // true once the offset has been captured
+let arTestAimAz            = null;  // initial look azimuth aimed at the model
+let arTestAimEl            = null;  // initial look elevation aimed at the model
 let arModelBoundsXY        = null;  // {minx,maxx,miny,maxy} model footprint (scene X/Y) — fallback mode
 let arModelFootprintXY     = null;  // convex-hull outline [{x,y}...] of the model footprint (scene X/Y) — fallback
 let arMiniView             = null;  // {minx,maxx,miny,maxy} square plan-view extent (E/N metres, or scene X/Y fallback)
@@ -1717,8 +1726,8 @@ function registerEvents() {
   if (arCameraToggleBtn) arCameraToggleBtn.addEventListener("click", () => setArCameraEnabled(!arCameraEnabled));
   if (arElevUpBtn) arElevUpBtn.addEventListener("click", () => { adjustArElevation(0.25); });
   if (arElevDownBtn) arElevDownBtn.addEventListener("click", () => { adjustArElevation(-0.25); });
-  if (arTurnLeftBtn) arTurnLeftBtn.addEventListener("click", () => { arOrbitAz += 0.15; });
-  if (arTurnRightBtn) arTurnRightBtn.addEventListener("click", () => { arOrbitAz -= 0.15; });
+  if (arTurnLeftBtn) arTurnLeftBtn.addEventListener("click", () => { arApplyLookYaw(0.15); });
+  if (arTurnRightBtn) arTurnRightBtn.addEventListener("click", () => { arApplyLookYaw(-0.15); });
   if (arFwdBtn) arFwdBtn.addEventListener("click", () => arMoveForward(arMetersToUnits(2)));
   if (arBackBtn) arBackBtn.addEventListener("click", () => arMoveForward(-arMetersToUnits(2)));
 }
@@ -1851,6 +1860,11 @@ async function openArViewModal() {
   arEyePos = null;
   arEyeSeeded = false;
   arElevOffsetM = 0;
+  arTestLookAnchored = false;
+  arTestYawOffset = 0;
+  arTestPitchOffset = 0;
+  arTestAimAz = null;
+  arTestAimEl = null;
   setupArOrbitControls();
 
   // Start render loop
@@ -2126,11 +2140,15 @@ function frameArModelForTest() {
       alongX ? (arOrbitCenter.y - standoff) : arOrbitCenter.y,
       box.min.z + eyeHeightU
     );
-    // Start AIMED at the bridge so it is on-screen immediately (in manual test
-    // mode the compass no longer points the camera, so we set the look here).
+    // Start AIMED at the bridge so it is on-screen immediately. In test mode the
+    // phone drives the look as a relative offset from this aim (see
+    // onDeviceOrientation), so record it and re-anchor the offset next reading.
     const look0 = arOrbitCenter.clone().sub(arEyePos);
     arOrbitAz = Math.atan2(look0.y, look0.x);
     arOrbitEl = Math.max(-1.4, Math.min(1.4, Math.atan2(look0.z, Math.hypot(look0.x, look0.y))));
+    arTestAimAz = arOrbitAz;
+    arTestAimEl = arOrbitEl;
+    arTestLookAnchored = false;   // re-capture phone offset now that we have an aim
     arOrbitInitialized = true;
   }
   applyArViewCamera();
@@ -2205,8 +2223,8 @@ function onArOrbitPointerMove(e) {
   }
 
   // One finger / mouse drag:
-  //  - manual TEST mode: LOOK around (yaw + pitch) so you can find/aim at the
-  //    bridge, since the compass no longer steers the camera.
+  //  - manual TEST mode: LOOK around (yaw + pitch). When the phone is anchoring
+  //    the look, this nudges the offset so it stacks with the phone motion.
   //  - live GPS mode: fine-tune position (strafe) on the ground plane.
   if (!arOrbitDragging || !arEyePos) return;
   const dx = e.clientX - arOrbitLastX;
@@ -2215,8 +2233,8 @@ function onArOrbitPointerMove(e) {
   arOrbitLastY = e.clientY;
   if (!arLiveGpsActive()) {
     const lookSpeed = 0.005;             // radians per pixel
-    arOrbitAz -= dx * lookSpeed;         // drag right -> look right
-    arOrbitEl = Math.max(-1.4, Math.min(1.4, arOrbitEl - dy * lookSpeed)); // drag up -> look up
+    arApplyLookYaw(-dx * lookSpeed);     // drag right -> look right
+    arApplyLookPitch(-dy * lookSpeed);   // drag up -> look up
     return;
   }
   const { fwd, right } = arGroundVectors();
@@ -2269,6 +2287,22 @@ function arMetersToUnits(m) {
 function arLiveGpsActive() {
   return !!(arUseCurrentLocation && arUseCurrentLocation.checked
     && currentLocation && isFinite(currentLocation.lat) && isFinite(currentLocation.lng));
+}
+
+// Apply a yaw/pitch nudge (Turn buttons, drag) to the LOOK direction. When the
+// phone is anchoring the look in test mode, adjust the relative offset so the
+// nudge stacks with the phone motion instead of being overwritten each sensor
+// event. Otherwise (no gyro, or live GPS) adjust the absolute angle directly.
+function arTestPhoneLookActive() {
+  return arHasOrientation && !arLiveGpsActive();
+}
+function arApplyLookYaw(delta) {
+  if (arTestPhoneLookActive()) arTestYawOffset += delta;
+  else arOrbitAz += delta;
+}
+function arApplyLookPitch(delta) {
+  if (arTestPhoneLookActive()) arTestPitchOffset += delta;
+  else arOrbitEl = Math.max(-1.4, Math.min(1.4, arOrbitEl + delta));
 }
 
 // Scene-world point -> map easting/northing (metres) + model elevation.
@@ -2677,11 +2711,23 @@ function onDeviceOrientation(event) {
   arYawSmoothed = smoothAngle(arYawSmoothed, rawAz, 0.25);
   arPitchSmoothed = (arPitchSmoothed == null || !isFinite(arPitchSmoothed))
     ? rawEl : (arPitchSmoothed + 0.25 * (rawEl - arPitchSmoothed));
-  // Only let the phone drive the view in live GPS/RTK mode. In manual TEST mode
-  // the Turn / Elevation buttons and drag control the look, so leave them alone.
+  // Drive the look from the phone in BOTH modes:
+  //  - live GPS/RTK: the phone yaw/pitch map directly to the world (real AR).
+  //  - test mode: the phone drives the look as a RELATIVE offset anchored so
+  //    the first reading points at the bridge, so moving the phone looks around
+  //    naturally without ever aiming you off into empty space.
   if (arLiveGpsActive()) {
     arOrbitAz = arYawSmoothed;
     arOrbitEl = Math.max(-1.4, Math.min(1.4, arPitchSmoothed));
+  } else if (arTestAimAz != null && isFinite(arYawSmoothed) && isFinite(arPitchSmoothed)) {
+    // Capture the offset once, so the current phone heading == aim at the model.
+    if (!arTestLookAnchored) {
+      arTestYawOffset = arTestAimAz - arYawSmoothed;
+      arTestPitchOffset = (arTestAimEl || 0) - arPitchSmoothed;
+      arTestLookAnchored = true;
+    }
+    arOrbitAz = arYawSmoothed + arTestYawOffset;
+    arOrbitEl = Math.max(-1.4, Math.min(1.4, arPitchSmoothed + arTestPitchOffset));
   }
 }
 
@@ -2810,7 +2856,7 @@ function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
       const unit = (ifcViewer && ifcViewer.lengthUnitName) ? ifcViewer.lengthUnitName : "metre";
       arStatusMessage.textContent = arGeoReady()
         ? "Test mode (no GPS) - true scale. Drag to look; Move/Turn/Elevation to walk; drag the plan-view dot to reposition."
-        : "Test mode (no GPS) - true 1:1 scale (unit: " + unit + "). Whole bridge is framed; PINCH or Forward to walk in (up close you only see part). Drag to look; Turn/Elevation and the plan-view dot to move.";
+        : "Test mode (no GPS) - true 1:1 scale (unit: " + unit + "). MOVE YOUR PHONE to look around (starts aimed at the bridge); PINCH or Forward to walk in; Turn/Elevation and the plan-view dot to move.";
     }
     renderArScene();
     drawArMiniMap();
