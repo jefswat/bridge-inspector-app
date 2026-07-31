@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v169";
-const BUILD_STAMP = "2026-07-30 21:05:00";
+const BUILD_VERSION = "v170";
+const BUILD_STAMP = "2026-07-30 21:25:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -7406,6 +7406,10 @@ function buildCard(record, photoNo) {
     const annotateBtn = makeButton("🖊 Annotate", "secondary");
     annotateBtn.addEventListener("click", () => openPhotoAnnotator(record));
     card.querySelector(".photo-actions").insertBefore(annotateBtn, card.querySelector(".download-btn"));
+
+    const gridRectifyBtn = makeButton("▦ Rectify (grid)", "secondary");
+    gridRectifyBtn.addEventListener("click", () => openGridRectify(record));
+    card.querySelector(".photo-actions").insertBefore(gridRectifyBtn, card.querySelector(".download-btn"));
     if (displayOverlayBlob) {
       const dlOverlay = makeButton("⬇ Photo+overlay", "secondary");
       dlOverlay.addEventListener("click", () => downloadPhoto(record, displayBlob, labels.overlay, true, true, displayOverlayBlob));
@@ -9736,6 +9740,290 @@ function renderAttitudeArea(container, record) {
     cn.addEventListener("click", () => renderAttitudeArea(container, record));
   });
 }
+
+// ── Grid rectify (perspective un-skew via a draggable laser grid) ─────────────
+// Fully client-side (works offline on Android). The user drags an N×N grid of
+// nodes onto the laser dots visible in a saved photo; we then piecewise-warp the
+// photo so those nodes map to a perfectly regular grid, producing a flat,
+// perspective-corrected image saved as a NEW photo in the same bridge.
+let gridRectifyRecord = null;
+let gridRectifyImg = null;       // full-res HTMLImageElement of the source photo
+let gridRectifyPoints = null;    // [{x,y}] in image pixel coords, length N*N (row-major)
+let gridRectifyN = 10;           // grid nodes per side
+let gridRectifyCanvas = null;
+let gridRectifyCtx = null;
+let gridRectifyScale = 1;        // displayed-canvas px per image px
+let gridRectifyDragIdx = -1;
+let gridRectifyBusy = false;
+
+function gridIdx(i, j) { return j * gridRectifyN + i; } // i=col, j=row
+
+function initGridRectifyPoints() {
+  const N = gridRectifyN;
+  const w = gridRectifyImg.naturalWidth, h = gridRectifyImg.naturalHeight;
+  const mx = w * 0.08, my = h * 0.08;           // inset from edges
+  const spanX = w - 2 * mx, spanY = h - 2 * my;
+  gridRectifyPoints = [];
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      gridRectifyPoints[gridIdx(i, j)] = {
+        x: mx + spanX * (i / (N - 1)),
+        y: my + spanY * (j / (N - 1)),
+      };
+    }
+  }
+}
+
+function layoutGridRectifyCanvas() {
+  const img = gridRectifyImg;
+  const body = gridRectifyCanvas.parentElement;
+  const maxW = Math.max(320, body.clientWidth - 16);
+  const maxH = Math.max(320, body.clientHeight - 16);
+  gridRectifyScale = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight, 1);
+  if (!isFinite(gridRectifyScale) || gridRectifyScale <= 0) gridRectifyScale = 1;
+  gridRectifyCanvas.width = Math.round(img.naturalWidth * gridRectifyScale);
+  gridRectifyCanvas.height = Math.round(img.naturalHeight * gridRectifyScale);
+}
+
+function drawGridRectify() {
+  if (!gridRectifyCtx || !gridRectifyImg || !gridRectifyPoints) return;
+  const ctx = gridRectifyCtx, s = gridRectifyScale, N = gridRectifyN;
+  ctx.clearRect(0, 0, gridRectifyCanvas.width, gridRectifyCanvas.height);
+  ctx.drawImage(gridRectifyImg, 0, 0, gridRectifyCanvas.width, gridRectifyCanvas.height);
+  // Grid lines
+  ctx.lineWidth = 1.2;
+  ctx.strokeStyle = "rgba(56,189,248,0.85)";
+  // rows
+  for (let j = 0; j < N; j++) {
+    ctx.beginPath();
+    for (let i = 0; i < N; i++) {
+      const p = gridRectifyPoints[gridIdx(i, j)];
+      const X = p.x * s, Y = p.y * s;
+      if (i === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
+    }
+    ctx.stroke();
+  }
+  // cols
+  for (let i = 0; i < N; i++) {
+    ctx.beginPath();
+    for (let j = 0; j < N; j++) {
+      const p = gridRectifyPoints[gridIdx(i, j)];
+      const X = p.x * s, Y = p.y * s;
+      if (j === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
+    }
+    ctx.stroke();
+  }
+  // Nodes (corners emphasized)
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const p = gridRectifyPoints[gridIdx(i, j)];
+      const X = p.x * s, Y = p.y * s;
+      const corner = (i === 0 || i === N - 1) && (j === 0 || j === N - 1);
+      ctx.beginPath();
+      ctx.arc(X, Y, corner ? 6 : 4, 0, Math.PI * 2);
+      ctx.fillStyle = corner ? "#f59e0b" : "#22d3ee";
+      ctx.fill();
+      ctx.lineWidth = 1.4;
+      ctx.strokeStyle = "rgba(2,6,23,0.9)";
+      ctx.stroke();
+    }
+  }
+}
+
+function gridRectifyEventXY(ev) {
+  const rect = gridRectifyCanvas.getBoundingClientRect();
+  const t = ev.touches && ev.touches[0] ? ev.touches[0] : ev;
+  const cx = t.clientX - rect.left, cy = t.clientY - rect.top;
+  // rect may be scaled by CSS max-width/height; map to canvas px then image px
+  const sx = gridRectifyCanvas.width / rect.width;
+  const sy = gridRectifyCanvas.height / rect.height;
+  return { x: (cx * sx) / gridRectifyScale, y: (cy * sy) / gridRectifyScale };
+}
+
+function onGridRectifyPointerDown(ev) {
+  if (!gridRectifyPoints) return;
+  ev.preventDefault();
+  const pt = gridRectifyEventXY(ev);
+  let best = -1, bestD = Infinity;
+  for (let k = 0; k < gridRectifyPoints.length; k++) {
+    const p = gridRectifyPoints[k];
+    const d = (p.x - pt.x) ** 2 + (p.y - pt.y) ** 2;
+    if (d < bestD) { bestD = d; best = k; }
+  }
+  // Accept grab within ~18 display px
+  const grab = (18 / gridRectifyScale) ** 2;
+  gridRectifyDragIdx = bestD <= grab ? best : -1;
+}
+
+function onGridRectifyPointerMove(ev) {
+  if (gridRectifyDragIdx < 0) return;
+  ev.preventDefault();
+  const pt = gridRectifyEventXY(ev);
+  const w = gridRectifyImg.naturalWidth, h = gridRectifyImg.naturalHeight;
+  gridRectifyPoints[gridRectifyDragIdx] = {
+    x: Math.max(0, Math.min(w, pt.x)),
+    y: Math.max(0, Math.min(h, pt.y)),
+  };
+  drawGridRectify();
+}
+
+function onGridRectifyPointerUp() { gridRectifyDragIdx = -1; }
+
+async function openGridRectify(record) {
+  const modal = document.getElementById("gridRectifyModal");
+  gridRectifyCanvas = document.getElementById("gridRectifyCanvas");
+  const statusEl = document.getElementById("gridRectifyStatus");
+  if (!modal || !gridRectifyCanvas) return;
+  gridRectifyRecord = record;
+  gridRectifyCtx = gridRectifyCanvas.getContext("2d");
+  const blob = getDisplayPhotoBlob(record);
+  if (!blob) { setStatus("No photo to rectify."); return; }
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.onload = () => {
+    URL.revokeObjectURL(url);
+    gridRectifyImg = img;
+    gridRectifyN = parseInt(document.getElementById("gridRectifySize").value, 10) || 10;
+    initGridRectifyPoints();
+    modal.hidden = false;
+    // Layout after modal is visible so clientWidth/Height are valid.
+    requestAnimationFrame(() => { layoutGridRectifyCanvas(); drawGridRectify(); });
+    if (statusEl) statusEl.textContent = "Drag the grid nodes onto the laser dots, then Rectify & save.";
+  };
+  img.onerror = () => { URL.revokeObjectURL(url); setStatus("Could not load photo for rectify."); };
+  img.src = url;
+}
+
+function closeGridRectify() {
+  const modal = document.getElementById("gridRectifyModal");
+  if (modal) modal.hidden = true;
+  gridRectifyRecord = null;
+  gridRectifyImg = null;
+  gridRectifyPoints = null;
+  gridRectifyDragIdx = -1;
+}
+
+// Piecewise-bilinear inverse warp: destination is a regular grid; each dest cell
+// samples its source quad (the four dragged nodes) via bilinear interpolation.
+async function rectifyAndSaveGrid() {
+  if (gridRectifyBusy || !gridRectifyImg || !gridRectifyPoints || !gridRectifyRecord) return;
+  gridRectifyBusy = true;
+  const statusEl = document.getElementById("gridRectifyStatus");
+  const setS = (m) => { if (statusEl) statusEl.textContent = m; };
+  try {
+    setS("Rectifying…");
+    await new Promise((r) => setTimeout(r, 20)); // let UI paint
+    const N = gridRectifyN;
+    const pts = gridRectifyPoints;
+    // Source pixels from a full-resolution offscreen canvas.
+    const srcW = gridRectifyImg.naturalWidth, srcH = gridRectifyImg.naturalHeight;
+    const sCanvas = document.createElement("canvas");
+    sCanvas.width = srcW; sCanvas.height = srcH;
+    const sCtx = sCanvas.getContext("2d");
+    sCtx.drawImage(gridRectifyImg, 0, 0);
+    const srcData = sCtx.getImageData(0, 0, srcW, srcH).data;
+
+    // Output size = bounding box of the grid, capped to a sane max resolution.
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of pts) { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; }
+    let outW = Math.round(maxX - minX), outH = Math.round(maxY - minY);
+    const MAXDIM = 2000;
+    const capScale = Math.min(1, MAXDIM / Math.max(outW, outH));
+    outW = Math.max(2, Math.round(outW * capScale));
+    outH = Math.max(2, Math.round(outH * capScale));
+
+    const oCanvas = document.createElement("canvas");
+    oCanvas.width = outW; oCanvas.height = outH;
+    const oCtx = oCanvas.getContext("2d");
+    const outImg = oCtx.createImageData(outW, outH);
+    const out = outImg.data;
+
+    const cellW = outW / (N - 1), cellH = outH / (N - 1);
+
+    const sampleBilinear = (fx, fy) => {
+      if (fx < 0) fx = 0; else if (fx > srcW - 1) fx = srcW - 1;
+      if (fy < 0) fy = 0; else if (fy > srcH - 1) fy = srcH - 1;
+      const x0 = Math.floor(fx), y0 = Math.floor(fy);
+      const x1 = Math.min(x0 + 1, srcW - 1), y1 = Math.min(y0 + 1, srcH - 1);
+      const tx = fx - x0, ty = fy - y0;
+      const idx = (x, y) => (y * srcW + x) * 4;
+      const i00 = idx(x0, y0), i10 = idx(x1, y0), i01 = idx(x0, y1), i11 = idx(x1, y1);
+      const out4 = [0, 0, 0, 0];
+      for (let c = 0; c < 4; c++) {
+        const a = srcData[i00 + c] * (1 - tx) + srcData[i10 + c] * tx;
+        const b = srcData[i01 + c] * (1 - tx) + srcData[i11 + c] * tx;
+        out4[c] = a * (1 - ty) + b * ty;
+      }
+      return out4;
+    };
+
+    for (let dy = 0; dy < outH; dy++) {
+      // cell row
+      let jf = dy / cellH;
+      let j = Math.floor(jf); if (j > N - 2) j = N - 2; if (j < 0) j = 0;
+      const v = jf - j;
+      for (let dx = 0; dx < outW; dx++) {
+        let ifc = dx / cellW;
+        let i = Math.floor(ifc); if (i > N - 2) i = N - 2; if (i < 0) i = 0;
+        const u = ifc - i;
+        const p00 = pts[gridIdx(i, j)], p10 = pts[gridIdx(i + 1, j)];
+        const p01 = pts[gridIdx(i, j + 1)], p11 = pts[gridIdx(i + 1, j + 1)];
+        const sx = (1 - u) * (1 - v) * p00.x + u * (1 - v) * p10.x + (1 - u) * v * p01.x + u * v * p11.x;
+        const sy = (1 - u) * (1 - v) * p00.y + u * (1 - v) * p10.y + (1 - u) * v * p01.y + u * v * p11.y;
+        const px = sampleBilinear(sx, sy);
+        const o = (dy * outW + dx) * 4;
+        out[o] = px[0]; out[o + 1] = px[1]; out[o + 2] = px[2]; out[o + 3] = 255;
+      }
+      if ((dy & 63) === 0) { setS(`Rectifying… ${Math.round((dy / outH) * 100)}%`); await new Promise((r) => setTimeout(r, 0)); }
+    }
+    oCtx.putImageData(outImg, 0, 0);
+    setS("Saving…");
+    const outBlob = await new Promise((res) => oCanvas.toBlob(res, "image/jpeg", 0.95));
+    const srcRec = gridRectifyRecord;
+    const baseComment = (srcRec.comment || "").trim();
+    const comment = (baseComment ? baseComment + " · " : "") + "grid-rectified";
+    await savePhoto(outBlob, null, comment, srcRec.location || null, srcRec.heading ?? null, srcRec.facing ?? null, null, null, srcRec.tags || null, {
+      gridRectified: true,
+      sourcePhotoId: srcRec.id,
+      gridRectifyN: N,
+    });
+    setS("Saved rectified photo.");
+    setStatus("Grid-rectified photo saved to this bridge.");
+    closeGridRectify();
+  } catch (e) {
+    console.error("[grid-rectify] failed:", e);
+    setS("Rectify failed: " + e.message);
+    setStatus("Grid rectify failed: " + e.message);
+  } finally {
+    gridRectifyBusy = false;
+  }
+}
+
+function wireGridRectifyControls() {
+  const modal = document.getElementById("gridRectifyModal");
+  if (!modal) return;
+  const canvas = document.getElementById("gridRectifyCanvas");
+  const closeBtn = document.getElementById("closeGridRectifyBtn");
+  const resetBtn = document.getElementById("gridRectifyResetBtn");
+  const saveBtn = document.getElementById("gridRectifySaveBtn");
+  const sizeSel = document.getElementById("gridRectifySize");
+  if (closeBtn) closeBtn.addEventListener("click", closeGridRectify);
+  if (resetBtn) resetBtn.addEventListener("click", () => { if (gridRectifyImg) { initGridRectifyPoints(); drawGridRectify(); } });
+  if (saveBtn) saveBtn.addEventListener("click", rectifyAndSaveGrid);
+  if (sizeSel) sizeSel.addEventListener("change", () => {
+    gridRectifyN = parseInt(sizeSel.value, 10) || 10;
+    if (gridRectifyImg) { initGridRectifyPoints(); drawGridRectify(); }
+  });
+  if (canvas) {
+    canvas.addEventListener("pointerdown", onGridRectifyPointerDown);
+    window.addEventListener("pointermove", onGridRectifyPointerMove);
+    window.addEventListener("pointerup", onGridRectifyPointerUp);
+  }
+  window.addEventListener("resize", () => {
+    if (!modal.hidden && gridRectifyImg) { layoutGridRectifyCanvas(); drawGridRectify(); }
+  });
+}
+wireGridRectifyControls();
 
 // ── DOM helpers ───────────────────────────────────────────────────────────────
 function makeButton(text, cls = "") { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = text; return b; }
