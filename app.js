@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v172";
-const BUILD_STAMP = "2026-07-30 21:49:00";
+const BUILD_VERSION = "v173";
+const BUILD_STAMP = "2026-07-30 21:58:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -332,6 +332,13 @@ let arOrientAbsolute       = false; // true once an absolute/compass orientation
 let arYawSmoothed          = null;  // low-pass filtered yaw (radians)
 let arPitchSmoothed        = null;  // low-pass filtered pitch (radians)
 let arScreenAngleRad       = 0;     // screen-orientation offset (radians)
+// AR overlay camera field-of-view. Phone spec sheets quote a HORIZONTAL fov at
+// 1x zoom; three.js PerspectiveCamera.fov is VERTICAL, so we convert per aspect.
+// NOTE: no standard web API exposes real camera FOV/focal length, so detection
+// is best-effort and normally falls back to this default.
+const AR_DEFAULT_CAMERA_HFOV_DEG = 82;
+let arCameraHFovDeg        = (() => { const v = parseFloat(localStorage.getItem("arCameraHFovDeg")); return isFinite(v) && v > 20 && v < 160 ? v : AR_DEFAULT_CAMERA_HFOV_DEG; })();
+let arCameraFovSource      = "default 82\u00b0 (H)";
 // AR orbit controls (drag to rotate / wheel to zoom the test view)
 let arOrbitInitialized     = false;
 let arOrbitCenter          = null; // THREE.Vector3 (lazy) - model center
@@ -1841,6 +1848,20 @@ async function startArCameraFeed() {
     arStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }
     });
+    // AR must render at the camera's native 1x, so force zoom to its minimum
+    // (the capture-modal zoom control does not apply to the AR feed).
+    try {
+      const t = arStream.getVideoTracks && arStream.getVideoTracks()[0];
+      const caps = t && t.getCapabilities ? t.getCapabilities() : null;
+      if (caps && caps.zoom && typeof caps.zoom.min === "number") {
+        t.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] }).catch(() => {});
+      }
+      // Best-effort FOV detection; falls back to the 82-degree default.
+      const det = detectArCameraHFovDeg(t);
+      if (det) { arCameraHFovDeg = det.deg; arCameraFovSource = det.source; }
+      else { arCameraFovSource = `default ${AR_DEFAULT_CAMERA_HFOV_DEG}\u00b0 (H, no API)`; }
+      updateArCameraFov();
+    } catch (e) { console.warn("[ar] feed setup:", e); }
     if (arCameraVideo) {
       arCameraVideo.srcObject = arStream;
       arCameraVideo.onloadedmetadata = () => {
@@ -1884,6 +1905,7 @@ function ensureArRenderer() {
   if (!arRendererCamera) {
     arRendererCamera = new THREE.PerspectiveCamera(75, 1, 0.1, 10000);
     arRendererCamera.up.set(0, 0, 1);
+    updateArCameraFov();
   }
   return true;
 }
@@ -1898,7 +1920,7 @@ function syncArCanvasSize() {
     arRenderer.setSize(width, height, false);
     if (arRendererCamera) {
       arRendererCamera.aspect = width / Math.max(1, height);
-      arRendererCamera.updateProjectionMatrix();
+      updateArCameraFov();
     }
   }
 }
@@ -1911,6 +1933,40 @@ function ensureArModelClone() {
   if (!ifcViewer || !ifcViewer.model || !ifcViewer.scene || typeof THREE === "undefined") return false;
   arModelClone = ifcViewer.model; // reference only, for bounds/framing
   return true;
+}
+
+// Convert the configured HORIZONTAL fov to the VERTICAL fov three.js needs,
+// using the camera's current aspect ratio, then apply it.
+function updateArCameraFov() {
+  if (!arRendererCamera) return;
+  const aspect = arRendererCamera.aspect && isFinite(arRendererCamera.aspect) ? arRendererCamera.aspect : 1;
+  const hfov = (arCameraHFovDeg || AR_DEFAULT_CAMERA_HFOV_DEG) * Math.PI / 180;
+  // fovH = 2*atan(tan(fovV/2) * aspect)  ->  fovV = 2*atan(tan(fovH/2) / aspect)
+  const vfov = 2 * Math.atan(Math.tan(hfov / 2) / Math.max(0.0001, aspect));
+  arRendererCamera.fov = Math.max(1, Math.min(179, vfov * 180 / Math.PI));
+  arRendererCamera.updateProjectionMatrix();
+}
+
+// Best-effort: try to read a real horizontal FOV from the live AR track. No
+// standard web API provides this today, so this normally returns null and we
+// keep the 82-degree default. Kept isolated so it's easy to improve later.
+function detectArCameraHFovDeg(track) {
+  try {
+    if (!track || !track.getSettings) return null;
+    const st = track.getSettings();
+    // Non-standard/experimental hints some builds have exposed historically.
+    // focalLength is in pixels; horizontal fov = 2*atan((width/2)/focalLength).
+    const w = st.width;
+    const f = st.focalLength || st.focalLengthX;
+    if (isFinite(f) && f > 0 && isFinite(w) && w > 0) {
+      const hfov = 2 * Math.atan((w / 2) / f) * 180 / Math.PI;
+      if (hfov > 20 && hfov < 160) return { deg: hfov, source: `detected ${hfov.toFixed(0)}\u00b0 (focalLength)` };
+    }
+    if (isFinite(st.horizontalFieldOfView) && st.horizontalFieldOfView > 20) {
+      return { deg: st.horizontalFieldOfView, source: `detected ${st.horizontalFieldOfView.toFixed(0)}\u00b0` };
+    }
+  } catch (e) { console.warn("[ar] fov detect:", e); }
+  return null;
 }
 
 function applyArViewCamera() {
@@ -10217,6 +10273,7 @@ function updateArDebugHud() {
     `raw alpha ${rawA}  beta ${rawB}\n` +
     `cam fwd ${fwd}\n` +
     `model ${model}\n` +
+    `fov H${(arCameraHFovDeg||0).toFixed(0)} V${arRendererCamera ? arRendererCamera.fov.toFixed(0) : "-"} ${arCameraFovSource}\n` +
     `src ${src}  fps ${arRenderFps.toFixed(1)}`;
 }
 
