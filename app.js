@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v176";
-const BUILD_STAMP = "2026-07-30 22:55:00";
+const BUILD_VERSION = "v177";
+const BUILD_STAMP = "2026-07-31 00:00:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -1719,8 +1719,8 @@ function registerEvents() {
   if (arElevDownBtn) arElevDownBtn.addEventListener("click", () => { adjustArElevation(-0.25); });
   if (arTurnLeftBtn) arTurnLeftBtn.addEventListener("click", () => { arOrbitAz += 0.15; });
   if (arTurnRightBtn) arTurnRightBtn.addEventListener("click", () => { arOrbitAz -= 0.15; });
-  if (arFwdBtn) arFwdBtn.addEventListener("click", () => arMoveForward((arOrbitRadius || 1) * 0.08));
-  if (arBackBtn) arBackBtn.addEventListener("click", () => arMoveForward(-(arOrbitRadius || 1) * 0.08));
+  if (arFwdBtn) arFwdBtn.addEventListener("click", () => arMoveForward(arMetersToUnits(2)));
+  if (arBackBtn) arBackBtn.addEventListener("click", () => arMoveForward(-arMetersToUnits(2)));
 }
 
 
@@ -2034,7 +2034,7 @@ function updateArEyeFromGeo(lat, lon, alt) {
     ? alt
     : (ifcViewer.modelElevMinM != null ? ifcViewer.modelElevMinM
       : (ifcViewer.modelElevCenterM != null ? ifcViewer.modelElevCenterM : 0));
-  const p = arENToScene(E + arPanX, N + arPanY, groundElev + arEyeHeightM + arElevOffsetM);
+  const p = arENToScene(E + arPanX, N + arPanY, groundElev + arMetersToUnits(arEyeHeightM + arElevOffsetM));
   if (!p || !isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) { arGeoFailReason = "scene transform NaN"; return false; }
   if (!arEyePos) arEyePos = new THREE.Vector3();
   arEyePos.copy(p);
@@ -2098,14 +2098,19 @@ function frameArModelForTest() {
       const half = Math.max(fmaxx - fminx, fmaxy - fminy, 1) / 2 * 2.4;
       arMiniView = { minx: cx - half, maxx: cx + half, miny: cy - half, maxy: cy + half };
     }
-    // Place YOUR eye a standoff back from the model center, looking toward it.
-    arOrbitAz = 0;   // look along +X initially
+    // Place YOUR eye at TRUE human scale: stand a fixed real distance to the side
+    // of the bridge at real eye height above its lowest point. Because the standoff
+    // is a real metre distance (not proportional to model size), a large bridge
+    // overflows the view up close - you only see part of it, exactly as in life.
+    // (This is the non-GPS test viewpoint; georeferenced live mode overrides it.)
+    const standoffM = 12;                 // stand 12 m off the near side
+    arOrbitAz = Math.PI / 2;              // look toward +Y, across at the bridge
     arOrbitEl = 0;
-    const standoff = arOrbitRadius * 1.6;
+    const eyeHeightU = arMetersToUnits(arEyeHeightM + arElevOffsetM);
     arEyePos = new THREE.Vector3(
-      arOrbitCenter.x - standoff,
-      arOrbitCenter.y,
-      arOrbitCenter.z
+      arOrbitCenter.x,
+      box.min.y - arMetersToUnits(standoffM),
+      box.min.z + eyeHeightU
     );
     arOrbitInitialized = true;
   }
@@ -2217,6 +2222,15 @@ function arMiniExtent() {
 function arGeoReady() {
   return !!(ifcViewer && ifcViewer.georef && ifcViewer.modelToScene && ifcViewer.sceneToModel
     && window.proj4 && ifcViewer.georef.epsg && typeof THREE !== "undefined");
+}
+
+// Convert a real-world distance in metres to scene/model units. Scene units are
+// the IFC's native length unit (ifcViewer.metersPerUnit = metres per unit), so
+// expressing eye height, standoff, and move steps in real metres and converting
+// here renders the model at true 1:1 scale regardless of the model's unit.
+function arMetersToUnits(m) {
+  const mpu = (ifcViewer && ifcViewer.metersPerUnit) || 1;
+  return (isFinite(m) ? m : 0) / (mpu || 1);
 }
 
 // Scene-world point -> map easting/northing (metres) + model elevation.
@@ -2744,16 +2758,17 @@ function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
     if (updateArEyeFromGeo(lat, lon, alt)) {
       arEyeSeeded = true;              // seeded at true real-world scale
     } else if (arEyePos) {
-      arEyeSeeded = true;              // no georef: fall back to the scene-space eye from framing
+      arEyeSeeded = true;              // no georef: true-scale standing eye from framing
     }
   }
   if (arEyePos) {
     arPoseMode = "test";
     applyArViewCamera();
     if (arStatusMessage) {
+      const unit = (ifcViewer && ifcViewer.lengthUnitName) ? ifcViewer.lengthUnitName : "metre";
       arStatusMessage.textContent = arGeoReady()
         ? "Test mode (no GPS) - true scale. Use Move / Turn / Elevation to walk around; drag the plan-view dots to reposition."
-        : "Test mode - model has no georeference, so scale is approximate. Use Move / Turn / Elevation to walk around.";
+        : "Test mode (no GPS) - true 1:1 scale (model unit: " + unit + "). Standing 12 m off the bridge; use Move / Turn / Elevation to walk around.";
     }
     renderArScene();
     drawArMiniMap();
@@ -2781,7 +2796,7 @@ function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
 // offset is re-applied on every frame's GPS recompute.
 function adjustArElevation(deltaM) {
   arElevOffsetM += deltaM;
-  if (arPoseMode !== "geo" && arEyePos) arEyePos.z += deltaM;
+  if (arPoseMode !== "geo" && arEyePos) arEyePos.z += arMetersToUnits(deltaM);
   if (arStatusMessage) {
     arStatusMessage.textContent = "Eye height " + (arEyeHeightM + arElevOffsetM).toFixed(2) + " m above ground.";
   }
@@ -10545,11 +10560,24 @@ function updateArDebugHud() {
   const src = arOrientAbsolute ? "ABS/compass" : (arHasOrientation ? "relative" : "none");
   const rawA = (arDeviceOrientation && isFinite(arDeviceOrientation.alpha)) ? arDeviceOrientation.alpha.toFixed(0) : "-";
   const rawB = (arDeviceOrientation && isFinite(arDeviceOrientation.beta)) ? arDeviceOrientation.beta.toFixed(0) : "-";
+  // Real-world size readout so scale problems are obvious at a glance.
+  let unitLine = "unit n/a";
+  if (ifcViewer && ifcViewer.model && typeof THREE !== "undefined") {
+    const mpu = ifcViewer.metersPerUnit || 1;
+    const nm = ifcViewer.lengthUnitName || "metre?";
+    try {
+      const b = new THREE.Box3().setFromObject(ifcViewer.model);
+      const s = b.getSize(new THREE.Vector3());
+      const Lm = Math.max(s.x, s.y) * mpu, Wm = Math.min(s.x, s.y) * mpu, Hm = s.z * mpu;
+      unitLine = `unit ${nm} (${mpu} m/u)  size ${Lm.toFixed(1)}x${Wm.toFixed(1)}x${Hm.toFixed(1)} m (${(Lm * 3.281).toFixed(0)} ft long)`;
+    } catch (e) { unitLine = `unit ${nm} (${mpu} m/u)`; }
+  }
   arHudEl.textContent =
     `AZ ${azDeg.toFixed(2)}\u00b0  EL ${elDeg.toFixed(2)}\u00b0\n` +
     `raw alpha ${rawA}  beta ${rawB}\n` +
     `cam fwd ${fwd}\n` +
     `model ${model}\n` +
+    `${unitLine}\n` +
     `fov H${(arCameraHFovDeg||0).toFixed(0)} V${arRendererCamera ? arRendererCamera.fov.toFixed(0) : "-"} ${arCameraFovSource}\n` +
     `pose ${arPoseMode}${arPoseMode === "test" && arGeoFailReason ? " - " + arGeoFailReason : ""}${arPoseMode === "geo" && arEyePos && arOrbitCenter ? " dist " + arEyePos.distanceTo(arOrbitCenter).toFixed(0) + "m" : ""}\n` +
     `src ${src}  fps ${arRenderFps.toFixed(1)}`;
