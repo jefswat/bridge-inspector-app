@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v174";
-const BUILD_STAMP = "2026-07-30 22:05:00";
+const BUILD_VERSION = "v175";
+const BUILD_STAMP = "2026-07-30 22:20:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -339,8 +339,15 @@ let arScreenAngleRad       = 0;     // screen-orientation offset (radians)
 const AR_DEFAULT_CAMERA_HFOV_DEG = 82;
 let arCameraHFovDeg        = (() => { const v = parseFloat(localStorage.getItem("arCameraHFovDeg")); return isFinite(v) && v > 20 && v < 160 ? v : AR_DEFAULT_CAMERA_HFOV_DEG; })();
 let arCameraFovSource      = "default 82\u00b0 (H)";
+let arGeoFailReason        = "";
+// Real-world AR is the goal: stand at the bridge and see the IFC on the real
+// structure. The old "test framing" put the eye at a model-relative standoff,
+// which renders a tabletop-sized scale model - useful only for desk demos, so
+// it is OFF by default and must be explicitly enabled.
+let arDemoFraming          = (localStorage.getItem("arDemoFraming") === "1");
 let arPoseMode             = "init";  // "geo" = anchored to your GPS position, "test" = fallback framing
 let arEyeHeightM           = 1.6;     // standing eye height above the reference elevation
+let arElevOffsetM          = 0;       // manual elevation trim from the ELEVATION buttons
 // AR orbit controls (drag to rotate / wheel to zoom the test view)
 let arOrbitInitialized     = false;
 let arOrbitCenter          = null; // THREE.Vector3 (lazy) - model center
@@ -1699,8 +1706,8 @@ function registerEvents() {
   if (arPanDownBtn) arPanDownBtn.addEventListener("click", () => { arPanY -= arPanStep; });
   // First-person AR controls
   if (arCameraToggleBtn) arCameraToggleBtn.addEventListener("click", () => setArCameraEnabled(!arCameraEnabled));
-  if (arElevUpBtn) arElevUpBtn.addEventListener("click", () => { if (arEyePos) arEyePos.z += (arOrbitRadius || 1) * 0.05; });
-  if (arElevDownBtn) arElevDownBtn.addEventListener("click", () => { if (arEyePos) arEyePos.z -= (arOrbitRadius || 1) * 0.05; });
+  if (arElevUpBtn) arElevUpBtn.addEventListener("click", () => { adjustArElevation(0.25); });
+  if (arElevDownBtn) arElevDownBtn.addEventListener("click", () => { adjustArElevation(-0.25); });
   if (arTurnLeftBtn) arTurnLeftBtn.addEventListener("click", () => { arOrbitAz += 0.15; });
   if (arTurnRightBtn) arTurnRightBtn.addEventListener("click", () => { arOrbitAz -= 0.15; });
   if (arFwdBtn) arFwdBtn.addEventListener("click", () => arMoveForward((arOrbitRadius || 1) * 0.08));
@@ -1812,6 +1819,15 @@ async function openArViewModal() {
   // over the relative "deviceorientation" event to avoid drift.
   try { window.addEventListener("deviceorientationabsolute", onDeviceOrientation); } catch (_) {}
   
+  // Prefer real-world anchoring: if we have (or can get) a GPS fix and no
+  // manual location was chosen, turn on "Use current location" automatically.
+  if (arUseCurrentLocation && !arSelectedLocationIsManual && !arUseCurrentLocation.checked) {
+    arUseCurrentLocation.checked = true;
+  }
+  if (typeof acquireGeoAndHeading === "function" && !currentLocation) {
+    try { void acquireGeoAndHeading(); } catch (e) { console.warn("[ar] geo acquire:", e); }
+  }
+
   // Reset AR view for this session and enable first-person controls.
   arOrbitInitialized = false;
   arOrbitDragging = false;
@@ -1942,9 +1958,16 @@ function ensureArModelClone() {
 function updateArCameraFov() {
   if (!arRendererCamera) return;
   const aspect = arRendererCamera.aspect && isFinite(arRendererCamera.aspect) ? arRendererCamera.aspect : 1;
-  const hfov = (arCameraHFovDeg || AR_DEFAULT_CAMERA_HFOV_DEG) * Math.PI / 180;
-  // fovH = 2*atan(tan(fovV/2) * aspect)  ->  fovV = 2*atan(tan(fovH/2) / aspect)
-  const vfov = 2 * Math.atan(Math.tan(hfov / 2) / Math.max(0.0001, aspect));
+  const specFov = (arCameraHFovDeg || AR_DEFAULT_CAMERA_HFOV_DEG) * Math.PI / 180;
+  // A phone's quoted FOV refers to the sensor's LONG axis. In portrait the long
+  // axis is the screen's vertical, so the spec value IS the vertical fov; in
+  // landscape it is the horizontal fov and must be converted.
+  let vfov;
+  if (aspect <= 1) {
+    vfov = specFov;                                                   // portrait
+  } else {
+    vfov = 2 * Math.atan(Math.tan(specFov / 2) / Math.max(0.0001, aspect)); // landscape
+  }
   arRendererCamera.fov = Math.max(1, Math.min(179, vfov * 180 / Math.PI));
   arRendererCamera.updateProjectionMatrix();
 }
@@ -1975,7 +1998,19 @@ function detectArCameraHFovDeg(track) {
 // successfully placed from geographic coordinates. Keeps the same scene-space
 // eye/az/el model used by applyArViewCamera so the plan view stays in sync.
 function updateArEyeFromGeo(lat, lon, alt) {
-  if (!arGeoReady() || !isFinite(lat) || !isFinite(lon)) return false;
+  if (!arGeoReady()) {
+    const g = ifcViewer && ifcViewer.georef;
+    arGeoFailReason = !ifcViewer ? "no viewer"
+      : !g ? "model has no georeference"
+      : !g.epsg ? "georeference has no EPSG"
+      : !window.proj4 ? "proj4 missing"
+      : "georeference incomplete";
+    return false;
+  }
+  if (!isFinite(lat) || !isFinite(lon)) {
+    arGeoFailReason = "no location (tick 'Use current location')";
+    return false;
+  }
   const g = ifcViewer.georef;
   const def = IFCViewer.CRS_DEFS[g.epsg];
   if (def && !window.proj4.defs(g.epsg)) window.proj4.defs(g.epsg, def);
@@ -1983,15 +2018,20 @@ function updateArEyeFromGeo(lat, lon, alt) {
   try {
     const r = window.proj4("WGS84", g.epsg, [lon, lat]);
     E = r[0]; N = r[1];
-  } catch (e) { console.warn("[ar] proj4 failed:", e); return false; }
-  if (!isFinite(E) || !isFinite(N)) return false;
-  const baseElev = (alt != null && isFinite(alt))
+  } catch (e) { console.warn("[ar] proj4 failed:", e); arGeoFailReason = "proj4 transform failed"; return false; }
+  if (!isFinite(E) || !isFinite(N)) { arGeoFailReason = "projection produced NaN"; return false; }
+  // Stand on the ground: prefer GPS altitude, else the model's LOWEST point
+  // (pier/abutment base). Using the model's mid-height put the eye floating
+  // inside the structure.
+  const groundElev = (alt != null && isFinite(alt))
     ? alt
-    : (ifcViewer.modelElevCenterM != null ? ifcViewer.modelElevCenterM : 0);
-  const p = arENToScene(E + arPanX, N + arPanY, baseElev + arEyeHeightM);
-  if (!p || !isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) return false;
+    : (ifcViewer.modelElevMinM != null ? ifcViewer.modelElevMinM
+      : (ifcViewer.modelElevCenterM != null ? ifcViewer.modelElevCenterM : 0));
+  const p = arENToScene(E + arPanX, N + arPanY, groundElev + arEyeHeightM + arElevOffsetM);
+  if (!p || !isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) { arGeoFailReason = "scene transform NaN"; return false; }
   if (!arEyePos) arEyePos = new THREE.Vector3();
   arEyePos.copy(p);
+  arGeoFailReason = "";
   return true;
 }
 
@@ -2659,9 +2699,10 @@ function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
   if (!ifcViewer || !ifcViewer.scene || !arRenderer) return;
   // Ensure model bounds / plan-view data exist (also seeds a fallback eye).
   const framed = frameArModelForTest();
-  // GEO-FIRST: stand the camera at your true position so the overlay lines up
-  // with the real world. Falls back to test framing when there is no location
-  // or no georeference, so the model can never disappear entirely.
+  // GEO ONLY: stand the camera at your true GPS position so the overlay lines
+  // up with the real bridge at real scale. There is deliberately no automatic
+  // scale-model fallback - a plausible-looking tabletop render would hide the
+  // fact that the overlay is not actually anchored to anything.
   if (updateArEyeFromGeo(lat, lon, alt)) {
     arPoseMode = "geo";
     applyArViewCamera();
@@ -2670,17 +2711,34 @@ function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
     drawArMiniMap();
     return;
   }
-  if (framed) {
-    arPoseMode = "test";
+  if (arDemoFraming && framed) {
+    arPoseMode = "demo";
     if (arStatusMessage) {
-      arStatusMessage.textContent = "AR test framing (no GPS/georeference) - drag to move, pinch to walk.";
+      arStatusMessage.textContent = "DEMO framing (not real scale) - for desk testing only.";
     }
     renderArScene();
     drawArMiniMap();
     return;
   }
+  // Real-world AR could not be anchored. Say exactly why instead of silently
+  // drawing a tabletop-sized model that looks plausible but is meaningless.
   arPoseMode = "none";
-  if (arStatusMessage) arStatusMessage.textContent = "Model not ready for AR yet.";
+  if (arStatusMessage) {
+    arStatusMessage.textContent = "AR needs your position: " + (arGeoFailReason || "waiting for GPS")
+      + ". Stand near the bridge with location enabled.";
+  }
+  if (arRenderer) arRenderer.clear();
+  drawArMiniMap();
+}
+
+// Nudge the standing eye height in real metres. Works in geo mode because the
+// offset is re-applied on every frame's GPS recompute.
+function adjustArElevation(deltaM) {
+  arElevOffsetM += deltaM;
+  if (arPoseMode !== "geo" && arEyePos) arEyePos.z += deltaM;
+  if (arStatusMessage) {
+    arStatusMessage.textContent = "Eye height " + (arEyeHeightM + arElevOffsetM).toFixed(2) + " m above ground.";
+  }
 }
 
 function initArLocationPickerMap() {
@@ -10027,8 +10085,14 @@ async function openGridRectify(record) {
     initGridRectifyPoints();
     modal.hidden = false;
     // Layout after modal is visible so clientWidth/Height are valid.
-    requestAnimationFrame(() => { layoutGridRectifyCanvas(); drawGridRectify(); });
-    if (statusEl) statusEl.textContent = "Drag the grid nodes onto the laser dots, then Rectify & save.";
+    requestAnimationFrame(() => {
+      layoutGridRectifyCanvas();
+      drawGridRectify();
+      // Attempt automatic red-grid detection; silently keeps the manual grid
+      // (and explains why) when it cannot find the lines.
+      autoDetectGridPoints();
+    });
+    if (statusEl) statusEl.textContent = "Detecting red grid\u2026";
   };
   img.onerror = () => { URL.revokeObjectURL(url); setStatus("Could not load photo for rectify."); };
   img.src = url;
@@ -10139,6 +10203,140 @@ async function rectifyAndSaveGrid() {
   }
 }
 
+
+// ── Auto-detect a RED laser grid ──────────────────────────────────────────────
+// The projected grid is red lines on an arbitrary surface. Strategy (pure JS so
+// it runs fully offline on Android; the bundled cv.js is a small stub without
+// Hough/morphology):
+//   1. Build a "redness" mask: red clearly dominant over green/blue.
+//   2. Score every column (vertical lines) and every row (horizontal lines).
+//   3. Pick the N strongest, well-separated peaks on each axis.
+//   4. Refine each intersection to the local redness centroid.
+// Falls back with a clear message when it cannot find N lines each way.
+
+function gridDetectDownscale(img, maxDim) {
+  const w0 = img.naturalWidth, h0 = img.naturalHeight;
+  const sc = Math.min(1, maxDim / Math.max(w0, h0));
+  const w = Math.max(8, Math.round(w0 * sc)), h = Math.max(8, Math.round(h0 * sc));
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  c.getContext("2d", { willReadFrequently: true }).drawImage(img, 0, 0, w, h);
+  return { canvas: c, w, h, scale: w / w0 };
+}
+
+// Redness in [0,1]: how much red dominates the other channels.
+function gridBuildRedMask(ctx, w, h) {
+  const d = ctx.getImageData(0, 0, w, h).data;
+  const mask = new Float32Array(w * h);
+  for (let p = 0, q = 0; p < d.length; p += 4, q++) {
+    const r = d[p], g = d[p + 1], b = d[p + 2];
+    const domin = r - Math.max(g, b);          // red dominance
+    if (domin > 24 && r > 60) mask[q] = Math.min(1, domin / 120);
+  }
+  return mask;
+}
+
+// Sum the mask along an axis. axis "x" -> one score per column.
+function gridAxisProfile(mask, w, h, axis) {
+  const n = axis === "x" ? w : h;
+  const m = axis === "x" ? h : w;
+  const prof = new Float32Array(n);
+  for (let a = 0; a < n; a++) {
+    let sum = 0;
+    for (let b = 0; b < m; b++) sum += axis === "x" ? mask[b * w + a] : mask[a * w + b];
+    prof[a] = sum / m;
+  }
+  // Light smoothing so a single line yields one peak, not several.
+  const out = new Float32Array(n);
+  const rad = Math.max(1, Math.round(n * 0.004));
+  for (let i = 0; i < n; i++) {
+    let s = 0, c = 0;
+    for (let k = -rad; k <= rad; k++) { const j = i + k; if (j >= 0 && j < n) { s += prof[j]; c++; } }
+    out[i] = s / Math.max(1, c);
+  }
+  return out;
+}
+
+// Greedily take the strongest peaks, enforcing a minimum separation.
+function gridPickPeaks(prof, count, minSep) {
+  const n = prof.length;
+  const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => prof[b] - prof[a]);
+  let mean = 0;
+  for (let i = 0; i < n; i++) mean += prof[i];
+  mean /= Math.max(1, n);
+  const picked = [];
+  for (const i of order) {
+    if (prof[i] <= mean * 1.15) break;                 // too weak to be a line
+    if (picked.some((p) => Math.abs(p - i) < minSep)) continue;
+    picked.push(i);
+    if (picked.length >= count) break;
+  }
+  return picked.sort((a, b) => a - b);
+}
+
+// Refine a node to the redness centroid in a small window (full-res coords).
+function gridRefineNode(mask, w, h, cx, cy, rad) {
+  let sx = 0, sy = 0, sw = 0;
+  const x0 = Math.max(0, Math.round(cx - rad)), x1 = Math.min(w - 1, Math.round(cx + rad));
+  const y0 = Math.max(0, Math.round(cy - rad)), y1 = Math.min(h - 1, Math.round(cy + rad));
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const v = mask[y * w + x];
+      if (v > 0) { sx += x * v; sy += y * v; sw += v; }
+    }
+  }
+  if (sw <= 0) return null;
+  return { x: sx / sw, y: sy / sw };
+}
+
+function autoDetectGridPoints() {
+  const statusEl = document.getElementById("gridRectifyStatus");
+  const setMsg = (m) => { if (statusEl) statusEl.textContent = m; };
+  if (!gridRectifyImg) { setMsg("Load a photo first."); return false; }
+  const N = gridRectifyN;
+  try {
+    const ds = gridDetectDownscale(gridRectifyImg, 900);
+    const ctx = ds.canvas.getContext("2d", { willReadFrequently: true });
+    const mask = gridBuildRedMask(ctx, ds.w, ds.h);
+
+    let total = 0;
+    for (let i = 0; i < mask.length; i++) total += mask[i];
+    if (total < ds.w * ds.h * 0.0004) {
+      setMsg("No red grid found. Adjust lighting/exposure, or place nodes manually.");
+      return false;
+    }
+
+    const colProf = gridAxisProfile(mask, ds.w, ds.h, "x");
+    const rowProf = gridAxisProfile(mask, ds.w, ds.h, "y");
+    const cols = gridPickPeaks(colProf, N, Math.max(3, ds.w / (N * 2.2)));
+    const rows = gridPickPeaks(rowProf, N, Math.max(3, ds.h / (N * 2.2)));
+
+    if (cols.length < N || rows.length < N) {
+      setMsg(`Found ${cols.length}\u00d7${rows.length} lines, need ${N}\u00d7${N}. Try a different grid size or adjust manually.`);
+      return false;
+    }
+
+    const inv = 1 / ds.scale;                 // downscaled -> full-res
+    const refineRad = Math.max(2, Math.round(Math.min(ds.w, ds.h) / (N * 6)));
+    const pts = [];
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        const cx = cols[i], cy = rows[j];
+        const ref = gridRefineNode(mask, ds.w, ds.h, cx, cy, refineRad) || { x: cx, y: cy };
+        pts[gridIdx(i, j)] = { x: ref.x * inv, y: ref.y * inv };
+      }
+    }
+    gridRectifyPoints = pts;
+    drawGridRectify();
+    setMsg(`Auto-detected ${N}\u00d7${N} grid. Drag any node to fine-tune, then Save.`);
+    return true;
+  } catch (e) {
+    console.error("[grid] auto-detect failed:", e);
+    setMsg("Auto-detect failed: " + e.message);
+    return false;
+  }
+}
+
 function wireGridRectifyControls() {
   const modal = document.getElementById("gridRectifyModal");
   if (!modal) return;
@@ -10149,6 +10347,8 @@ function wireGridRectifyControls() {
   const sizeSel = document.getElementById("gridRectifySize");
   if (closeBtn) closeBtn.addEventListener("click", closeGridRectify);
   if (resetBtn) resetBtn.addEventListener("click", () => { if (gridRectifyImg) { initGridRectifyPoints(); drawGridRectify(); } });
+  const autoBtn = document.getElementById("gridRectifyAutoBtn");
+  if (autoBtn) autoBtn.addEventListener("click", () => { autoDetectGridPoints(); });
   if (saveBtn) saveBtn.addEventListener("click", rectifyAndSaveGrid);
   if (sizeSel) sizeSel.addEventListener("change", () => {
     gridRectifyN = parseInt(sizeSel.value, 10) || 10;
@@ -10305,7 +10505,7 @@ function updateArDebugHud() {
     `cam fwd ${fwd}\n` +
     `model ${model}\n` +
     `fov H${(arCameraHFovDeg||0).toFixed(0)} V${arRendererCamera ? arRendererCamera.fov.toFixed(0) : "-"} ${arCameraFovSource}\n` +
-    `pose ${arPoseMode}\n` +
+    `pose ${arPoseMode}${arPoseMode === "test" && arGeoFailReason ? " - " + arGeoFailReason : ""}${arPoseMode === "geo" && arEyePos && arOrbitCenter ? " dist " + arEyePos.distanceTo(arOrbitCenter).toFixed(0) + "m" : ""}\n` +
     `src ${src}  fps ${arRenderFps.toFixed(1)}`;
 }
 

@@ -23,14 +23,14 @@
   <!-- proj4 (map projection / georeferencing) -->
   <script src="vendor/proj4.js"></script>
   <!-- web-ifc (IFC parsing) loaded dynamically as ES module in ifc-viewer.js -->
-  <link rel="stylesheet" href="styles.css?v=20260730-220500" />
+  <link rel="stylesheet" href="styles.css?v=20260730-222000" />
 </head>
 <body>
 
 <header>
   <h1>📷 Photo Vault <span id="buildStamp" style="font-size:.55rem;font-weight:400;opacity:.7;vertical-align:middle;">build …</span></h1>
   <div style="display:flex;gap:8px;align-items:center;">
-    <a class="map-nav-link" href="map.html?v=20260730-220500">🗺 Map summary</a>
+    <a class="map-nav-link" href="map.html?v=20260730-222000">🗺 Map summary</a>
     <button id="openSettingsButton" class="secondary" hidden>⚙ Settings</button>
     <button id="openPeerTransferViewTop" class="secondary">🔁 Transfer</button>
     <button id="installButton" class="secondary" hidden>⬇ Install App</button>
@@ -530,6 +530,7 @@
             <option value="12">12 × 12</option>
           </select>
         </label>
+        <button id="gridRectifyAutoBtn" type="button" class="secondary">✨ Auto-detect</button>
         <button id="gridRectifyResetBtn" type="button" class="secondary">↺ Reset grid</button>
         <button id="gridRectifySaveBtn" type="button" class="primary">✓ Rectify &amp; save</button>
         <button id="closeGridRectifyBtn" type="button" class="secondary">✕ Close</button>
@@ -581,8 +582,8 @@
 <script src="vendor/cv.js?v=20260716-211500"></script>
 <script src="vendor/aruco.js?v=20260716-211500"></script>
 <script src="vendor/apriltag_36h11.js?v=20260716-211500"></script>
-<script src="ifc-viewer.js?v=20260730-220500"></script>
-<script src="ifc-export.js?v=20260730-220500"></script>
-<script src="app.js?v=20260730-220500"></script>
+<script src="ifc-viewer.js?v=20260730-222000"></script>
+<script src="ifc-export.js?v=20260730-222000"></script>
+<script src="app.js?v=20260730-222000"></script>
 </body>
 </html>

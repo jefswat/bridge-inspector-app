@@ -534,6 +534,10 @@ class IFCViewer {
     // Model elevation center (in true-model metres), used as a default eye
     // height when positioning the camera from a photo's ground location.
     this.modelElevCenterM = (tMinEl + tMaxEl) / 2;
+    // Lowest point of the model (pier/abutment base). Used as the ground datum
+    // for standing-eye AR so the overlay sits at real human eye height.
+    this.modelElevMinM = tMinEl;
+    this.modelElevMaxM = tMaxEl;
     const trueCorners = [
       [tMinE, tMinN], [tMaxE, tMinN], [tMaxE, tMaxN], [tMinE, tMaxN],
     ];
