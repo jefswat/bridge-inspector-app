@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v165";
-const BUILD_STAMP = "2026-07-30 19:05:00";
+const BUILD_VERSION = "v166";
+const BUILD_STAMP = "2026-07-30 19:12:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -316,7 +316,8 @@ let arDeviceOrientation    = { alpha: 0, beta: 0, gamma: 0 }; // from DeviceOrie
 let arPermissionGranted    = false;
 // AR orbit controls (drag to rotate / wheel to zoom the test view)
 let arOrbitInitialized     = false;
-let arOrbitCenter          = null; // THREE.Vector3 (lazy)
+let arOrbitCenter          = null; // THREE.Vector3 (lazy) - model center
+let arEyePos               = null; // THREE.Vector3 - YOUR fixed position (AR eye)
 let arOrbitRadius          = 1;
 let arOrbitDist            = 3;
 let arOrbitAz              = 0.9;  // azimuth (radians) about world Z
@@ -1708,16 +1709,20 @@ async function openArViewModal() {
   arRenderFrames = 0;
   arRenderSampleStartMs = performance.now();
   arRenderFps = 0;
-  stopArCameraFeed();
-  if (arCameraVideo) arCameraVideo.style.display = "none";
+  // Camera ON: live feed behind a transparent 3D overlay (true AR).
+  startArCameraFeed();
+  if (arCameraVideo) {
+    arCameraVideo.style.display = "";
+    arCameraVideo.style.zIndex = "1";
+  }
   if (arOverlayCanvas) {
     arOverlayCanvas.style.opacity = "1";
     arOverlayCanvas.style.zIndex = "2";
-    arOverlayCanvas.style.background = "#020617";
+    arOverlayCanvas.style.background = "transparent";
   }
   if (arStatusMessage) {
     arStatusMessage.style.zIndex = "5";
-    arStatusMessage.textContent = "AR 3D-only test mode - camera off";
+    arStatusMessage.textContent = "AR starting - point your device around";
   }
   if (arOpacitySlider) arOpacitySlider.value = "100";
   if (arOpacityValue) arOpacityValue.textContent = "1.00";
@@ -1727,8 +1732,7 @@ async function openArViewModal() {
     initArLocationPickerMap();
   }
   
-  setStatus("AR 3D-only test mode starting...");
-  // Camera intentionally disabled for IFC visibility testing.
+  setStatus("AR view starting...");
   
   // Start device orientation listener
   if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
@@ -1754,9 +1758,10 @@ async function openArViewModal() {
     setStatus("Device orientation not available on this device.");
   }
   
-  // Reset orbit framing for this session and enable drag-to-rotate controls.
+  // Reset AR view for this session and enable drag-to-look controls.
   arOrbitInitialized = false;
   arOrbitDragging = false;
+  arEyePos = null;
   setupArOrbitControls();
 
   // Start render loop
@@ -1804,10 +1809,11 @@ function stopArCameraFeed() {
 function ensureArRenderer() {
   if (!arOverlayCanvas || typeof THREE === "undefined") return false;
   if (!arRenderer) {
-    arRenderer = new THREE.WebGLRenderer({ canvas: arOverlayCanvas, alpha: false, antialias: true, preserveDrawingBuffer: false });
+    arRenderer = new THREE.WebGLRenderer({ canvas: arOverlayCanvas, alpha: true, antialias: true, preserveDrawingBuffer: false });
     arRenderer.setPixelRatio(window.devicePixelRatio || 1);
-    arRenderer.setClearColor(0x020617, 1);
   }
+  // Transparent clear so the live camera feed shows through behind the model.
+  arRenderer.setClearColor(0x000000, 0);
   if (!arRendererScene) {
     arRendererScene = new THREE.Scene();
     arRendererScene.background = new THREE.Color(0x020617);
@@ -1849,19 +1855,22 @@ function ensureArModelClone() {
   return true;
 }
 
-function applyArOrbitCamera() {
-  if (!arRendererCamera || !arOrbitCenter) return;
-  const el = Math.max(-1.48, Math.min(1.48, arOrbitEl));
-  const d = arOrbitDist;
-  const cx = arOrbitCenter.x, cy = arOrbitCenter.y, cz = arOrbitCenter.z;
-  const px = cx + d * Math.cos(el) * Math.cos(arOrbitAz);
-  const py = cy + d * Math.cos(el) * Math.sin(arOrbitAz);
-  const pz = cz + d * Math.sin(el);
+function applyArViewCamera() {
+  // True AR: camera stays at YOUR fixed eye position; dragging only rotates the
+  // view direction (yaw/pitch) about that eye — like turning your head.
+  if (!arRendererCamera || !arEyePos) return;
+  const el = Math.max(-1.4, Math.min(1.4, arOrbitEl));
+  const az = arOrbitAz;
+  const dir = new THREE.Vector3(
+    Math.cos(el) * Math.cos(az),
+    Math.cos(el) * Math.sin(az),
+    Math.sin(el)
+  );
   arRendererCamera.up.set(0, 0, 1);
-  arRendererCamera.near = Math.max(d / 1000, 0.01);
-  arRendererCamera.far = d * 100 + arOrbitRadius * 20;
-  arRendererCamera.position.set(px, py, pz);
-  arRendererCamera.lookAt(cx, cy, cz);
+  arRendererCamera.near = Math.max(arOrbitRadius / 2000, 0.05);
+  arRendererCamera.far = arOrbitRadius * 50 + 2000;
+  arRendererCamera.position.copy(arEyePos);
+  arRendererCamera.lookAt(arEyePos.clone().add(dir));
   arRendererCamera.updateProjectionMatrix();
 }
 
@@ -1874,12 +1883,18 @@ function frameArModelForTest() {
     box.getCenter(arOrbitCenter);
     const size = box.getSize(new THREE.Vector3());
     arOrbitRadius = Math.max(size.x, size.y, size.z, ifcViewer.modelRadius || 1) || 1;
-    arOrbitDist = arOrbitRadius * 2.2;
-    arOrbitAz = 0.9;
-    arOrbitEl = 0.5;
+    // Place YOUR eye a standoff back from the model center, looking toward it.
+    arOrbitAz = 0;   // look along +X initially
+    arOrbitEl = 0;
+    const standoff = arOrbitRadius * 1.6;
+    arEyePos = new THREE.Vector3(
+      arOrbitCenter.x - standoff,
+      arOrbitCenter.y,
+      arOrbitCenter.z
+    );
     arOrbitInitialized = true;
   }
-  applyArOrbitCamera();
+  applyArViewCamera();
   return true;
 }
 
@@ -1906,9 +1921,10 @@ function onArOrbitPointerMove(e) {
   const dy = e.clientY - arOrbitLastY;
   arOrbitLastX = e.clientX;
   arOrbitLastY = e.clientY;
-  arOrbitAz -= dx * 0.008;
-  arOrbitEl += dy * 0.008;
-  arOrbitEl = Math.max(-1.48, Math.min(1.48, arOrbitEl));
+  // Turn your head: drag rotates the view direction about your fixed position.
+  arOrbitAz -= dx * 0.005;
+  arOrbitEl += dy * 0.005;
+  arOrbitEl = Math.max(-1.4, Math.min(1.4, arOrbitEl));
 }
 
 function onArOrbitPointerUp() {
@@ -1916,9 +1932,17 @@ function onArOrbitPointerUp() {
 }
 
 function onArOrbitWheel(e) {
+  // Wheel = step forward/back along your current view direction (walk).
   e.preventDefault();
-  const f = Math.exp(e.deltaY * 0.001);
-  arOrbitDist = Math.max(arOrbitRadius * 0.15, Math.min(arOrbitRadius * 40, arOrbitDist * f));
+  if (!arEyePos) return;
+  const el = Math.max(-1.4, Math.min(1.4, arOrbitEl));
+  const dir = new THREE.Vector3(
+    Math.cos(el) * Math.cos(arOrbitAz),
+    Math.cos(el) * Math.sin(arOrbitAz),
+    Math.sin(el)
+  );
+  const step = -Math.sign(e.deltaY) * (arOrbitRadius * 0.08);
+  arEyePos.addScaledVector(dir, step);
 }
 
 function positionArCameraFromGeo(lat, lon, heading, attitude, altitude) {
@@ -2041,23 +2065,32 @@ function updateArRender() {
   }
 }
 
+function renderArScene() {
+  // Render the shared IFC scene with the AR camera, but WITHOUT its opaque
+  // background so the live camera feed shows through. Save/restore per frame so
+  // the normal 3D viewer scene is left completely untouched (AR-only change).
+  const prevBg = ifcViewer.scene.background;
+  ifcViewer.scene.background = null;
+  arRenderer.render(ifcViewer.scene, arRendererCamera);
+  ifcViewer.scene.background = prevBg;
+}
+
 function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
   if (!ifcViewer || !ifcViewer.scene || !arRenderer) return;
   // Test-first: always frame the loaded model so it is guaranteed visible,
   // regardless of georeference. We render ifcViewer.scene directly (no clone).
   if (frameArModelForTest()) {
     if (arStatusMessage) {
-      const r = Math.round(arOrbitRadius || 0);
-      arStatusMessage.textContent = `AR 3D test - drag to rotate, wheel to zoom (model ~${r} units).`;
+      arStatusMessage.textContent = "AR active - drag to look around, wheel to step forward/back.";
     }
-    arRenderer.render(ifcViewer.scene, arRendererCamera);
+    renderArScene();
     return;
   }
   if (arSelectedLocationIsManual) {
     const posed = positionArCameraFromGeo(lat, lon, heading, pitch, alt);
     if (posed) {
       if (arStatusMessage) arStatusMessage.textContent = "AR geo overlay active.";
-      arRenderer.render(ifcViewer.scene, arRendererCamera);
+      renderArScene();
       return;
     }
   }
