@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v167";
-const BUILD_STAMP = "2026-07-30 19:24:00";
+const BUILD_VERSION = "v168";
+const BUILD_STAMP = "2026-07-30 20:20:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -338,6 +338,8 @@ let arOrbitControlsBound   = false;
 let arCameraEnabled        = true;  // live camera overlay default ON
 let arHasOrientation       = false; // true once device orientation drives the look
 let arModelBoundsXY        = null;  // {minx,maxx,miny,maxy} model footprint (scene X/Y)
+let arModelFootprintXY     = null;  // convex-hull outline [{x,y}...] of the model footprint (model X=E, Y=N)
+let arMiniView             = null;  // {minx,maxx,miny,maxy} square plan-view extent (zoomed out past the bridge)
 let arMiniCtx              = null;
 let arMiniDragging         = false;
 const arPointers           = new Map(); // active pointerId -> {x,y} for pinch
@@ -1789,6 +1791,8 @@ async function openArViewModal() {
   arOrbitDragging = false;
   arHasOrientation = false;
   arModelBoundsXY = null;
+  arModelFootprintXY = null;
+  arMiniView = null;
   arPointers.clear();
   arPinchLastDist = 0;
   arEyePos = null;
@@ -1915,6 +1919,26 @@ function frameArModelForTest() {
     arOrbitRadius = Math.max(size.x, size.y, size.z, ifcViewer.modelRadius || 1) || 1;
     // Model footprint (top-down X/Y) for the mini plan view.
     arModelBoundsXY = { minx: box.min.x, maxx: box.max.x, miny: box.min.y, maxy: box.max.y };
+    // True footprint outline (convex hull of the model in X=E/Y=N), so the plan
+    // view matches the diagonal shape/orientation seen on the Map summary rather
+    // than an axis-aligned box.
+    arModelFootprintXY = computeArFootprintHull() || [
+      { x: box.min.x, y: box.min.y }, { x: box.max.x, y: box.min.y },
+      { x: box.max.x, y: box.max.y }, { x: box.min.x, y: box.max.y },
+    ];
+    // Plan-view extent, zoomed OUT past the bridge so there is room to roam
+    // around it (the map is larger than the structure itself). Square + centered
+    // on the footprint so X and Y keep equal scale (no distortion).
+    {
+      let fminx = Infinity, fmaxx = -Infinity, fminy = Infinity, fmaxy = -Infinity;
+      for (const p of arModelFootprintXY) {
+        if (p.x < fminx) fminx = p.x; if (p.x > fmaxx) fmaxx = p.x;
+        if (p.y < fminy) fminy = p.y; if (p.y > fmaxy) fmaxy = p.y;
+      }
+      const cx = (fminx + fmaxx) / 2, cy = (fminy + fmaxy) / 2;
+      const half = Math.max(fmaxx - fminx, fmaxy - fminy, 1) / 2 * 2.4; // 2.4x -> bridge ~40% of map
+      arMiniView = { minx: cx - half, maxx: cx + half, miny: cy - half, maxy: cy + half };
+    }
     // Place YOUR eye a standoff back from the model center, looking toward it.
     arOrbitAz = 0;   // look along +X initially
     arOrbitEl = 0;
@@ -2022,11 +2046,18 @@ function onArOrbitWheel(e) {
 }
 
 // ── Mini plan-view (top-down) with draggable position arrow ──
+// The plan view uses a zoomed-out SQUARE extent (arMiniView) centered on the
+// bridge so there is roaming room around the structure, and X/Y keep equal
+// scale (no distortion). Falls back to the raw footprint box if needed.
+function arMiniExtent() {
+  return arMiniView || arModelBoundsXY;
+}
+
 function arMiniToModel(cx, cy) {
-  if (!arModelBoundsXY || !arMiniMap) return null;
+  const b = arMiniExtent();
+  if (!b || !arMiniMap) return null;
   const pad = 14;
   const W = arMiniMap.width, H = arMiniMap.height;
-  const b = arModelBoundsXY;
   const fx = Math.min(1, Math.max(0, (cx - pad) / Math.max(1, W - 2 * pad)));
   const fy = Math.min(1, Math.max(0, (cy - pad) / Math.max(1, H - 2 * pad)));
   return {
@@ -2036,9 +2067,9 @@ function arMiniToModel(cx, cy) {
 }
 
 function arModelToMini(x, y) {
+  const b = arMiniExtent();
   const pad = 14;
   const W = arMiniMap.width, H = arMiniMap.height;
-  const b = arModelBoundsXY;
   const fx = (x - b.minx) / Math.max(1e-6, b.maxx - b.minx);
   const fy = (b.maxy - y) / Math.max(1e-6, b.maxy - b.miny);
   return { cx: pad + fx * (W - 2 * pad), cy: pad + fy * (H - 2 * pad) };
@@ -2064,19 +2095,79 @@ function arMiniSetFromEvent(e) {
   if (m) { arEyePos.x = m.x; arEyePos.y = m.y; }
 }
 
+// Convex hull (Andrew's monotone chain) over [ [x,y], ... ]; returns [{x,y}...].
+function arConvexHull(points) {
+  if (!points || points.length < 3) return (points || []).map((p) => ({ x: p[0], y: p[1] }));
+  const pts = points.slice().sort((a, b) => (a[0] - b[0]) || (a[1] - b[1]));
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  lower.pop(); upper.pop();
+  return lower.concat(upper).map((p) => ({ x: p[0], y: p[1] }));
+}
+
+// Sample the loaded IFC model's vertices (world X=E, Y=N) and return their
+// convex-hull footprint outline. Subsamples for performance.
+function computeArFootprintHull() {
+  if (!ifcViewer || !ifcViewer.model || typeof THREE === "undefined") return null;
+  const meshes = [];
+  ifcViewer.model.updateWorldMatrix(true, true);
+  ifcViewer.model.traverse((o) => { if (o.isMesh && o.geometry && o.geometry.attributes && o.geometry.attributes.position) meshes.push(o); });
+  if (!meshes.length) return null;
+  let total = 0;
+  for (const m of meshes) total += m.geometry.attributes.position.count;
+  const budget = 6000;
+  const step = Math.max(1, Math.floor(total / budget));
+  const pts = [];
+  const v = new THREE.Vector3();
+  let k = 0;
+  for (const m of meshes) {
+    const pos = m.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      if ((k++ % step) !== 0) continue;
+      v.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld);
+      if (isFinite(v.x) && isFinite(v.y)) pts.push([v.x, v.y]);
+    }
+  }
+  if (pts.length < 3) return null;
+  const hull = arConvexHull(pts);
+  return hull.length >= 3 ? hull : null;
+}
+
 function drawArMiniMap() {
-  if (!arMiniCtx || !arModelBoundsXY || !arEyePos) return;
+  if (!arMiniCtx || !arMiniExtent() || !arEyePos) return;
   const ctx = arMiniCtx;
   const W = arMiniMap.width, H = arMiniMap.height, pad = 14;
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = "rgba(2,6,23,0.72)";
   ctx.fillRect(0, 0, W, H);
-  // Footprint rectangle
-  ctx.strokeStyle = "#38bdf8";
-  ctx.lineWidth = 1.5;
-  ctx.strokeRect(pad, pad, W - 2 * pad, H - 2 * pad);
-  ctx.fillStyle = "rgba(56,189,248,0.12)";
-  ctx.fillRect(pad, pad, W - 2 * pad, H - 2 * pad);
+  // Map border
+  ctx.strokeStyle = "rgba(148,163,184,0.35)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0.5, 0.5, W - 1, H - 1);
+  // True bridge footprint outline (matches the Map summary orientation/shape).
+  if (arModelFootprintXY && arModelFootprintXY.length >= 3) {
+    ctx.beginPath();
+    arModelFootprintXY.forEach((p, i) => {
+      const q = arModelToMini(p.x, p.y);
+      if (i === 0) ctx.moveTo(q.cx, q.cy); else ctx.lineTo(q.cx, q.cy);
+    });
+    ctx.closePath();
+    ctx.fillStyle = "rgba(56,189,248,0.18)";
+    ctx.fill();
+    ctx.strokeStyle = "#38bdf8";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
   // "N" indicator (north = +Y = top)
   ctx.fillStyle = "#94a3b8";
   ctx.font = "10px sans-serif";
@@ -2085,19 +2176,19 @@ function drawArMiniMap() {
   const p = arModelToMini(arEyePos.x, arEyePos.y);
   const az = arOrbitAz;
   const hx = Math.cos(az), hy = -Math.sin(az); // screen: +Y is down
-  const L = 12;
+  const L = 15;
   ctx.strokeStyle = "#f59e0b";
   ctx.fillStyle = "#f59e0b";
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 2.5;
   ctx.beginPath();
-  ctx.arc(p.cx, p.cy, 4, 0, Math.PI * 2);
+  ctx.arc(p.cx, p.cy, 5, 0, Math.PI * 2);
   ctx.fill();
   ctx.beginPath();
   ctx.moveTo(p.cx, p.cy);
   ctx.lineTo(p.cx + hx * L, p.cy + hy * L);
   ctx.stroke();
   // Arrow head
-  const ah = 4;
+  const ah = 6;
   const ang = Math.atan2(hy, hx);
   ctx.beginPath();
   ctx.moveTo(p.cx + hx * L, p.cy + hy * L);

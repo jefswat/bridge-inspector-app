@@ -1676,8 +1676,10 @@ select {
 
 #arMiniMap {
   display: block;
-  width: 130px;
-  height: 130px;
+  width: 240px;
+  height: 240px;
+  max-width: 44vw;
+  max-height: 44vw;
   border-radius: 4px;
   cursor: crosshair;
   touch-action: none;
