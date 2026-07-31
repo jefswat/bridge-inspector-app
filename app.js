@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v164";
-const BUILD_STAMP = "2026-07-30 18:55:30";
+const BUILD_VERSION = "v165";
+const BUILD_STAMP = "2026-07-30 19:05:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -314,6 +314,17 @@ let arPanY                 = 0;  // manual pan in scene space (metres)
 let arPivotOffsetM         = 0.6; // 0.6 metres behind the camera position
 let arDeviceOrientation    = { alpha: 0, beta: 0, gamma: 0 }; // from DeviceOrientationEvent
 let arPermissionGranted    = false;
+// AR orbit controls (drag to rotate / wheel to zoom the test view)
+let arOrbitInitialized     = false;
+let arOrbitCenter          = null; // THREE.Vector3 (lazy)
+let arOrbitRadius          = 1;
+let arOrbitDist            = 3;
+let arOrbitAz              = 0.9;  // azimuth (radians) about world Z
+let arOrbitEl              = 0.5;  // elevation (radians)
+let arOrbitDragging        = false;
+let arOrbitLastX           = 0;
+let arOrbitLastY           = 0;
+let arOrbitControlsBound   = false;
 const AR_RENDER_HZ         = 30;
 const AR_RENDER_INTERVAL_MS = 1000 / AR_RENDER_HZ;
 
@@ -1743,6 +1754,11 @@ async function openArViewModal() {
     setStatus("Device orientation not available on this device.");
   }
   
+  // Reset orbit framing for this session and enable drag-to-rotate controls.
+  arOrbitInitialized = false;
+  arOrbitDragging = false;
+  setupArOrbitControls();
+
   // Start render loop
   startArRenderLoop();
 }
@@ -1824,61 +1840,85 @@ function syncArCanvasSize() {
 }
 
 function ensureArModelClone() {
-  if (!ifcViewer || !ifcViewer.model || !arRendererScene || typeof THREE === "undefined") return false;
-  if (arModelClone) return true;
-  arModelClone = ifcViewer.model.clone(true);
-  arModelClone.rotation.set(0, 0, 0);
-  arTestMaterial = new THREE.MeshBasicMaterial({
-    color: 0x00ffff,
-    side: THREE.DoubleSide,
-    transparent: false,
-    depthTest: false,
-    depthWrite: false,
-  });
-  arModelClone.traverse((child) => {
-    if (child.isMesh) {
-      child.material = arTestMaterial;
-      child.visible = true;
-      child.frustumCulled = false;
-      child.renderOrder = 10;
-    }
-  });
-  arRendererScene.add(arModelClone);
+  // NO CLONE. ifcViewer.model.clone(true) crashes with "Invalid array length"
+  // because Object3D.copy deep-clones userData via JSON, and the model stuffs
+  // the live web-ifc WASM object + huge elements array into userData. Instead we
+  // render ifcViewer.scene directly (it already renders fine in the 3D viewer).
+  if (!ifcViewer || !ifcViewer.model || !ifcViewer.scene || typeof THREE === "undefined") return false;
+  arModelClone = ifcViewer.model; // reference only, for bounds/framing
   return true;
 }
 
-function frameArModelForTest() {
-  if (!ifcViewer || !arRendererCamera || !ensureArModelClone() || typeof THREE === "undefined") return false;
-  const box = new THREE.Box3().setFromObject(arModelClone);
-  const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-  const radius = Math.max(size.x, size.y, size.z, ifcViewer.modelRadius || 50);
-  arModelClone.visible = true;
-  if (arTestBoxHelper && arTestBoxHelper.parent !== arRendererScene) {
-    arRendererScene.add(arTestBoxHelper);
-  }
-  if (!arTestBoxHelper) {
-    arTestBoxHelper = new THREE.BoxHelper(arModelClone, 0xff00ff);
-    arTestBoxHelper.renderOrder = 20;
-    if (arTestBoxHelper.material) {
-      arTestBoxHelper.material.depthTest = false;
-      arTestBoxHelper.material.depthWrite = false;
-      arTestBoxHelper.material.linewidth = 4;
-    }
-    arRendererScene.add(arTestBoxHelper);
-  } else {
-    arTestBoxHelper.setFromObject(arModelClone);
-    if (arTestBoxHelper.material) arTestBoxHelper.material.color.set(0xff00ff);
-    arTestBoxHelper.visible = true;
-  }
-  // Scale clip planes to the actual IFC bounds so large mm-unit bridges render.
-  arRendererCamera.near = Math.max(radius / 10000, 0.01);
-  arRendererCamera.far = radius * 50;
+function applyArOrbitCamera() {
+  if (!arRendererCamera || !arOrbitCenter) return;
+  const el = Math.max(-1.48, Math.min(1.48, arOrbitEl));
+  const d = arOrbitDist;
+  const cx = arOrbitCenter.x, cy = arOrbitCenter.y, cz = arOrbitCenter.z;
+  const px = cx + d * Math.cos(el) * Math.cos(arOrbitAz);
+  const py = cy + d * Math.cos(el) * Math.sin(arOrbitAz);
+  const pz = cz + d * Math.sin(el);
   arRendererCamera.up.set(0, 0, 1);
-  arRendererCamera.position.set(center.x + radius * 1.8, center.y - radius * 1.8, center.z + radius * 1.2);
-  arRendererCamera.lookAt(center);
+  arRendererCamera.near = Math.max(d / 1000, 0.01);
+  arRendererCamera.far = d * 100 + arOrbitRadius * 20;
+  arRendererCamera.position.set(px, py, pz);
+  arRendererCamera.lookAt(cx, cy, cz);
   arRendererCamera.updateProjectionMatrix();
+}
+
+function frameArModelForTest() {
+  if (!ensureArModelClone() || !arRendererCamera || typeof THREE === "undefined") return false;
+  if (!arOrbitInitialized) {
+    const box = new THREE.Box3().setFromObject(ifcViewer.model);
+    if (box.isEmpty() || !isFinite(box.min.x) || !isFinite(box.max.x)) return false;
+    if (!arOrbitCenter) arOrbitCenter = new THREE.Vector3();
+    box.getCenter(arOrbitCenter);
+    const size = box.getSize(new THREE.Vector3());
+    arOrbitRadius = Math.max(size.x, size.y, size.z, ifcViewer.modelRadius || 1) || 1;
+    arOrbitDist = arOrbitRadius * 2.2;
+    arOrbitAz = 0.9;
+    arOrbitEl = 0.5;
+    arOrbitInitialized = true;
+  }
+  applyArOrbitCamera();
   return true;
+}
+
+function setupArOrbitControls() {
+  if (!arOverlayCanvas || arOrbitControlsBound) return;
+  arOrbitControlsBound = true;
+  arOverlayCanvas.style.touchAction = "none";
+  arOverlayCanvas.addEventListener("pointerdown", onArOrbitPointerDown);
+  arOverlayCanvas.addEventListener("pointermove", onArOrbitPointerMove);
+  window.addEventListener("pointerup", onArOrbitPointerUp);
+  arOverlayCanvas.addEventListener("wheel", onArOrbitWheel, { passive: false });
+}
+
+function onArOrbitPointerDown(e) {
+  arOrbitDragging = true;
+  arOrbitLastX = e.clientX;
+  arOrbitLastY = e.clientY;
+  try { arOverlayCanvas.setPointerCapture(e.pointerId); } catch (_) {}
+}
+
+function onArOrbitPointerMove(e) {
+  if (!arOrbitDragging) return;
+  const dx = e.clientX - arOrbitLastX;
+  const dy = e.clientY - arOrbitLastY;
+  arOrbitLastX = e.clientX;
+  arOrbitLastY = e.clientY;
+  arOrbitAz -= dx * 0.008;
+  arOrbitEl += dy * 0.008;
+  arOrbitEl = Math.max(-1.48, Math.min(1.48, arOrbitEl));
+}
+
+function onArOrbitPointerUp() {
+  arOrbitDragging = false;
+}
+
+function onArOrbitWheel(e) {
+  e.preventDefault();
+  const f = Math.exp(e.deltaY * 0.001);
+  arOrbitDist = Math.max(arOrbitRadius * 0.15, Math.min(arOrbitRadius * 40, arOrbitDist * f));
 }
 
 function positionArCameraFromGeo(lat, lon, heading, attitude, altitude) {
@@ -2002,22 +2042,22 @@ function updateArRender() {
 }
 
 function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
-  if (!ifcViewer || !arRenderer || !ensureArModelClone()) return;
+  if (!ifcViewer || !ifcViewer.scene || !arRenderer) return;
   // Test-first: always frame the loaded model so it is guaranteed visible,
-  // regardless of georeference.
+  // regardless of georeference. We render ifcViewer.scene directly (no clone).
   if (frameArModelForTest()) {
     if (arStatusMessage) {
-      const r = Math.round(ifcViewer.modelRadius || 0);
-      arStatusMessage.textContent = `AR 3D-only test - cyan IFC + magenta box (size ~${r} units).`;
+      const r = Math.round(arOrbitRadius || 0);
+      arStatusMessage.textContent = `AR 3D test - drag to rotate, wheel to zoom (model ~${r} units).`;
     }
-    arRenderer.render(arRendererScene, arRendererCamera);
+    arRenderer.render(ifcViewer.scene, arRendererCamera);
     return;
   }
   if (arSelectedLocationIsManual) {
     const posed = positionArCameraFromGeo(lat, lon, heading, pitch, alt);
     if (posed) {
       if (arStatusMessage) arStatusMessage.textContent = "AR geo overlay active.";
-      arRenderer.render(arRendererScene, arRendererCamera);
+      arRenderer.render(ifcViewer.scene, arRendererCamera);
       return;
     }
   }
