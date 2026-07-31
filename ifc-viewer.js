@@ -359,13 +359,16 @@ class IFCViewer {
       console.log(`Streamed ${meshCount} meshes across ${elements.length} elements${excludeRebar ? ` (rebar skipped: ${skippedRebar})` : ''}`);
 
 
-      // Read the model's real length unit (metres per scene unit). web-ifc emits
-      // geometry in the file's native length unit with NO normalization, so this
-      // factor is what lets AR place the eye at true 1:1 human scale.
+      // Scene units are METRES. web-ifc normalizes all geometry to metres on
+      // load regardless of the file's declared IfcSIUnit (verified: a file that
+      // declares MILLIMETRE still yields ~58 units for a ~58 m bridge). So the
+      // AR true-scale math uses metersPerUnit = 1. readLengthUnit only records
+      // the file's DECLARED unit for display; it must not rescale the geometry.
       this.metersPerUnit = 1;
-      this.lengthUnitName = 'metre (assumed)';
+      this.lengthUnitName = 'metre';
+      this.fileDeclaredLengthUnit = null;
       try { this.readLengthUnit(ifc, modelID); } catch (e) { console.warn('length unit read failed:', e); }
-      console.log(`IFC length unit: ${this.lengthUnitName} (${this.metersPerUnit} m/unit)`);
+      console.log(`IFC scene unit: metre (web-ifc normalized); file declares: ${this.fileDeclaredLengthUnit || 'unspecified'}`);
 
       // Extract georeferencing (map coords) BEFORE fitCameraToObject bakes
       // recentering into the geometry, while meshes are still in web-ifc space.
@@ -460,26 +463,18 @@ class IFCViewer {
   }
 
   /**
-   * Read the model's length unit and set this.metersPerUnit (metres per one
-   * scene/model unit) + this.lengthUnitName. web-ifc returns geometry in the
-   * file's native length unit with no normalization, so a foot/inch/mm model
-   * needs this factor to place the AR eye and move steps at true metre scale.
-   * Defaults are left untouched (1 m/unit) if no length unit is found.
+   * Record the model's DECLARED length unit into this.fileDeclaredLengthUnit
+   * (informational). It does NOT set metersPerUnit: web-ifc already normalizes
+   * all geometry to metres on load, so scene units are metres (metersPerUnit=1)
+   * regardless of whether the file declares metre / millimetre / foot / inch.
+   * Rescaling by the declared unit was the v177 bug that made a millimetre-
+   * declared bridge render 1000x too small and pushed the AR eye past the far
+   * clip plane (blank view).
    */
   readLengthUnit(ifc, modelID) {
     const WebIFC = window.WebIFC;
     const val = (x) => (x && x.value !== undefined ? x.value : x);
     const clean = (x) => String(val(x) ?? '').replace(/[.]/g, '').toUpperCase();
-    const SI_PREFIX = {
-      EXA: 1e18, PETA: 1e15, TERA: 1e12, GIGA: 1e9, MEGA: 1e6, KILO: 1e3,
-      HECTO: 1e2, DECA: 1e1, DECI: 1e-1, CENTI: 1e-2, MILLI: 1e-3,
-      MICRO: 1e-6, NANO: 1e-9,
-    };
-    // Metres represented by one instance of an IfcSIUnit length (base = METRE).
-    const siFactor = (line) => {
-      const pfx = line && line.Prefix ? clean(line.Prefix) : '';
-      return (pfx && SI_PREFIX[pfx] != null) ? SI_PREFIX[pfx] : 1;
-    };
     const resolve = (ref) => {
       if (ref == null) return null;
       if (typeof ref === 'object' && ref.UnitType !== undefined) return ref; // already flat
@@ -497,19 +492,12 @@ class IFCViewer {
         const line = resolve(u);
         if (!line || clean(line.UnitType) !== 'LENGTHUNIT') continue;
         if (line.ConversionFactor) {
-          // IfcConversionBasedUnit (e.g. foot, inch): metres = ratio * baseSI.
-          const mwu = resolve(line.ConversionFactor) || line.ConversionFactor;
-          const ratio = mwu && mwu.ValueComponent != null ? Number(val(mwu.ValueComponent)) : NaN;
-          const base = mwu && mwu.UnitComponent ? siFactor(resolve(mwu.UnitComponent)) : 1;
-          if (isFinite(ratio) && ratio > 0) {
-            this.metersPerUnit = ratio * base;
-            this.lengthUnitName = line.Name ? String(val(line.Name)).toLowerCase() : 'conversion unit';
-            return;
-          }
+          // IfcConversionBasedUnit (e.g. foot, inch).
+          this.fileDeclaredLengthUnit = line.Name ? String(val(line.Name)).toLowerCase() : 'conversion unit';
+          return;
         } else if (line.Name) {
           // IfcSIUnit (METRE with optional prefix).
-          this.metersPerUnit = siFactor(line);
-          this.lengthUnitName = (line.Prefix ? clean(line.Prefix).toLowerCase() : '') + String(val(line.Name)).toLowerCase();
+          this.fileDeclaredLengthUnit = (line.Prefix ? clean(line.Prefix).toLowerCase() : '') + String(val(line.Name)).toLowerCase();
           return;
         }
       }

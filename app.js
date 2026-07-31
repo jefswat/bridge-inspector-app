@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v179";
-const BUILD_STAMP = "2026-07-31 00:55:00";
+const BUILD_VERSION = "v180";
+const BUILD_STAMP = "2026-07-31 01:20:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -10606,13 +10606,13 @@ function updateArDebugHud() {
   let unitLine = "unit n/a";
   if (ifcViewer && ifcViewer.model && typeof THREE !== "undefined") {
     const mpu = ifcViewer.metersPerUnit || 1;
-    const nm = ifcViewer.lengthUnitName || "metre?";
+    const decl = ifcViewer.fileDeclaredLengthUnit ? ` file:${ifcViewer.fileDeclaredLengthUnit}` : "";
     try {
       const b = new THREE.Box3().setFromObject(ifcViewer.model);
       const s = b.getSize(new THREE.Vector3());
       const Lm = Math.max(s.x, s.y) * mpu, Wm = Math.min(s.x, s.y) * mpu, Hm = s.z * mpu;
-      unitLine = `unit ${nm} (${mpu} m/u)  size ${Lm.toFixed(1)}x${Wm.toFixed(1)}x${Hm.toFixed(1)} m (${(Lm * 3.281).toFixed(0)} ft long)`;
-    } catch (e) { unitLine = `unit ${nm} (${mpu} m/u)`; }
+      unitLine = `scene metre${decl}  size ${Lm.toFixed(1)}x${Wm.toFixed(1)}x${Hm.toFixed(1)} m (${(Lm * 3.281).toFixed(0)} ft long)`;
+    } catch (e) { unitLine = `scene metre${decl}`; }
   }
   arHudEl.textContent =
     `AZ ${azDeg.toFixed(2)}\u00b0  EL ${elDeg.toFixed(2)}\u00b0\n` +
