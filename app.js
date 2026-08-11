@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v185";
+const BUILD_VERSION = "v186";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -297,6 +297,7 @@ const arTurnRightBtn       = document.getElementById("arTurnRightBtn");
 const arFwdBtn             = document.getElementById("arFwdBtn");
 const arBackBtn            = document.getElementById("arBackBtn");
 const arResetViewBtn       = document.getElementById("arResetViewBtn");
+const arMiniSatBtn         = document.getElementById("arMiniSatBtn");
 const arStatusMessage      = document.getElementById("arStatusMessage");
 const arUseCurrentLocation = document.getElementById("arUseCurrentLocation");
 const arSelectLocationButton = document.getElementById("arSelectLocationButton");
@@ -1730,6 +1731,15 @@ function registerEvents() {
   if (arFwdBtn) arFwdBtn.addEventListener("click", () => arMoveForward(arMetersToUnits(2)));
   if (arBackBtn) arBackBtn.addEventListener("click", () => arMoveForward(-arMetersToUnits(2)));
   if (arResetViewBtn) arResetViewBtn.addEventListener("click", () => resetArView());
+  if (arMiniSatBtn) {
+    const syncSatBtn = () => arMiniSatBtn.classList.toggle("is-on", arMiniSatelliteEnabled());
+    syncSatBtn();
+    arMiniSatBtn.addEventListener("click", () => {
+      localStorage.setItem(AR_MINI_SAT_KEY, arMiniSatelliteEnabled() ? "0" : "1");
+      syncSatBtn();
+      drawArMiniMap();
+    });
+  }
 }
 
 
@@ -2594,6 +2604,166 @@ function computeArFootprintHull() {
   return hull.length >= 3 ? hull : null;
 }
 
+// ── Plan-view satellite basemap ──────────────────────────────────────────────
+// Esri World Imagery drawn straight into the mini-map canvas. The mini-map is
+// not a Leaflet map, so the tiles are fetched and blitted by hand: each tile's
+// lat/lon corners go back through the model's CRS into the same E/N space the
+// plan view is drawn in, which keeps the imagery registered to the footprint.
+// Only available in georeferenced mode - without a CRS there is nothing to tie
+// the imagery to.
+
+const AR_MINI_SAT_KEY = "arMiniSatellite";
+const AR_MINI_TILE_MAX_Z = 19;   // Esri World Imagery native maximum
+const AR_MINI_TILE_BUDGET = 36;  // per frame; drops zoom rather than fetch more
+const AR_MINI_TILE_CACHE_MAX = 320;
+const arMiniTileCache = new Map(); // "z/x/y" -> { img, ok } | { failed: true }
+
+function arMiniSatelliteEnabled() {
+  return localStorage.getItem(AR_MINI_SAT_KEY) !== "0";
+}
+
+function arMiniTileUrl(z, x, y) {
+  const tpl = (typeof ESRI_IMAGERY_URL === "string")
+    ? ESRI_IMAGERY_URL
+    : "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
+  return tpl.replace("{z}", z).replace("{x}", x).replace("{y}", y);
+}
+
+// Slippy-map tile maths (Web Mercator).
+function arLonToTileX(lon, z) { return (lon + 180) / 360 * Math.pow(2, z); }
+function arLatToTileY(lat, z) {
+  const r = lat * Math.PI / 180;
+  return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * Math.pow(2, z);
+}
+function arTileXToLon(x, z) { return x / Math.pow(2, z) * 360 - 180; }
+function arTileYToLat(y, z) {
+  const n = Math.PI - 2 * Math.PI * y / Math.pow(2, z);
+  return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+}
+
+function arMiniENToLatLon(E, N) {
+  const g = ifcViewer && ifcViewer.georef;
+  if (!g || !g.epsg || !window.proj4) return null;
+  const def = IFCViewer.CRS_DEFS[g.epsg];
+  if (def && !window.proj4.defs(g.epsg)) window.proj4.defs(g.epsg, def);
+  try {
+    const r = window.proj4(g.epsg, "WGS84", [E, N]);
+    return isFinite(r[0]) && isFinite(r[1]) ? { lon: r[0], lat: r[1] } : null;
+  } catch (_) { return null; }
+}
+
+function arMiniLatLonToEN(lat, lon) {
+  const g = ifcViewer && ifcViewer.georef;
+  if (!g || !g.epsg || !window.proj4) return null;
+  try {
+    const r = window.proj4("WGS84", g.epsg, [lon, lat]);
+    return isFinite(r[0]) && isFinite(r[1]) ? { E: r[0], N: r[1] } : null;
+  } catch (_) { return null; }
+}
+
+// Fetch-once tile lookup. Returns a decoded image, or null while it loads or
+// if it failed (offline in the field is expected, so a failure is remembered
+// rather than retried every frame).
+function arMiniTile(z, x, y) {
+  const key = z + "/" + x + "/" + y;
+  const hit = arMiniTileCache.get(key);
+  if (hit) return hit.failed ? null : (hit.ok ? hit.img : null);
+  // Bound the cache: walking a site all day at several zooms would otherwise
+  // hold every tile ever seen. Map preserves insertion order, so this drops the
+  // oldest, which are the ones furthest from where you are now.
+  if (arMiniTileCache.size >= AR_MINI_TILE_CACHE_MAX) {
+    let drop = AR_MINI_TILE_CACHE_MAX / 4;
+    for (const k of arMiniTileCache.keys()) {
+      if (drop-- <= 0) break;
+      arMiniTileCache.delete(k);
+    }
+  }
+  const img = new Image();
+  const entry = { img, ok: false };
+  arMiniTileCache.set(key, entry);
+  img.crossOrigin = "anonymous";       // keeps the canvas untainted
+  img.onload = () => { entry.ok = true; };
+  img.onerror = () => { arMiniTileCache.set(key, { failed: true }); };
+  img.src = arMiniTileUrl(z, x, y);
+  return null;
+}
+
+/**
+ * Draw the satellite basemap behind the plan view. Returns true if any imagery
+ * was painted, so the caller can skip its scrim when there is nothing under it.
+ */
+function drawArMiniSatellite(ctx, W, H) {
+  if (!arMiniSatelliteEnabled() || !arMiniGeoMode || !arGeoReady()) return false;
+  const b = arMiniExtent();
+  if (!b) return false;
+
+  // Extent corners -> lat/lon. All four, since the CRS grid need not be aligned
+  // with north (EPSG:7062 is a transverse Mercator with real convergence).
+  const corners = [
+    arMiniENToLatLon(b.minx, b.miny), arMiniENToLatLon(b.maxx, b.miny),
+    arMiniENToLatLon(b.minx, b.maxy), arMiniENToLatLon(b.maxx, b.maxy),
+  ];
+  if (corners.some((c) => !c)) return false;
+  const lats = corners.map((c) => c.lat), lons = corners.map((c) => c.lon);
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const minLon = Math.min(...lons), maxLon = Math.max(...lons);
+  const midLat = (minLat + maxLat) / 2;
+
+  // Pick the zoom whose tile resolution is closest to the canvas resolution,
+  // then step down if that would need more tiles than the frame budget allows.
+  const groundWidthM = (maxLon - minLon) * 111320 * Math.cos(midLat * Math.PI / 180);
+  const mPerPx = groundWidthM / Math.max(1, W);
+  let z = Math.floor(Math.log2(156543.03392 * Math.cos(midLat * Math.PI / 180) / Math.max(1e-6, mPerPx)));
+  z = Math.max(1, Math.min(AR_MINI_TILE_MAX_Z, z));
+  let x0, x1, y0, y1;
+  for (; z >= 1; z--) {
+    x0 = Math.floor(arLonToTileX(minLon, z)); x1 = Math.floor(arLonToTileX(maxLon, z));
+    y0 = Math.floor(arLatToTileY(maxLat, z)); y1 = Math.floor(arLatToTileY(minLat, z));
+    if ((x1 - x0 + 1) * (y1 - y0 + 1) <= AR_MINI_TILE_BUDGET) break;
+  }
+  if (z < 1) return false;
+
+  const pad = 14;
+  let painted = false;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(pad, pad, W - 2 * pad, H - 2 * pad);
+  ctx.clip();
+  for (let tx = x0; tx <= x1; tx++) {
+    for (let ty = y0; ty <= y1; ty++) {
+      const img = arMiniTile(z, tx, ty);
+      if (!img) continue;
+      // Tile corners -> E/N -> canvas, as a full affine transform rather than an
+      // axis-aligned rect. Web Mercator is north-up but a projected CRS grid is
+      // not: at this site EPSG:7062 has ~1.6 degrees of convergence, which tilts
+      // each tile edge by ~11px at z17 and would leave the imagery visibly
+      // rotated against the footprint. Measured shear/scale error across a tile
+      // is 0.013px, so the affine map is exact enough to ignore the curvature.
+      const nw = arMiniLatLonToEN(arTileYToLat(ty, z), arTileXToLon(tx, z));
+      const ne = arMiniLatLonToEN(arTileYToLat(ty, z), arTileXToLon(tx + 1, z));
+      const sw = arMiniLatLonToEN(arTileYToLat(ty + 1, z), arTileXToLon(tx, z));
+      if (!nw || !ne || !sw) continue;
+      const pNW = arModelToMini(nw.E, nw.N);
+      const pNE = arModelToMini(ne.E, ne.N);
+      const pSW = arModelToMini(sw.E, sw.N);
+      const iw = img.naturalWidth || 256, ih = img.naturalHeight || 256;
+      if (!(Math.hypot(pNE.cx - pNW.cx, pNE.cy - pNW.cy) > 0.5)) continue;
+      ctx.save();
+      ctx.transform(
+        (pNE.cx - pNW.cx) / iw, (pNE.cy - pNW.cy) / iw,
+        (pSW.cx - pNW.cx) / ih, (pSW.cy - pNW.cy) / ih,
+        pNW.cx, pNW.cy,
+      );
+      // Half a tile-pixel of overdraw closes the hairline seam between tiles.
+      ctx.drawImage(img, 0, 0, iw + 0.5, ih + 0.5);
+      ctx.restore();
+      painted = true;
+    }
+  }
+  ctx.restore();
+  return painted;
+}
+
 function drawArMiniMap() {
   if (!arMiniCtx || !arMiniExtent() || !arEyePos) return;
   const ctx = arMiniCtx;
@@ -2601,6 +2771,13 @@ function drawArMiniMap() {
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = "rgba(2,6,23,0.72)";
   ctx.fillRect(0, 0, W, H);
+  // Satellite underlay, then a scrim so the footprint and dots stay readable
+  // against bright imagery (snow, concrete, sun glare off water).
+  const hasImagery = drawArMiniSatellite(ctx, W, H);
+  if (hasImagery) {
+    ctx.fillStyle = "rgba(2,6,23,0.28)";
+    ctx.fillRect(0, 0, W, H);
+  }
   ctx.strokeStyle = "rgba(148,163,184,0.35)";
   ctx.lineWidth = 1;
   ctx.strokeRect(0.5, 0.5, W - 1, H - 1);
@@ -2637,6 +2814,18 @@ function drawArMiniMap() {
   ctx.fillStyle = "#94a3b8";
   ctx.font = "10px sans-serif";
   ctx.fillText("N", W / 2 - 3, 12);
+
+  // Imagery credit. Required by the Esri basemap terms, and the Leaflet maps
+  // already carry it via the layer attribution; the canvas has to draw its own.
+  if (hasImagery) {
+    ctx.font = "8px sans-serif";
+    const credit = "Imagery © Esri";
+    const cw = ctx.measureText(credit).width;
+    ctx.fillStyle = "rgba(2,6,23,0.55)";
+    ctx.fillRect(W - cw - 8, H - 12, cw + 6, 11);
+    ctx.fillStyle = "rgba(226,232,240,0.85)";
+    ctx.fillText(credit, W - cw - 5, H - 4);
+  }
 
   // ── Two dots: position (orange) + direction (green) ──
   const eye = arEyeWorld();
