@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v201";
+const BUILD_VERSION = "v202";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -11099,6 +11099,23 @@ let gridRectifyRecord = null;
 let gridRectifyImg = null;       // full-res HTMLImageElement of the source photo
 let gridRectifyPoints = null;    // [{x,y}] in image pixel coords, length N*N (row-major)
 let gridRectifyN = 10;           // grid nodes per side
+// Real cell size ON THE SURFACE, in millimetres. Drives the output's aspect
+// ratio and its mm-per-pixel scale. Defaults to a square cell, which is the
+// common case and matches the previous implicit assumption.
+let gridRectifyCellWmm = 100;
+let gridRectifyCellHmm = 100;
+function gridRectifyReadCellSize() {
+  const w = parseFloat((document.getElementById("gridRectifyCellW") || {}).value);
+  const h = parseFloat((document.getElementById("gridRectifyCellH") || {}).value);
+  if (isFinite(w) && w > 0) gridRectifyCellWmm = w;
+  if (isFinite(h) && h > 0) gridRectifyCellHmm = h;
+}
+// Columns:rows of real extent. The grid is square in COUNT, so the aspect is
+// just the ratio of the cell dimensions.
+function gridRectifyAspect() {
+  const a = gridRectifyCellWmm / gridRectifyCellHmm;
+  return (isFinite(a) && a > 0) ? a : 1;
+}
 let gridRectifyCanvas = null;
 let gridRectifyCtx = null;
 let gridRectifyScale = 1;        // displayed-canvas px per image px
@@ -11278,14 +11295,31 @@ async function rectifyAndSaveGrid() {
     sCtx.drawImage(gridRectifyImg, 0, 0);
     const srcData = sCtx.getImageData(0, 0, srcW, srcH).data;
 
-    // Output size = bounding box of the grid, capped to a sane max resolution.
+    // Output SHAPE comes from the real grid, not from the grid's bounding box
+    // in the photo. The bounding box is the projected, foreshortened outline,
+    // so sizing the output from it stretches the result by however oblique the
+    // shot happened to be - a square target came out visibly non-square, which
+    // defeats the point of rectifying. The grid's true aspect (columns:rows of
+    // real spacing) is what the output must match.
+    gridRectifyReadCellSize();
+    const aspect = gridRectifyAspect();
+    // Resolution: keep roughly the source's sampling density, taken from the
+    // longer projected side so detail is not thrown away.
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const p of pts) { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; }
-    let outW = Math.round(maxX - minX), outH = Math.round(maxY - minY);
+    const projW = Math.max(1, maxX - minX), projH = Math.max(1, maxY - minY);
     const MAXDIM = 2000;
-    const capScale = Math.min(1, MAXDIM / Math.max(outW, outH));
-    outW = Math.max(2, Math.round(outW * capScale));
-    outH = Math.max(2, Math.round(outH * capScale));
+    let outW, outH;
+    if (aspect >= 1) {
+      outW = Math.min(MAXDIM, Math.round(Math.max(projW, projH * aspect)));
+      outH = Math.max(2, Math.round(outW / aspect));
+    } else {
+      outH = Math.min(MAXDIM, Math.round(Math.max(projH, projW / aspect)));
+      outW = Math.max(2, Math.round(outH * aspect));
+    }
+    if (outH > MAXDIM) { outH = MAXDIM; outW = Math.max(2, Math.round(outH * aspect)); }
+    if (outW > MAXDIM) { outW = MAXDIM; outH = Math.max(2, Math.round(outW / aspect)); }
+    outW = Math.max(2, outW); outH = Math.max(2, outH);
 
     const oCanvas = document.createElement("canvas");
     oCanvas.width = outW; oCanvas.height = outH;
@@ -11294,6 +11328,43 @@ async function rectifyAndSaveGrid() {
     const out = outImg.data;
 
     const cellW = outW / (N - 1), cellH = outH / (N - 1);
+
+    /**
+     * Homography taking the unit square to a grid cell's source quad, cached
+     * per cell since every pixel in the cell reuses it.
+     *
+     * Closed form for unit-square -> quad: with the corners numbered
+     * p00 (0,0), p10 (1,0), p11 (1,1), p01 (0,1),
+     *   x = (a*u + b*v + c) / (g*u + h*v + 1)
+     *   y = (d*u + e*v + f) / (g*u + h*v + 1)
+     * A degenerate (collinear) cell falls back to the affine case, g = h = 0,
+     * which is what the projective form reduces to anyway.
+     */
+    const cellH_cache = new Map();
+    const gridCellHomography = (i, j) => {
+      const key = j * N + i;
+      const hit = cellH_cache.get(key);
+      if (hit) return hit;
+      const p00 = pts[gridIdx(i, j)], p10 = pts[gridIdx(i + 1, j)];
+      const p01 = pts[gridIdx(i, j + 1)], p11 = pts[gridIdx(i + 1, j + 1)];
+      const x0 = p00.x, y0 = p00.y, x1 = p10.x, y1 = p10.y;
+      const x2 = p11.x, y2 = p11.y, x3 = p01.x, y3 = p01.y;
+      const dx1 = x1 - x2, dx2 = x3 - x2, sX = x0 - x1 + x2 - x3;
+      const dy1 = y1 - y2, dy2 = y3 - y2, sY = y0 - y1 + y2 - y3;
+      const den = dx1 * dy2 - dy1 * dx2;
+      let g = 0, h = 0;
+      if (Math.abs(den) > 1e-12) {
+        g = (sX * dy2 - sY * dx2) / den;
+        h = (dx1 * sY - dy1 * sX) / den;
+      }
+      const H = {
+        a: x1 - x0 + g * x1, b: x3 - x0 + h * x3, c: x0,
+        d: y1 - y0 + g * y1, e: y3 - y0 + h * y3, f: y0,
+        g, h,
+      };
+      cellH_cache.set(key, H);
+      return H;
+    };
 
     const sampleBilinear = (fx, fy) => {
       if (fx < 0) fx = 0; else if (fx > srcW - 1) fx = srcW - 1;
@@ -11321,10 +11392,15 @@ async function rectifyAndSaveGrid() {
         let ifc = dx / cellW;
         let i = Math.floor(ifc); if (i > N - 2) i = N - 2; if (i < 0) i = 0;
         const u = ifc - i;
-        const p00 = pts[gridIdx(i, j)], p10 = pts[gridIdx(i + 1, j)];
-        const p01 = pts[gridIdx(i, j + 1)], p11 = pts[gridIdx(i + 1, j + 1)];
-        const sx = (1 - u) * (1 - v) * p00.x + u * (1 - v) * p10.x + (1 - u) * v * p01.x + u * v * p11.x;
-        const sy = (1 - u) * (1 - v) * p00.y + u * (1 - v) * p10.y + (1 - u) * v * p01.y + u * v * p11.y;
+        // Per-cell PROJECTIVE map, not bilinear. A flat surface photographed
+        // obliquely maps to the image by a homography, and bilinear
+        // interpolation inside a cell is only an approximation to it - straight
+        // lines crossing a cell come out bowed, which is exactly the residual
+        // distortion that makes a rectified shot look "nearly right".
+        const H = gridCellHomography(i, j);
+        const den = H.g * u + H.h * v + 1;
+        const sx = (H.a * u + H.b * v + H.c) / den;
+        const sy = (H.d * u + H.e * v + H.f) / den;
         const px = sampleBilinear(sx, sy);
         const o = (dy * outW + dx) * 4;
         out[o] = px[0]; out[o + 1] = px[1]; out[o + 2] = px[2]; out[o + 3] = 255;
@@ -11336,11 +11412,20 @@ async function rectifyAndSaveGrid() {
     const outBlob = await new Promise((res) => oCanvas.toBlob(res, "image/jpeg", 0.95));
     const srcRec = gridRectifyRecord;
     const baseComment = (srcRec.comment || "").trim();
-    const comment = (baseComment ? baseComment + " · " : "") + "grid-rectified";
+    // With the real cell size known the output has a true scale, which is what
+    // makes a rectified shot measurable rather than merely straight.
+    const mmPerPxX = (gridRectifyCellWmm * (N - 1)) / outW;
+    const mmPerPxY = (gridRectifyCellHmm * (N - 1)) / outH;
+    const comment = (baseComment ? baseComment + " · " : "") + "grid-rectified"
+      + ` · ${mmPerPxX.toFixed(3)} mm/px`;
     await savePhoto(outBlob, null, comment, srcRec.location || null, srcRec.heading ?? null, srcRec.facing ?? null, null, null, srcRec.tags || null, {
       gridRectified: true,
       sourcePhotoId: srcRec.id,
       gridRectifyN: N,
+      cellWidthMm: gridRectifyCellWmm,
+      cellHeightMm: gridRectifyCellHmm,
+      mmPerPxX,
+      mmPerPxY,
     });
     setS("Saved rectified photo.");
     setStatus("Grid-rectified photo saved to this bridge.");
