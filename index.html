@@ -23,14 +23,14 @@
   <!-- proj4 (map projection / georeferencing) -->
   <script src="vendor/proj4.js"></script>
   <!-- web-ifc (IFC parsing) loaded dynamically as ES module in ifc-viewer.js -->
-  <link rel="stylesheet" href="styles.css?v=20260811-073000" />
+  <link rel="stylesheet" href="styles.css?v=20260811-075000" />
 </head>
 <body>
 
 <header>
   <h1>📷 Photo Vault <span id="buildStamp" style="font-size:.55rem;font-weight:400;opacity:.7;vertical-align:middle;">build …</span></h1>
   <div style="display:flex;gap:8px;align-items:center;">
-    <a class="map-nav-link" href="map.html?v=20260811-073000">🗺 Map summary</a>
+    <a class="map-nav-link" href="map.html?v=20260811-075000">🗺 Map summary</a>
     <button id="openSettingsButton" class="secondary" hidden>⚙ Settings</button>
     <button id="openPeerTransferViewTop" class="secondary">🔁 Transfer</button>
     <button id="installButton" class="secondary" hidden>⬇ Install App</button>
@@ -487,6 +487,13 @@
         <button id="arFovMeasureBtn" type="button" class="ar-mini-sat-btn" title="Measure the real camera FOV via WebXR. Opens an AR session for a moment, reads the device's camera projection, then closes it.">📐 Measure</button>
         <button id="arFovResetBtn" type="button" class="ar-mini-sat-btn" title="Discard the saved FOV and go back to the 82° main-lens default. Use this if you trimmed the slider before the feed was pinned to 1x.">↺</button>
       </div>
+
+      <div class="ar-opacity-controls">
+        <label style="font-size:.8rem;color:#94a3b8;margin-right:6px;" title="Phones report height above the WGS84 ellipsoid, survey elevations are orthometric (NAVD88). Stand on ground of known elevation and calibrate once; the offset is regional and holds for the whole area.">Ground datum</label>
+        <span id="arGeoidValue" style="font-size:.75rem;color:#cbd5e1;margin-right:6px;">uncalibrated</span>
+        <button id="arGeoidSetBtn" type="button" class="ar-mini-sat-btn" title="Calibrate: enter the true elevation of the ground you are standing on, and the offset to your phone's reported altitude is stored.">⇱ Set here</button>
+        <button id="arGeoidResetBtn" type="button" class="ar-mini-sat-btn" title="Discard the stored ground-datum offset.">↺</button>
+      </div>
       
       <div class="ar-move-controls">
         <div class="ar-move-group">
@@ -597,8 +604,8 @@
 <script src="vendor/cv.js?v=20260716-211500"></script>
 <script src="vendor/aruco.js?v=20260716-211500"></script>
 <script src="vendor/apriltag_36h11.js?v=20260716-211500"></script>
-<script src="ifc-viewer.js?v=20260811-073000"></script>
-<script src="ifc-export.js?v=20260811-073000"></script>
-<script src="app.js?v=20260811-073000"></script>
+<script src="ifc-viewer.js?v=20260811-075000"></script>
+<script src="ifc-export.js?v=20260811-075000"></script>
+<script src="app.js?v=20260811-075000"></script>
 </body>
 </html>

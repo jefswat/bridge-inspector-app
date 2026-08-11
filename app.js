@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v196";
+const BUILD_VERSION = "v197";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -302,6 +302,9 @@ const arFovSlider          = document.getElementById("arFovSlider");
 const arFovValue           = document.getElementById("arFovValue");
 const arFovMeasureBtn      = document.getElementById("arFovMeasureBtn");
 const arFovResetBtn        = document.getElementById("arFovResetBtn");
+const arGeoidValue         = document.getElementById("arGeoidValue");
+const arGeoidSetBtn        = document.getElementById("arGeoidSetBtn");
+const arGeoidResetBtn      = document.getElementById("arGeoidResetBtn");
 const arStatusMessage      = document.getElementById("arStatusMessage");
 const arUseCurrentLocation = document.getElementById("arUseCurrentLocation");
 const arSelectLocationButton = document.getElementById("arSelectLocationButton");
@@ -363,9 +366,22 @@ let arEyeHeightM           = 1.6;     // standing eye height above the reference
 // treated as a different vertical datum rather than a real height difference.
 // Comfortably larger than any bridge, smaller than a geoid separation.
 const AR_ALT_DATUM_TOLERANCE_M = 30;
+// Metres to ADD to the phone's reported altitude to reach the model's vertical
+// datum, i.e. -N where N is the geoid separation. Android's getAltitude()
+// returns height above the WGS84 ELLIPSOID, while survey elevations are
+// orthometric (NAVD88), and the two differ by roughly -29 m in Minnesota and
+// -8 to -53 m across the US. That is a fixed regional offset, not noise, so it
+// is calibrated once against a known ground elevation and stored. null means
+// uncalibrated, in which case the altitude is used as reported.
+const AR_GEOID_KEY = "arGeoidSepM";
+let arGeoidSepM = (() => {
+  const v = parseFloat(localStorage.getItem(AR_GEOID_KEY));
+  return isFinite(v) ? v : null;
+})();
 let arEyeElevSource        = "";      // which datum the standing elevation came from
 let arModelBaseM           = null;    // model's lowest point (metres), for the read-out
 let arEyeElevM             = null;    // resulting eye elevation (metres)
+let arAltDeltaM            = null;    // corrected altitude minus model base
 let arElevOffsetM          = 0;       // manual elevation trim from the ELEVATION buttons
 // AR orbit controls (drag to rotate / wheel to zoom the test view)
 let arOrbitInitialized     = false;
@@ -1764,6 +1780,40 @@ function registerEvents() {
   if (arFwdBtn) arFwdBtn.addEventListener("click", () => arMoveForward(arMetersToUnits(2)));
   if (arBackBtn) arBackBtn.addEventListener("click", () => arMoveForward(-arMetersToUnits(2)));
   if (arResetViewBtn) arResetViewBtn.addEventListener("click", () => resetArView());
+  const showGeoid = () => {
+    if (!arGeoidValue) return;
+    arGeoidValue.textContent = (arGeoidSepM == null || !isFinite(arGeoidSepM))
+      ? "uncalibrated"
+      : `${arGeoidSepM >= 0 ? "+" : ""}${(arGeoidSepM / 0.3048).toFixed(0)}ft`;
+  };
+  showGeoid();
+  if (arGeoidSetBtn) arGeoidSetBtn.addEventListener("click", () => {
+    const raw = (currentLocation && isFinite(currentLocation.alt)) ? currentLocation.alt : null;
+    if (raw == null) { setStatus("No GPS altitude yet - wait for a fix, then calibrate."); return; }
+    // Default to the model's own base: standing at the foot of the structure is
+    // the usual case, and it saves looking a number up.
+    const suggestFt = (arModelBaseM != null && isFinite(arModelBaseM))
+      ? (arModelBaseM / 0.3048).toFixed(0) : "";
+    const answer = prompt(
+      `Phone reports ${(raw / 0.3048).toFixed(0)} ft here.\n\n` +
+      "Enter the TRUE elevation of the ground you are standing on, in feet:",
+      suggestFt);
+    if (answer == null) return;
+    const trueFt = parseFloat(answer);
+    if (!isFinite(trueFt)) { setStatus("Elevation not recognised - calibration unchanged."); return; }
+    arGeoidSepM = trueFt * 0.3048 - raw;
+    try { localStorage.setItem(AR_GEOID_KEY, String(arGeoidSepM)); } catch (_) {}
+    arEyeSeeded = false;   // re-place the eye with the corrected datum
+    showGeoid();
+    setStatus(`Ground datum set: ${(arGeoidSepM / 0.3048).toFixed(1)} ft added to reported altitude.`);
+  });
+  if (arGeoidResetBtn) arGeoidResetBtn.addEventListener("click", () => {
+    arGeoidSepM = null;
+    try { localStorage.removeItem(AR_GEOID_KEY); } catch (_) {}
+    arEyeSeeded = false;
+    showGeoid();
+    setStatus("Ground datum offset cleared - using the phone's altitude as reported.");
+  });
   if (arFovSlider) {
     const showFov = () => {
       if (!arFovValue) return;
@@ -2274,6 +2324,14 @@ function updateArEyeFromGeo(lat, lon, alt) {
   // the receiver's own position - the phone in your hand, or a pole-mounted
   // antenna - so adding 1.6 m on top of it double-counts your height and sinks
   // the model by that much.
+  // Lift the reported altitude onto the model's vertical datum before anything
+  // else looks at it, so the sanity check below judges a like-for-like number.
+  const geoidApplied = (alt != null && isFinite(alt)
+    && arGeoidSepM != null && isFinite(arGeoidSepM));
+  if (geoidApplied) alt = alt + arGeoidSepM;
+  arAltDeltaM = (alt != null && isFinite(alt) && modelBase != null)
+    ? (alt - modelBase) : null;
+
   let groundElev, standEye;
   if (alt != null && isFinite(alt) && modelBase != null
       && Math.abs(alt - modelBase) > AR_ALT_DATUM_TOLERANCE_M) {
@@ -2281,7 +2339,9 @@ function updateArEyeFromGeo(lat, lon, alt) {
     arEyeElevSource = `model base (GPS alt ${Math.round(alt - modelBase)}m off)`;
   } else if (alt != null && isFinite(alt)) {
     groundElev = alt; standEye = false;
-    arEyeElevSource = "GPS altitude";
+    arEyeElevSource = geoidApplied
+      ? `GPS alt ${arGeoidSepM >= 0 ? "+" : ""}${arGeoidSepM.toFixed(1)}m geoid`
+      : "GPS altitude";
   } else if (modelBase != null) {
     groundElev = modelBase; standEye = true;
     arEyeElevSource = "model base";
@@ -3469,8 +3529,14 @@ function updateArRender() {
       // which datum won. Reading "base 0 ft" here is the fastest way to tell an
       // IFC that was never given an elevation from one that was.
       const ft = (m) => (m / 0.3048).toFixed(0);
+      // The delta between the (corrected) GPS altitude and the model base is
+      // the tell for an uncalibrated vertical datum: a large steady value is a
+      // geoid separation, not a real height difference.
+      const dz = (usingGps && arAltDeltaM != null && Math.abs(arAltDeltaM) > 3)
+        ? ` · GPS ${arAltDeltaM > 0 ? "+" : ""}${ft(arAltDeltaM)}ft vs base`
+        : "";
       const elev = (arModelBaseM != null && arEyeElevM != null)
-        ? ` | ⛰ base ${ft(arModelBaseM)}ft · eye ${ft(arEyeElevM)}ft · ${arEyeElevSource}`
+        ? ` | ⛰ base ${ft(arModelBaseM)}ft · eye ${ft(arEyeElevM)}ft · ${arEyeElevSource}${dz}`
         : "";
       arLocationText.textContent = `📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}${suffix}${elev}`;
     } else if (usingGps) {
