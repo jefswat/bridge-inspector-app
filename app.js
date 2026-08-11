@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v186";
+const BUILD_VERSION = "v187";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -380,6 +380,16 @@ let arModelBoundsXY        = null;  // {minx,maxx,miny,maxy} model footprint (sc
 let arModelFootprintXY     = null;  // convex-hull outline [{x,y}...] of the model footprint (scene X/Y) — fallback
 let arMiniView             = null;  // {minx,maxx,miny,maxy} square plan-view extent (E/N metres, or scene X/Y fallback)
 let arMiniGeoMode          = false; // true when the plan view is drawn in georeferenced E/N (matches Map summary)
+let arMiniZoom             = 1;     // plan-view pinch zoom; >1 is zoomed in
+const arMiniPointers       = new Map(); // pointerId -> {x,y} for the plan-view pinch
+let arMiniPinchStartDist   = 0;
+let arMiniPinchStartZoom   = 1;
+// Smallest half-span the plan view opens at, in metres. Without a floor the
+// extent is 2.4x the model's own size, which for a small test object is a few
+// metres of ground - far too tight to place yourself against the imagery.
+const AR_MINI_MIN_HALF_M   = 40;
+const AR_MINI_ZOOM_MIN     = 0.15;  // ~13x wider than the default extent
+const AR_MINI_ZOOM_MAX     = 12;
 let arMiniGeoPolys         = null;  // [{key,pts:[{E,N}...]}] projection polygons in E/N (from bridge.ifcFootprint)
 let arMiniDragTarget       = null;  // 'pos' | 'dir' — which dot is being dragged
 let arMiniCtx              = null;
@@ -1865,6 +1875,9 @@ async function openArViewModal() {
   arMiniGeoMode = false;
   arMiniGeoPolys = null;
   arMiniDragTarget = null;
+  arMiniZoom = 1;
+  arMiniPointers.clear();
+  arMiniPinchStartDist = 0;
   arPointers.clear();
   arPinchLastDist = 0;
   arEyePos = null;
@@ -2217,6 +2230,9 @@ function resetArView() {
   if (arTestAimAz == null) arTestAimAz = 0;
   if (arTestAimEl == null) arTestAimEl = 0;
   arMiniDragTarget = null;
+  arMiniZoom = 1;               // plan view back to its default extent
+  arMiniPointers.clear();
+  arMiniPinchStartDist = 0;
   arPointers.clear();
   arPinchLastDist = 0;
   // Apply the current sensor reading immediately rather than waiting for the
@@ -2263,7 +2279,16 @@ function setupArOrbitControls() {
     arMiniMap.style.touchAction = "none";
     arMiniMap.addEventListener("pointerdown", onArMiniPointerDown);
     arMiniMap.addEventListener("pointermove", onArMiniPointerMove);
-    window.addEventListener("pointerup", () => { arMiniDragging = false; arMiniDragTarget = null; });
+    // Double-tap the plan view to return to the default extent, since pinching
+    // back to exactly 1.0 by hand is fiddly on a 240px canvas.
+    arMiniMap.addEventListener("dblclick", () => { arMiniZoom = 1; drawArMiniMap(); });
+    const endArMiniPointer = (e) => {
+      arMiniEndPinch(e);
+      arMiniDragging = false;
+      arMiniDragTarget = null;
+    };
+    window.addEventListener("pointerup", endArMiniPointer);
+    window.addEventListener("pointercancel", endArMiniPointer);
   }
 }
 
@@ -2339,8 +2364,22 @@ function onArOrbitWheel(e) {
 // shape/orientation match exactly. Fallback mode uses a scene-XY convex hull.
 // In both modes the "world" axes are (x=east/right, y=north/up); arMiniView is
 // {minx,maxx,miny,maxy} in those units.
+// The plan view's extent is the base extent scaled by the pinch zoom. Memoised
+// because arModelToMini calls this per point, and the polygons are dense.
+let arMiniExtentCache = null;
+let arMiniExtentKey = "";
 function arMiniExtent() {
-  return arMiniView || arModelBoundsXY;
+  const base = arMiniView || arModelBoundsXY;
+  if (!base) return null;
+  const z = (isFinite(arMiniZoom) && arMiniZoom > 0) ? arMiniZoom : 1;
+  if (z === 1) return base;
+  const key = base.minx + "," + base.maxx + "," + base.miny + "," + base.maxy + "," + z;
+  if (key === arMiniExtentKey && arMiniExtentCache) return arMiniExtentCache;
+  const cx = (base.minx + base.maxx) / 2, cy = (base.miny + base.maxy) / 2;
+  const hx = (base.maxx - base.minx) / 2 / z, hy = (base.maxy - base.miny) / 2 / z;
+  arMiniExtentCache = { minx: cx - hx, maxx: cx + hx, miny: cy - hy, maxy: cy + hy };
+  arMiniExtentKey = key;
+  return arMiniExtentCache;
 }
 
 function arGeoReady() {
@@ -2435,7 +2474,16 @@ function buildArMiniGeoData() {
     if (p.N < minN) minN = p.N; if (p.N > maxN) maxN = p.N;
   }
   const cE = (minE + maxE) / 2, cN = (minN + maxN) / 2;
-  const half = Math.max(maxE - minE, maxN - minN, 1) / 2 * 2.4; // bridge ~40% of map
+  // 2.4x the model puts a bridge at ~40% of the map. Floor it at a fixed ground
+  // span so a small model does not open zoomed into a few metres of grass.
+  // georef.scale converts model metres into the CRS's units (US survey feet for
+  // EPSG:7062), so the floor is a real distance rather than a raw coordinate.
+  const g = ifcViewer && ifcViewer.georef;
+  const uPerM = (g && isFinite(g.scale) && g.scale > 0) ? g.scale : 1;
+  const half = Math.max(
+    Math.max(maxE - minE, maxN - minN, 1) / 2 * 2.4,
+    AR_MINI_MIN_HALF_M * uPerM,
+  );
   return { polys, view: { minx: cE - half, maxx: cE + half, miny: cN - half, maxy: cN + half } };
 }
 
@@ -2502,9 +2550,33 @@ function arDirDotMini() {
   return arModelToMini(eye.x + h.x * dist, eye.y + h.y * dist);
 }
 
+// Distance between the two active plan-view pointers, for the pinch gesture.
+function arMiniPinchDist() {
+  const pts = [...arMiniPointers.values()];
+  if (pts.length < 2) return 0;
+  return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+}
+
+function arMiniEndPinch(e) {
+  if (e && e.pointerId != null) arMiniPointers.delete(e.pointerId);
+  else arMiniPointers.clear();
+  if (arMiniPointers.size < 2) arMiniPinchStartDist = 0;
+}
+
 function onArMiniPointerDown(e) {
   if (!arMiniMap || !arEyePos) return;
   const { cx, cy } = arMiniEventXY(e);
+  arMiniPointers.set(e.pointerId, { x: cx, y: cy });
+  if (arMiniPointers.size >= 2) {
+    // Second finger down: this is a zoom, not a drag. Abandon any dot grab so
+    // pinching cannot drag your position across the map at the same time.
+    arMiniDragging = false;
+    arMiniDragTarget = null;
+    arMiniPinchStartDist = arMiniPinchDist();
+    arMiniPinchStartZoom = arMiniZoom;
+    try { arMiniMap.setPointerCapture(e.pointerId); } catch (_) {}
+    return;
+  }
   // Choose the nearer dot (position vs direction) within grab radius.
   const eye = arEyeWorld();
   const pe = eye ? arModelToMini(eye.x, eye.y) : null;
@@ -2518,8 +2590,18 @@ function onArMiniPointerDown(e) {
 }
 
 function onArMiniPointerMove(e) {
-  if (!arMiniDragging) return;
   const { cx, cy } = arMiniEventXY(e);
+  if (arMiniPointers.has(e.pointerId)) arMiniPointers.set(e.pointerId, { x: cx, y: cy });
+  if (arMiniPointers.size >= 2) {
+    const d = arMiniPinchDist();
+    if (arMiniPinchStartDist > 4 && d > 4) {
+      const next = arMiniPinchStartZoom * (d / arMiniPinchStartDist);
+      arMiniZoom = Math.max(AR_MINI_ZOOM_MIN, Math.min(AR_MINI_ZOOM_MAX, next));
+      drawArMiniMap();
+    }
+    return;
+  }
+  if (!arMiniDragging) return;
   arMiniApply(cx, cy);
 }
 
