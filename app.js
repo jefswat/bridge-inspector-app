@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v187";
+const BUILD_VERSION = "v188";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -1711,9 +1711,9 @@ function registerEvents() {
   if (arUseCurrentLocation) arUseCurrentLocation.addEventListener("change", () => {
     if (arUseCurrentLocation.checked) {
       setStatus("AR view will use live device GPS (best with an RTK fix).");
-      if (typeof acquireGeoAndHeading === "function" && !currentLocation) {
-        try { void acquireGeoAndHeading(); } catch (e) { console.warn("[ar] geo acquire:", e); }
-      }
+      // Always (re)start the watch. The old code only fetched when there was no
+      // location at all, so a stale fix from indoors was reused indefinitely.
+      startArGeoWatch();
     } else {
       // Switching to manual/test mode: keep wherever the eye currently is so the
       // view doesn't jump, then let the Move/Turn/Elev controls walk from there.
@@ -1862,6 +1862,12 @@ async function openArViewModal() {
   // to live GPS/RTK anchoring when they have a good fix.
   if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
 
+  // Start the fix warming up regardless of that checkbox: a cold receiver can
+  // take tens of seconds outdoors, and it should not only begin counting from
+  // the moment the box is ticked.
+  arLastFixAtMs = 0;
+  startArGeoWatch();
+
   // Reset AR view for this session and enable first-person controls.
   arOrbitInitialized = false;
   arOrbitDragging = false;
@@ -1899,6 +1905,7 @@ function closeArViewModal() {
   arViewModal.hidden = true;
   arActive = false;
   stopArCameraFeed();
+  stopArGeoWatch();
   window.removeEventListener("deviceorientation", onDeviceOrientation);
   try { window.removeEventListener("deviceorientationabsolute", onDeviceOrientation); } catch (_) {}
   if (arRenderLoopId) clearTimeout(arRenderLoopId);
@@ -3217,7 +3224,29 @@ function updateArRender() {
 
   // Update display text
   if (arLocationText) {
-    arLocationText.textContent = isFinite(lat) ? `📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}` : "📍 test framing (no location)";
+    const usingGps = !!(arUseCurrentLocation && arUseCurrentLocation.checked);
+    if (isFinite(lat)) {
+      // Accuracy and age only mean anything for a live fix; a manually picked
+      // location has neither.
+      let suffix = "";
+      if (usingGps && currentLocation) {
+        const acc = isFinite(currentLocation.accuracy) ? ` ±${currentLocation.accuracy}m` : "";
+        const age = arLastFixAtMs ? ` · ${Math.round((Date.now() - arLastFixAtMs) / 1000)}s ago` : "";
+        suffix = acc + age;
+      }
+      arLocationText.textContent = `📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}${suffix}`;
+    } else if (usingGps) {
+      // Ticked but no fix yet: say which, so a denied permission is not mistaken
+      // for a slow lock.
+      arLocationText.textContent = arGeoWatchErr
+        ? `📍 GPS: ${arGeoWatchErr}`
+        : "📍 GPS: acquiring…";
+    } else {
+      const warming = arGeoWatchErr
+        ? `GPS: ${arGeoWatchErr}`
+        : (currentLocation ? "GPS ready - tick 'Use current location'" : "GPS: acquiring…");
+      arLocationText.textContent = `📍 test framing · ${warming}`;
+    }
   }
   if (arAttitudeText) {
     const h = (headingDeg == null || !isFinite(headingDeg)) ? "--" : Math.round(headingDeg);
@@ -4505,6 +4534,47 @@ function startAprilTagPreviewLoop() {
       aprilPreviewBusy = false;
     }
   }, APRIL_PREVIEW_INTERVAL_MS);
+}
+
+// ── AR live GPS watch ─────────────────────────────────────────────────────────
+// The rest of the app takes one-shot fixes (getCurrentPosition) at the moment a
+// photo is taken. That is wrong for AR: the overlay is anchored to where you are
+// standing right now, and a fix taken indoors minutes ago never improves however
+// long you stand outside. While the AR view is open we keep a watch running so
+// the position converges as the receiver warms up, and stop it on close so it
+// does not sit there draining the battery.
+
+let arGeoWatchId  = null;
+let arLastFixAtMs = 0;
+let arGeoWatchErr = "";
+
+function startArGeoWatch() {
+  if (arGeoWatchId != null) return;
+  if (!navigator.geolocation) { arGeoWatchErr = "geolocation not supported"; return; }
+  arGeoWatchErr = "";
+  try {
+    arGeoWatchId = navigator.geolocation.watchPosition(
+      (p) => {
+        currentLocation = coordsToLoc(p);
+        arLastFixAtMs = Date.now();
+        arGeoWatchErr = "";
+      },
+      (err) => {
+        // Keep watching: a timeout early on is normal while the receiver is
+        // still acquiring, and the watch will still deliver once it locks.
+        arGeoWatchErr = (err && err.message) ? err.message : "location unavailable";
+      },
+      { enableHighAccuracy: true, timeout: 30000, maximumAge: 0 },
+    );
+  } catch (e) {
+    arGeoWatchErr = String((e && e.message) || e);
+  }
+}
+
+function stopArGeoWatch() {
+  if (arGeoWatchId == null) return;
+  try { navigator.geolocation.clearWatch(arGeoWatchId); } catch (_) {}
+  arGeoWatchId = null;
 }
 
 // ── Location + Heading + Attitude ─────────────────────────────────────────────
