@@ -1825,10 +1825,25 @@ select {
   pointer-events: none;
 }
 
-.ar-opacity-controls {
+/* Stack for the AR heads-up controls. Each row used to position itself
+   absolutely at the same top/right corner, so adding rows piled them on top of
+   one another and only the last was reachable. The panel owns the position now
+   and the rows flow inside it. */
+.ar-hud-panel {
   position: absolute;
   top: 8px;
   right: 8px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: min(92vw, 420px);
+  max-height: calc(100% - 120px);
+  overflow-y: auto;
+}
+
+.ar-opacity-controls {
   background: rgba(0, 0, 0, 0.7);
   padding: 8px 12px;
   border-radius: 6px;
@@ -1836,6 +1851,8 @@ select {
   backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
 }
 

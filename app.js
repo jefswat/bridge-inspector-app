@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v199";
+const BUILD_VERSION = "v200";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -3386,6 +3386,32 @@ function positionArCameraFromGeo(lat, lon, heading, attitude, altitude) {
   return true;
 }
 
+// Wrap an angle difference into -PI..PI.
+function shortestAngle(d) {
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return d;
+}
+
+/**
+ * Smoothing factor as a function of how far the angle moved this event.
+ *
+ * Below AR_SETTLE_RAD the motion is treated as sensor noise and damped hard;
+ * above it the factor climbs so a real pan is tracked without lag. Magnetometer
+ * noise on a phone is a couple of degrees, so the knee sits just above that.
+ */
+const AR_SETTLE_RAD = 2.5 * Math.PI / 180;   // below this, assume it is noise
+const AR_TRACK_RAD  = 12 * Math.PI / 180;    // above this, fully responsive
+const AR_ALPHA_MIN  = 0.06;
+const AR_ALPHA_MAX  = 0.55;
+function arAdaptiveAlpha(stepRad) {
+  if (!isFinite(stepRad)) return AR_ALPHA_MAX;
+  if (stepRad <= AR_SETTLE_RAD) return AR_ALPHA_MIN;
+  if (stepRad >= AR_TRACK_RAD) return AR_ALPHA_MAX;
+  const t = (stepRad - AR_SETTLE_RAD) / (AR_TRACK_RAD - AR_SETTLE_RAD);
+  return AR_ALPHA_MIN + t * (AR_ALPHA_MAX - AR_ALPHA_MIN);
+}
+
 // Shortest-arc exponential smoothing for angles (radians).
 function smoothAngle(prev, target, a) {
   if (prev == null || !isFinite(prev)) return target;
@@ -3538,9 +3564,19 @@ function onDeviceOrientation(event) {
 
   // Low-pass smoothing removes the frame-to-frame jitter and the gimbal spikes
   // that appear when the phone is tilted up (beta near 90) to view the bridge.
-  arYawSmoothed = smoothAngle(arYawSmoothed, rawAz, 0.25);
+  // Adaptive low-pass. A fixed factor forces a bad trade: light enough to keep
+  // up with a pan leaves the heading visibly jittering when you hold still,
+  // which is exactly when you are trying to read it to set a trim. Scale the
+  // factor by how fast the angle is actually moving, so holding still settles
+  // hard while a deliberate pan still tracks without lag.
+  const yawStep = (arYawSmoothed == null || !isFinite(arYawSmoothed))
+    ? Math.PI : Math.abs(shortestAngle(rawAz - arYawSmoothed));
+  arYawSmoothed = smoothAngle(arYawSmoothed, rawAz, arAdaptiveAlpha(yawStep));
+  const pitchStep = (arPitchSmoothed == null || !isFinite(arPitchSmoothed))
+    ? Math.PI : Math.abs(rawEl - arPitchSmoothed);
   arPitchSmoothed = (arPitchSmoothed == null || !isFinite(arPitchSmoothed))
-    ? rawEl : (arPitchSmoothed + 0.25 * (rawEl - arPitchSmoothed));
+    ? rawEl
+    : (arPitchSmoothed + arAdaptiveAlpha(pitchStep) * (rawEl - arPitchSmoothed));
   // Drive the look from the phone in BOTH modes:
   //  - live GPS/RTK: the phone yaw/pitch map directly to the world (real AR).
   //  - test mode: the phone drives the look as a RELATIVE offset anchored so
