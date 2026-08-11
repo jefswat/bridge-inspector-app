@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v193";
+const BUILD_VERSION = "v194";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -348,6 +348,7 @@ let arCameraFovSource      = "default 82\u00b0 (H)";
 let arCameraEffVFovDeg     = 0;   // vertical fov actually rendered, after crop
 let arCameraEffHFovDeg     = 0;   // horizontal equivalent, for the read-out
 let arCameraStreamSize     = "";  // native stream dimensions, for the read-out
+let arCameraZoom           = 1;   // zoom the track actually settled on
 let arGeoFailReason        = "";
 // Real-world AR is the goal: stand at the bridge and see the IFC on the real
 // structure. The old "test framing" put the eye at a model-relative standoff,
@@ -1764,7 +1765,11 @@ function registerEvents() {
       // Show the spec value being trimmed plus what is actually rendered after
       // the cover-crop, since those differ and only the second one matters.
       const eff = arCameraEffHFovDeg ? ` (${arCameraEffHFovDeg.toFixed(0)}° on screen)` : "";
-      arFovValue.textContent = `${arCameraHFovDeg.toFixed(1)}°${eff}`;
+      // Zoom is called out when it is not 1x: a value below 1 means the device
+      // handed over the ultrawide, which no FOV setting can compensate for.
+      const zoom = (isFinite(arCameraZoom) && Math.abs(arCameraZoom - 1) > 0.01)
+        ? ` · ${arCameraZoom.toFixed(2)}x` : "";
+      arFovValue.textContent = `${arCameraHFovDeg.toFixed(1)}°${eff}${zoom}`;
     };
     arFovSlider.value = String(arCameraHFovDeg);
     showFov();
@@ -1972,18 +1977,34 @@ async function startArCameraFeed() {
     arStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }
     });
-    // AR must render at the camera's native 1x, so force zoom to its minimum
-    // (the capture-modal zoom control does not apply to the AR feed).
+    // AR must render at the main lens's native 1x. This used to ask for the
+    // track's MINIMUM zoom, which is wrong on any phone that presents its rear
+    // cameras as one logical multi-camera: the range starts below 1 (0.5 on
+    // recent Pixels) and the minimum is the ULTRAWIDE. That silently swapped an
+    // ~82 degree lens for a ~123 degree one while the renderer kept drawing at
+    // 82, so the overlay came out far too large and swung much too fast.
+    // Target exactly 1.0, clamped into whatever range the device offers.
     try {
       const t = arStream.getVideoTracks && arStream.getVideoTracks()[0];
       const caps = t && t.getCapabilities ? t.getCapabilities() : null;
-      if (caps && caps.zoom && typeof caps.zoom.min === "number") {
-        t.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] }).catch(() => {});
+      if (caps && caps.zoom && typeof caps.zoom.min === "number"
+          && typeof caps.zoom.max === "number") {
+        const target = Math.min(caps.zoom.max, Math.max(caps.zoom.min, 1));
+        try {
+          await t.applyConstraints({ advanced: [{ zoom: target }] });
+        } catch (_) { /* device refused; read back whatever it kept */ }
       }
+      // Read back what actually applied - a device may clamp or ignore it - and
+      // fold it into the FOV, since zoom narrows the angle you can see.
+      const st = (t && t.getSettings) ? t.getSettings() : null;
+      const z = st && isFinite(st.zoom) ? st.zoom : 1;
+      arCameraZoom = (z > 0) ? z : 1;
       // Best-effort FOV detection; falls back to the 82-degree default.
       const det = detectArCameraHFovDeg(t);
       if (det) { arCameraHFovDeg = det.deg; arCameraFovSource = det.source; }
-      else { arCameraFovSource = `default ${AR_DEFAULT_CAMERA_HFOV_DEG}\u00b0 (H, no API)`; }
+      else if (arCameraFovSource !== "WebXR measured" && arCameraFovSource !== "manual") {
+        arCameraFovSource = `default ${AR_DEFAULT_CAMERA_HFOV_DEG}\u00b0 (H, no API)`;
+      }
       updateArCameraFov();
     } catch (e) { console.warn("[ar] feed setup:", e); }
     if (arCameraVideo) {
@@ -2081,7 +2102,12 @@ function updateArCameraFov() {
   if (!arRendererCamera) return;
   const aDisp = (arRendererCamera.aspect && isFinite(arRendererCamera.aspect))
     ? arRendererCamera.aspect : 1;
-  const specFov = (arCameraHFovDeg || AR_DEFAULT_CAMERA_HFOV_DEG) * Math.PI / 180;
+  let specFov = (arCameraHFovDeg || AR_DEFAULT_CAMERA_HFOV_DEG) * Math.PI / 180;
+
+  // Zoom narrows what the lens shows. Normally pinned to 1x, but a device may
+  // clamp or refuse that, and then the render angle has to follow.
+  const z = (isFinite(arCameraZoom) && arCameraZoom > 0) ? arCameraZoom : 1;
+  if (z !== 1) specFov = 2 * Math.atan(Math.tan(specFov / 2) / z);
 
   // Native stream shape. Falls back to the display shape before metadata loads.
   const vw = (arCameraVideo && arCameraVideo.videoWidth) || 0;
