@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v182";
+const BUILD_VERSION = "v183";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -296,6 +296,7 @@ const arTurnLeftBtn        = document.getElementById("arTurnLeftBtn");
 const arTurnRightBtn       = document.getElementById("arTurnRightBtn");
 const arFwdBtn             = document.getElementById("arFwdBtn");
 const arBackBtn            = document.getElementById("arBackBtn");
+const arResetViewBtn       = document.getElementById("arResetViewBtn");
 const arStatusMessage      = document.getElementById("arStatusMessage");
 const arUseCurrentLocation = document.getElementById("arUseCurrentLocation");
 const arSelectLocationButton = document.getElementById("arSelectLocationButton");
@@ -1219,14 +1220,11 @@ function closeCaptureModal() {
 }
 
 async function clearCacheAndReloadFlow() {
-  if (!confirm("Clear app cache and reload?")) return;
-  if (confirm("Export active bridge ZIP before reload so you can re-import after update?")) {
-    if (activeBridgeId) {
-      await downloadBridgeZip(activeBridgeId);
-    } else {
-      setStatus("Open a bridge first if you want a ZIP export before reload.");
-    }
-  }
+  // Clearing the cache does not touch stored bridges, so this no longer offers
+  // a ZIP export first: that second confirm read as a download demand with no
+  // clear way to decline. Use the "Download ZIP" button on the bridges list if
+  // you do want a backup beforehand.
+  if (!confirm("Clear app cache and reload?\n\nYour bridges and photos are kept.")) return;
   try {
     const regs = await navigator.serviceWorker?.getRegistrations() || [];
     await Promise.all(regs.map((r) => r.unregister()));
@@ -1730,6 +1728,7 @@ function registerEvents() {
   if (arTurnRightBtn) arTurnRightBtn.addEventListener("click", () => { arApplyLookYaw(-0.15); });
   if (arFwdBtn) arFwdBtn.addEventListener("click", () => arMoveForward(arMetersToUnits(2)));
   if (arBackBtn) arBackBtn.addEventListener("click", () => arMoveForward(-arMetersToUnits(2)));
+  if (arResetViewBtn) arResetViewBtn.addEventListener("click", () => resetArView());
 }
 
 
@@ -2153,6 +2152,41 @@ function frameArModelForTest() {
   }
   applyArViewCamera();
   return true;
+}
+
+/**
+ * Clear every manual adjustment to the AR viewpoint and re-anchor.
+ *
+ * Drops the accumulated pan, elevation offset, turn, pinch/zoom and drag state,
+ * discards the seeded eye so it is re-placed from the current location, and
+ * forgets the sensor offset so the next reading re-aims at the model. Mirrors
+ * the reset block in openArViewModal, minus the things that belong to opening
+ * the modal (camera feed, listeners, minimap mode).
+ *
+ * arOrientAbsolute is deliberately NOT cleared: once an absolute (true-north)
+ * source has been seen, re-arming it would let a relative event latch an
+ * arbitrary origin and make the heading worse, not better.
+ */
+function resetArView() {
+  arPanX = 0;
+  arPanY = 0;
+  arElevOffsetM = 0;
+  arOrbitInitialized = false;   // frameArModelForTest re-aims at the model
+  arOrbitDragging = false;
+  arEyePos = null;
+  arEyeSeeded = false;
+  arTestLookAnchored = false;   // next reading re-captures the phone offset
+  arTestYawOffset = 0;
+  arTestPitchOffset = 0;
+  arTestAimAz = null;
+  arTestAimEl = null;
+  arYawSmoothed = null;         // drop the low-pass history so it snaps
+  arPitchSmoothed = null;
+  arMiniDragTarget = null;
+  arPointers.clear();
+  arPinchLastDist = 0;
+  if (arStatusMessage) arStatusMessage.textContent = "View reset - all manual adjustments cleared.";
+  applyArViewCamera();
 }
 
 // Ground-plane forward/right unit vectors for the current heading (world Z-up).
@@ -2724,11 +2758,17 @@ function onDeviceOrientation(event) {
   // Read-out values. Raw alpha is NOT a compass heading on iOS (it is relative
   // to an arbitrary origin there), so derive the true bearing the same way the
   // math above does, and report pitch relative to level rather than raw beta.
-  arDeviceOrientation.headingDeg =
-    (typeof event.webkitCompassHeading === "number" && !isNaN(event.webkitCompassHeading))
-      ? event.webkitCompassHeading
-      : (arOrientAbsolute ? ((360 - (alpha || 0)) % 360 + 360) % 360 : null);
+  const hasCompass = typeof event.webkitCompassHeading === "number" && !isNaN(event.webkitCompassHeading);
+  arDeviceOrientation.headingDeg = hasCompass
+    ? event.webkitCompassHeading
+    : (arOrientAbsolute ? ((360 - (alpha || 0)) % 360 + 360) % 360 : null);
   arDeviceOrientation.pitchDeg = (beta || 0) - 90;
+  // Which branch produced the heading, and the screen rotation applied to it.
+  // Both are shown in the read-out: a non-zero screen angle (landscape) or an
+  // "alpha-rel" source will each throw the overlay off by a quarter turn or
+  // more, and there is no way to tell which from the rendered view alone.
+  arDeviceOrientation.source = hasCompass ? "compass" : (isAbs ? "alpha-abs" : "alpha-rel");
+  arDeviceOrientation.screenAngleDeg = scrAngle || 0;
 
   // Low-pass smoothing removes the frame-to-frame jitter and the gimbal spikes
   // that appear when the phone is tilted up (beta near 90) to view the bridge.
@@ -2807,7 +2847,11 @@ function updateArRender() {
   }
   if (arAttitudeText) {
     const h = (headingDeg == null || !isFinite(headingDeg)) ? "--" : Math.round(headingDeg);
-    arAttitudeText.textContent = `Heading: ${h}° | Pitch: ${pitch}° | Roll: ${roll}°`;
+    const src = arDeviceOrientation.source || "none";
+    const scr = Math.round(arDeviceOrientation.screenAngleDeg || 0);
+    const view = Math.round(((arOrbitAz * 180 / Math.PI) % 360 + 360) % 360);
+    arAttitudeText.textContent =
+      `Heading: ${h}° | Pitch: ${pitch}° | Roll: ${roll}° | src: ${src} | scr: ${scr}° | view az: ${view}°`;
   }
 
   // Render IFC to canvas

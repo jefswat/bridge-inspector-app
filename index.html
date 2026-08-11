@@ -23,14 +23,14 @@
   <!-- proj4 (map projection / georeferencing) -->
   <script src="vendor/proj4.js"></script>
   <!-- web-ifc (IFC parsing) loaded dynamically as ES module in ifc-viewer.js -->
-  <link rel="stylesheet" href="styles.css?v=20260811-020000" />
+  <link rel="stylesheet" href="styles.css?v=20260811-024500" />
 </head>
 <body>
 
 <header>
   <h1>📷 Photo Vault <span id="buildStamp" style="font-size:.55rem;font-weight:400;opacity:.7;vertical-align:middle;">build …</span></h1>
   <div style="display:flex;gap:8px;align-items:center;">
-    <a class="map-nav-link" href="map.html?v=20260811-020000">🗺 Map summary</a>
+    <a class="map-nav-link" href="map.html?v=20260811-024500">🗺 Map summary</a>
     <button id="openSettingsButton" class="secondary" hidden>⚙ Settings</button>
     <button id="openPeerTransferViewTop" class="secondary">🔁 Transfer</button>
     <button id="installButton" class="secondary" hidden>⬇ Install App</button>
@@ -128,7 +128,7 @@
           <h3>🧹 App cache</h3>
           <button id="settingsClearCacheBtn" class="secondary">🔄 Clear cache &amp; reload</button>
         </div>
-        <p class="scan-hint">You’ll be asked if you want to export your data before reload.</p>
+        <p class="scan-hint">Clears the cached app files and reloads. Your bridges and photos are kept — use <strong>⬇ Download ZIP</strong> on a bridge first if you want a backup anyway.</p>
       </section>
 
       <section class="card" style="margin:0;">
@@ -493,6 +493,10 @@
           <button id="arFwdBtn" type="button" class="ar-control-btn" title="Move forward">＋</button>
           <button id="arBackBtn" type="button" class="ar-control-btn" title="Move back">－</button>
         </div>
+        <div class="ar-move-group">
+          <span class="ar-move-title">Reset</span>
+          <button id="arResetViewBtn" type="button" class="ar-control-btn" title="Clear every manual view adjustment (pan, elevation, turn, zoom) and re-anchor to the sensor">⟲</button>
+        </div>
       </div>
       
       <div id="arStatusMessage" class="status-bar" style="position:absolute;bottom:8px;left:8px;right:8px;">AR loading...</div>
@@ -582,8 +586,8 @@
 <script src="vendor/cv.js?v=20260716-211500"></script>
 <script src="vendor/aruco.js?v=20260716-211500"></script>
 <script src="vendor/apriltag_36h11.js?v=20260716-211500"></script>
-<script src="ifc-viewer.js?v=20260811-020000"></script>
-<script src="ifc-export.js?v=20260811-020000"></script>
-<script src="app.js?v=20260811-020000"></script>
+<script src="ifc-viewer.js?v=20260811-024500"></script>
+<script src="ifc-export.js?v=20260811-024500"></script>
+<script src="app.js?v=20260811-024500"></script>
 </body>
 </html>
