@@ -23,14 +23,14 @@
   <!-- proj4 (map projection / georeferencing) -->
   <script src="vendor/proj4.js"></script>
   <!-- web-ifc (IFC parsing) loaded dynamically as ES module in ifc-viewer.js -->
-  <link rel="stylesheet" href="styles.css?v=20260811-062000" />
+  <link rel="stylesheet" href="styles.css?v=20260811-064000" />
 </head>
 <body>
 
 <header>
   <h1>📷 Photo Vault <span id="buildStamp" style="font-size:.55rem;font-weight:400;opacity:.7;vertical-align:middle;">build …</span></h1>
   <div style="display:flex;gap:8px;align-items:center;">
-    <a class="map-nav-link" href="map.html?v=20260811-062000">🗺 Map summary</a>
+    <a class="map-nav-link" href="map.html?v=20260811-064000">🗺 Map summary</a>
     <button id="openSettingsButton" class="secondary" hidden>⚙ Settings</button>
     <button id="openPeerTransferViewTop" class="secondary">🔁 Transfer</button>
     <button id="installButton" class="secondary" hidden>⬇ Install App</button>
@@ -484,6 +484,7 @@
         <label for="arFovSlider" style="font-size:.8rem;color:#94a3b8;margin-right:6px;" title="Camera field of view. No browser API reports this, so trim it until the overlay stops sliding against the world as you pan.">Camera FOV</label>
         <input id="arFovSlider" type="range" min="40" max="120" step="0.5" value="82" style="width:120px;" />
         <span id="arFovValue" style="font-size:.75rem;color:#cbd5e1;margin-left:6px;">82°</span>
+        <button id="arFovMeasureBtn" type="button" class="ar-mini-sat-btn" title="Measure the real camera FOV via WebXR. Opens an AR session for a moment, reads the device's camera projection, then closes it.">📐 Measure</button>
       </div>
       
       <div class="ar-move-controls">
@@ -595,8 +596,8 @@
 <script src="vendor/cv.js?v=20260716-211500"></script>
 <script src="vendor/aruco.js?v=20260716-211500"></script>
 <script src="vendor/apriltag_36h11.js?v=20260716-211500"></script>
-<script src="ifc-viewer.js?v=20260811-062000"></script>
-<script src="ifc-export.js?v=20260811-062000"></script>
-<script src="app.js?v=20260811-062000"></script>
+<script src="ifc-viewer.js?v=20260811-064000"></script>
+<script src="ifc-export.js?v=20260811-064000"></script>
+<script src="app.js?v=20260811-064000"></script>
 </body>
 </html>

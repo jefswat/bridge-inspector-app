@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v192";
+const BUILD_VERSION = "v193";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -300,6 +300,7 @@ const arResetViewBtn       = document.getElementById("arResetViewBtn");
 const arMiniSatBtn         = document.getElementById("arMiniSatBtn");
 const arFovSlider          = document.getElementById("arFovSlider");
 const arFovValue           = document.getElementById("arFovValue");
+const arFovMeasureBtn      = document.getElementById("arFovMeasureBtn");
 const arStatusMessage      = document.getElementById("arStatusMessage");
 const arUseCurrentLocation = document.getElementById("arUseCurrentLocation");
 const arSelectLocationButton = document.getElementById("arSelectLocationButton");
@@ -1776,6 +1777,24 @@ function registerEvents() {
       updateArCameraFov();
       showFov();
     });
+    if (arFovMeasureBtn) arFovMeasureBtn.addEventListener("click", async () => {
+      arFovMeasureBtn.disabled = true;
+      const was = arFovMeasureBtn.textContent;
+      arFovMeasureBtn.textContent = "📐 …";
+      const r = await probeArCameraFovViaWebXR();
+      arFovMeasureBtn.textContent = was;
+      arFovMeasureBtn.disabled = false;
+      if (!r.ok) { setStatus(`FOV measure failed: ${r.reason}`); return; }
+      // Stored as the sensor's long-axis angle, the convention the rest of the
+      // FOV maths expects; it re-derives the on-screen value from the stream.
+      arCameraHFovDeg = Math.max(20, Math.min(160, r.longAxisDeg));
+      arCameraFovSource = "WebXR measured";
+      try { localStorage.setItem("arCameraHFovDeg", String(arCameraHFovDeg)); } catch (_) {}
+      arFovSlider.value = String(arCameraHFovDeg);
+      updateArCameraFov();
+      showFov();
+      setStatus(`Measured camera FOV: ${r.hfov.toFixed(1)}° H x ${r.vfov.toFixed(1)}° V (WebXR).`);
+    });
   }
   if (arMiniSatBtn) {
     const syncSatBtn = () => arMiniSatBtn.classList.toggle("is-on", arMiniSatelliteEnabled());
@@ -2087,6 +2106,62 @@ function updateArCameraFov() {
   arCameraEffVFovDeg = arRendererCamera.fov;
   arCameraEffHFovDeg = 2 * Math.atan(Math.tan(vFovVisible / 2) * aDisp) * 180 / Math.PI;
   arCameraStreamSize = (vw && vh) ? `${vw}x${vh}` : "";
+}
+
+/**
+ * Measure the real camera FOV via WebXR.
+ *
+ * getUserMedia exposes no field of view or focal length - getSettings() and
+ * getCapabilities() simply have no such member - which is why the rest of this
+ * file falls back to a spec-sheet guess. WebXR does expose it: an immersive-ar
+ * session hands back XRView.projectionMatrix, built from the device's real
+ * camera intrinsics, and the FOV drops straight out of two of its terms.
+ *
+ * The session is opened, one frame is read, and it is closed again. Requires a
+ * user gesture, and on Android needs ARCore (Google Play Services for AR).
+ *
+ * Caveat: this is the FOV of the XR view, which need not exactly equal the
+ * getUserMedia stream's - the two can pick different sensor crops. It is a far
+ * better starting point than a spec sheet, but the slider still exists to trim.
+ */
+async function probeArCameraFovViaWebXR() {
+  if (!navigator.xr || !navigator.xr.isSessionSupported) {
+    return { ok: false, reason: "WebXR not available" };
+  }
+  let supported = false;
+  try { supported = await navigator.xr.isSessionSupported("immersive-ar"); } catch (_) {}
+  if (!supported) return { ok: false, reason: "immersive-ar unsupported (ARCore missing?)" };
+
+  let session = null;
+  try {
+    session = await navigator.xr.requestSession("immersive-ar");
+    const refSpace = await session.requestReferenceSpace("viewer");
+    const proj = await new Promise((resolve) => {
+      let tries = 0;
+      const onFrame = (t, frame) => {
+        const pose = frame.getViewerPose(refSpace);
+        const view = pose && pose.views && pose.views[0];
+        if (view && view.projectionMatrix) { resolve(view.projectionMatrix); return; }
+        // Tracking can take a moment to produce a pose; give it a second.
+        if (++tries > 60) { resolve(null); return; }
+        session.requestAnimationFrame(onFrame);
+      };
+      session.requestAnimationFrame(onFrame);
+    });
+    if (!proj) return { ok: false, reason: "no viewer pose" };
+    // Column-major perspective matrix:
+    //   m[0] = 1 / (aspect * tan(vfov/2)),  m[5] = 1 / tan(vfov/2)
+    const vfov = 2 * Math.atan(1 / proj[5]) * 180 / Math.PI;
+    const hfov = 2 * Math.atan(1 / proj[0]) * 180 / Math.PI;
+    if (!isFinite(vfov) || !isFinite(hfov) || vfov <= 1 || hfov <= 1) {
+      return { ok: false, reason: "implausible projection" };
+    }
+    return { ok: true, vfov, hfov, longAxisDeg: Math.max(vfov, hfov) };
+  } catch (e) {
+    return { ok: false, reason: (e && e.message) || String(e) };
+  } finally {
+    if (session) { try { await session.end(); } catch (_) {} }
+  }
 }
 
 // Best-effort: try to read a real horizontal FOV from the live AR track. No
