@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v194";
+const BUILD_VERSION = "v195";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -301,6 +301,7 @@ const arMiniSatBtn         = document.getElementById("arMiniSatBtn");
 const arFovSlider          = document.getElementById("arFovSlider");
 const arFovValue           = document.getElementById("arFovValue");
 const arFovMeasureBtn      = document.getElementById("arFovMeasureBtn");
+const arFovResetBtn        = document.getElementById("arFovResetBtn");
 const arStatusMessage      = document.getElementById("arStatusMessage");
 const arUseCurrentLocation = document.getElementById("arUseCurrentLocation");
 const arSelectLocationButton = document.getElementById("arSelectLocationButton");
@@ -1769,7 +1770,10 @@ function registerEvents() {
       // handed over the ultrawide, which no FOV setting can compensate for.
       const zoom = (isFinite(arCameraZoom) && Math.abs(arCameraZoom - 1) > 0.01)
         ? ` · ${arCameraZoom.toFixed(2)}x` : "";
-      arFovValue.textContent = `${arCameraHFovDeg.toFixed(1)}°${eff}${zoom}`;
+      // Where the number came from matters: a "manual" value saved before the
+      // feed was pinned to 1x was trimmed against the ultrawide and is junk.
+      const src = arCameraFovSource ? ` · ${arCameraFovSource}` : "";
+      arFovValue.textContent = `${arCameraHFovDeg.toFixed(1)}°${eff}${zoom}${src}`;
     };
     arFovSlider.value = String(arCameraHFovDeg);
     showFov();
@@ -1781,6 +1785,15 @@ function registerEvents() {
       try { localStorage.setItem("arCameraHFovDeg", String(v)); } catch (_) {}
       updateArCameraFov();
       showFov();
+    });
+    if (arFovResetBtn) arFovResetBtn.addEventListener("click", () => {
+      try { localStorage.removeItem("arCameraHFovDeg"); } catch (_) {}
+      arCameraHFovDeg = AR_DEFAULT_CAMERA_HFOV_DEG;
+      arCameraFovSource = `default ${AR_DEFAULT_CAMERA_HFOV_DEG}° (H)`;
+      arFovSlider.value = String(arCameraHFovDeg);
+      updateArCameraFov();
+      showFov();
+      setStatus(`Camera FOV reset to the ${AR_DEFAULT_CAMERA_HFOV_DEG}° main-lens default.`);
     });
     if (arFovMeasureBtn) arFovMeasureBtn.addEventListener("click", async () => {
       arFovMeasureBtn.disabled = true;
