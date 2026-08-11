@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v198";
+const BUILD_VERSION = "v199";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -339,6 +339,19 @@ let arPanY                 = 0;  // manual pan in scene space (metres)
 let arPivotOffsetM         = 0.6; // 0.6 metres behind the camera position
 let arDeviceOrientation    = { alpha: 0, beta: 0, gamma: 0, headingDeg: null, pitchDeg: 0 }; // from DeviceOrientationEvent
 let arLiveQuat             = null; // full device rotation in scene frame (live GPS mode)
+// Standing correction added to the compass heading, in radians. Persisted:
+// magnetometer error at a given site is repeatable, so re-shimming on every
+// visit would be busywork.
+const AR_HEADING_TRIM_KEY  = "arHeadingTrimDeg";
+let arHeadingTrimRad       = (() => {
+  const v = parseFloat(localStorage.getItem(AR_HEADING_TRIM_KEY));
+  return isFinite(v) ? v * Math.PI / 180 : 0;
+})();
+function arSaveHeadingTrim() {
+  try {
+    localStorage.setItem(AR_HEADING_TRIM_KEY, String(arHeadingTrimRad * 180 / Math.PI));
+  } catch (_) {}
+}
 let arPermissionGranted    = false;
 let arOrientAbsolute       = false; // true once an absolute/compass orientation source is active
 let arYawSmoothed          = null;  // low-pass filtered yaw (radians)
@@ -1786,6 +1799,12 @@ function registerEvents() {
   if (arFwdBtn) arFwdBtn.addEventListener("click", () => arMoveForward(arMetersToUnits(2)));
   if (arBackBtn) arBackBtn.addEventListener("click", () => arMoveForward(-arMetersToUnits(2)));
   if (arResetViewBtn) arResetViewBtn.addEventListener("click", () => resetArView());
+  const arTrimClearBtn = document.getElementById("arTrimClearBtn");
+  if (arTrimClearBtn) arTrimClearBtn.addEventListener("click", () => {
+    arHeadingTrimRad = 0;
+    try { localStorage.removeItem(AR_HEADING_TRIM_KEY); } catch (_) {}
+    setStatus("Heading trim cleared - back to the raw compass.");
+  });
   const showGeoid = () => {
     if (!arGeoidValue) return;
     arGeoidValue.textContent = (arGeoidSepM == null || !isFinite(arGeoidSepM))
@@ -2558,6 +2577,9 @@ function resetArView() {
   if (arTestAimAz == null) arTestAimAz = 0;
   if (arTestAimEl == null) arTestAimEl = 0;
   arMiniDragTarget = null;
+  // The heading trim is a site calibration, not a view adjustment, so it is
+  // deliberately kept: clearing it here would throw away a shim every time you
+  // straightened anything else out.
   arMiniZoom = 1;               // plan view back to its default extent
   arMiniPointers.clear();
   arMiniPinchStartDist = 0;
@@ -2742,8 +2764,17 @@ function arTestPhoneLookActive() {
   return arHasOrientation && !arLiveGpsActive();
 }
 function arApplyLookYaw(delta) {
-  if (arTestPhoneLookActive()) arTestYawOffset += delta;
-  else arOrbitAz += delta;
+  if (arTestPhoneLookActive()) { arTestYawOffset += delta; return; }
+  // Live GPS: the sensor rewrites the heading every event, so nudging the
+  // absolute angle achieved nothing - the shim vanished before it was drawn.
+  // Fold it into the standing trim instead, which the sensor path respects.
+  if (arHasOrientation) {
+    arHeadingTrimRad += delta;
+    arOrbitAz += delta;          // show it immediately, before the next event
+    arSaveHeadingTrim();
+    return;
+  }
+  arOrbitAz += delta;
 }
 function arApplyLookPitch(delta) {
   if (arTestPhoneLookActive()) arTestPitchOffset += delta;
@@ -2963,13 +2994,20 @@ function arMiniApply(cx, cy) {
     } else {
       arOrbitAz = Math.atan2(w.y - arEyePos.y, w.x - arEyePos.x);
     }
-    // Re-anchor the phone offset onto the new aim. Without this the very next
-    // orientation event recomputes arOrbitAz from the old offset and the drag
-    // is undone before it is ever drawn.
-    if (!arLiveGpsActive() && arYawSmoothed != null && isFinite(arYawSmoothed)) {
-      arTestYawOffset = arOrbitAz - arYawSmoothed;
-      arTestLookAnchored = true;
-      if (arTestAimAz == null) arTestAimAz = arOrbitAz;
+    // Make the new aim survive the next orientation event, which would
+    // otherwise recompute the heading and undo the drag before it is drawn.
+    // Test mode carries a relative offset; live GPS carries the standing trim.
+    if (arYawSmoothed != null && isFinite(arYawSmoothed)) {
+      if (!arLiveGpsActive()) {
+        arTestYawOffset = arOrbitAz - arYawSmoothed;
+        arTestLookAnchored = true;
+        if (arTestAimAz == null) arTestAimAz = arOrbitAz;
+      } else {
+        // arYawSmoothed already includes the old trim, so the correction is the
+        // difference between where you dragged to and where the phone points.
+        arHeadingTrimRad += arOrbitAz - arYawSmoothed;
+        arSaveHeadingTrim();
+      }
     }
   } else {
     // Move the eye (keep current elevation).
@@ -3464,16 +3502,25 @@ function onDeviceOrientation(event) {
   // The quaternion also carries the screen rotation properly, so landscape
   // rolls the image rather than steering the view.
   const q = arDeviceQuaternion(alphaUse, beta || 0, gamma || 0, scrAngle || 0);
-  arLiveQuat = arYupToSceneQuat(q);
+  // Heading trim, applied as a rotation about the scene's up axis to the whole
+  // device rotation - so the camera, the plan view and the read-out all agree,
+  // and the phone still drives the view relative to it. The compass on Android
+  // is referenced to MAGNETIC north through the fused rotation vector, and any
+  // ferrous mass nearby drags it, so a standing correction is needed that
+  // survives the next sensor event rather than being overwritten by it.
+  const half = arHeadingTrimRad / 2;
+  arLiveQuat = arQMul({ x: 0, y: 0, z: Math.sin(half), w: Math.cos(half) },
+                      arYupToSceneQuat(q));
 
   // Forward vector, converted from the Y-up device world into the Z-up scene
   // frame (X=easting, Y=northing, Z=elevation) that arOrbitAz/El are measured
   // in. Keeping these in sync leaves the plan view, Move/Turn and drag controls
   // working off the same numbers as before.
-  const fwd = arQRotate(q, { x: 0, y: 0, z: -1 });
-  const east = fwd.x, north = -fwd.z, up = fwd.y;
-  const rawAz = Math.atan2(north, east);
-  const rawEl = Math.atan2(up, Math.hypot(east, north));
+  // Forward straight out of the scene-frame rotation (+X east, +Y north, +Z up),
+  // so it already carries the trim.
+  const fwd = arQRotate(arLiveQuat, { x: 0, y: 0, z: -1 });
+  const rawAz = Math.atan2(fwd.y, fwd.x);
+  const rawEl = Math.atan2(fwd.z, Math.hypot(fwd.x, fwd.y));
 
   // Read-out values. Raw alpha is NOT a compass heading on iOS (it is relative
   // to an arbitrary origin there), so derive the true bearing the same way the
@@ -3604,8 +3651,11 @@ function updateArRender() {
     const src = arDeviceOrientation.source || "none";
     const scr = Math.round(arDeviceOrientation.screenAngleDeg || 0);
     const view = Math.round(((arOrbitAz * 180 / Math.PI) % 360 + 360) % 360);
+    const trimDeg = arHeadingTrimRad * 180 / Math.PI;
+    const trim = Math.abs(trimDeg) > 0.5
+      ? ` | trim ${trimDeg > 0 ? "+" : ""}${trimDeg.toFixed(0)}°` : "";
     arAttitudeText.textContent =
-      `Heading: ${h}° | Pitch: ${pitch}° | Roll: ${roll}° | src: ${src} | scr: ${scr}° | view az: ${view}°`;
+      `Heading: ${h}° | Pitch: ${pitch}° | Roll: ${roll}° | src: ${src} | scr: ${scr}° | view az: ${view}°${trim}`;
   }
 
   // Render IFC to canvas

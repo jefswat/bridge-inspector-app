@@ -23,14 +23,14 @@
   <!-- proj4 (map projection / georeferencing) -->
   <script src="vendor/proj4.js"></script>
   <!-- web-ifc (IFC parsing) loaded dynamically as ES module in ifc-viewer.js -->
-  <link rel="stylesheet" href="styles.css?v=20260811-081000" />
+  <link rel="stylesheet" href="styles.css?v=20260811-083000" />
 </head>
 <body>
 
 <header>
   <h1>📷 Photo Vault <span id="buildStamp" style="font-size:.55rem;font-weight:400;opacity:.7;vertical-align:middle;">build …</span></h1>
   <div style="display:flex;gap:8px;align-items:center;">
-    <a class="map-nav-link" href="map.html?v=20260811-081000">🗺 Map summary</a>
+    <a class="map-nav-link" href="map.html?v=20260811-083000">🗺 Map summary</a>
     <button id="openSettingsButton" class="secondary" hidden>⚙ Settings</button>
     <button id="openPeerTransferViewTop" class="secondary">🔁 Transfer</button>
     <button id="installButton" class="secondary" hidden>⬇ Install App</button>
@@ -515,7 +515,11 @@
         </div>
         <div class="ar-move-group">
           <span class="ar-move-title">Reset</span>
-          <button id="arResetViewBtn" type="button" class="ar-control-btn" title="Clear manual adjustments (pan, elevation, turn, zoom) so the view follows the phone again. Does not re-frame the model.">⟲</button>
+          <button id="arResetViewBtn" type="button" class="ar-control-btn" title="Clear manual adjustments (pan, elevation, turn, zoom) so the view follows the phone again. Does not re-frame the model, and keeps the heading trim.">⟲</button>
+        </div>
+        <div class="ar-move-group">
+          <span class="ar-move-title">Trim</span>
+          <button id="arTrimClearBtn" type="button" class="ar-control-btn" title="Clear the standing heading correction and go back to the raw compass.">🧭</button>
         </div>
       </div>
       
@@ -606,8 +610,8 @@
 <script src="vendor/cv.js?v=20260716-211500"></script>
 <script src="vendor/aruco.js?v=20260716-211500"></script>
 <script src="vendor/apriltag_36h11.js?v=20260716-211500"></script>
-<script src="ifc-viewer.js?v=20260811-081000"></script>
-<script src="ifc-export.js?v=20260811-081000"></script>
-<script src="app.js?v=20260811-081000"></script>
+<script src="ifc-viewer.js?v=20260811-083000"></script>
+<script src="ifc-export.js?v=20260811-083000"></script>
+<script src="app.js?v=20260811-083000"></script>
 </body>
 </html>
