@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v183";
+const BUILD_VERSION = "v184";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -328,6 +328,7 @@ let arPanX                 = 0;  // manual pan in scene space (metres)
 let arPanY                 = 0;  // manual pan in scene space (metres)
 let arPivotOffsetM         = 0.6; // 0.6 metres behind the camera position
 let arDeviceOrientation    = { alpha: 0, beta: 0, gamma: 0, headingDeg: null, pitchDeg: 0 }; // from DeviceOrientationEvent
+let arLiveQuat             = null; // full device rotation in scene frame (live GPS mode)
 let arPermissionGranted    = false;
 let arOrientAbsolute       = false; // true once an absolute/compass orientation source is active
 let arYawSmoothed          = null;  // low-pass filtered yaw (radians)
@@ -2059,6 +2060,20 @@ function applyArViewCamera() {
   // True AR: camera stays at YOUR fixed eye position; dragging only rotates the
   // view direction (yaw/pitch) about that eye — like turning your head.
   if (!arRendererCamera || !arEyePos) return;
+
+  // Live GPS: drive the camera from the full device rotation, so the overlay
+  // rolls with the handset and stays correct in landscape. The yaw/pitch path
+  // below cannot express roll — it rebuilds the orientation from two angles
+  // with a fixed world up — so it is kept only for the manual/test controls.
+  if (arLiveQuat && arHasOrientation && arLiveGpsActive()) {
+    arRendererCamera.near = Math.max(arOrbitRadius / 2000, 0.05);
+    arRendererCamera.far = arOrbitRadius * 50 + 2000;
+    arRendererCamera.position.copy(arEyePos);
+    arRendererCamera.quaternion.set(arLiveQuat.x, arLiveQuat.y, arLiveQuat.z, arLiveQuat.w);
+    arRendererCamera.updateProjectionMatrix();
+    return;
+  }
+
   const el = Math.max(-1.4, Math.min(1.4, arOrbitEl));
   const az = arOrbitAz;
   const dir = new THREE.Vector3(
@@ -2707,6 +2722,71 @@ function smoothAngle(prev, target, a) {
   return prev + a * d;
 }
 
+// ── Orientation maths ────────────────────────────────────────────────────────
+// Plain {x,y,z,w} quaternions rather than THREE's: this runs on every sensor
+// event, and keeping it independent of the 3D library means a failed CDN load
+// of three.js cannot take the compass down with it.
+
+function arQMul(a, b) {
+  return {
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+  };
+}
+
+// Rotate a vector by a quaternion: v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v)
+function arQRotate(q, v) {
+  const tx = 2 * (q.y * v.z - q.z * v.y);
+  const ty = 2 * (q.z * v.x - q.x * v.z);
+  const tz = 2 * (q.x * v.y - q.y * v.x);
+  return {
+    x: v.x + q.w * tx + q.y * tz - q.z * ty,
+    y: v.y + q.w * ty + q.z * tx - q.x * tz,
+    z: v.z + q.w * tz + q.x * ty - q.y * tx,
+  };
+}
+
+// -90 degrees about X. The W3C frame describes the device lying flat with the
+// screen up; this tips it to "camera looking out of the back".
+const AR_Q_FLIP = { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 };
+// +90 degrees about X: Y-up device world -> the Z-up scene frame that
+// arOrbitAz/El live in (+X easting, +Y northing, +Z elevation).
+const AR_Q_YUP_TO_SCENE = { x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 };
+
+/**
+ * Device orientation angles -> world quaternion in the Y-up frame the W3C
+ * DeviceOrientation spec defines: R = Rz(alpha) Rx(beta) Ry(gamma), which is
+ * three.js Euler order 'YXZ' with (beta, alpha, -gamma).
+ *
+ * All angles in degrees. screenAngleDeg is screen.orientation.angle, applied
+ * about the view axis so turning the handset rolls the picture instead of
+ * steering the view.
+ */
+function arDeviceQuaternion(alphaDeg, betaDeg, gammaDeg, screenAngleDeg) {
+  const d2r = Math.PI / 180;
+  const x = (betaDeg || 0) * d2r, y = (alphaDeg || 0) * d2r, z = -(gammaDeg || 0) * d2r;
+  const c1 = Math.cos(x / 2), c2 = Math.cos(y / 2), c3 = Math.cos(z / 2);
+  const s1 = Math.sin(x / 2), s2 = Math.sin(y / 2), s3 = Math.sin(z / 2);
+  // 'YXZ' composition, matching THREE.Quaternion.setFromEuler.
+  let q = {
+    x: s1 * c2 * c3 + c1 * s2 * s3,
+    y: c1 * s2 * c3 - s1 * c2 * s3,
+    z: c1 * c2 * s3 - s1 * s2 * c3,
+    w: c1 * c2 * c3 + s1 * s2 * s3,
+  };
+  q = arQMul(q, AR_Q_FLIP);
+  const half = -(screenAngleDeg || 0) * d2r / 2;
+  q = arQMul(q, { x: 0, y: 0, z: Math.sin(half), w: Math.cos(half) });
+  return q;
+}
+
+// Rotate a Y-up device-world quaternion into the Z-up scene frame.
+function arYupToSceneQuat(q) {
+  return arQMul(AR_Q_YUP_TO_SCENE, q);
+}
+
 function onDeviceOrientation(event) {
   const alpha = event.alpha, beta = event.beta, gamma = event.gamma;
   // headingDeg/pitchDeg are filled in below, once the absolute source is known;
@@ -2734,31 +2814,35 @@ function onDeviceOrientation(event) {
   } catch (_) { scrAngle = 0; }
   arScreenAngleRad = (scrAngle || 0) * Math.PI / 180;
 
-  // Absolute compass heading. iOS exposes webkitCompassHeading (clockwise from
-  // north); Android's absolute alpha is CCW, i.e. alpha ~= -heading. Both
-  // branches therefore produce -heading in radians.
-  let rawAz;
-  if (typeof event.webkitCompassHeading === "number" && !isNaN(event.webkitCompassHeading)) {
-    rawAz = (-event.webkitCompassHeading) * Math.PI / 180;
-  } else {
-    rawAz = (alpha || 0) * Math.PI / 180;
-  }
-  rawAz -= arScreenAngleRad;
-  // Compass -> scene azimuth. arOrbitAz is measured CCW from +X in a Z-up scene
-  // where +X is easting and +Y is northing (baked in fitCameraToObject), so a
-  // compass heading h maps to PI/2 - h, not -h. Every other producer of
-  // arOrbitAz already uses that frame via atan2(dy, dx); without this quarter
-  // turn, live-GPS AR renders east when you face north. Test mode hid the error
-  // because arTestYawOffset below absorbs any constant offset. The same
-  // convention is used by positionArCameraFromGeo and the viewer's
-  // positionCameraFromGeo, which build (sin h, ., -cos h) in M-space.
-  rawAz += Math.PI / 2;
-  const rawEl = ((beta || 0) - 90) * Math.PI / 180;
+  // Absolute yaw reference. iOS exposes webkitCompassHeading (clockwise from
+  // north) while its alpha is relative; Android's absolute alpha is CCW from
+  // north, i.e. alpha ~= 360 - heading. Feeding the compass bearing back in as
+  // an alpha keeps one composition path for both.
+  const hasCompass = typeof event.webkitCompassHeading === "number" && !isNaN(event.webkitCompassHeading);
+  const alphaUse = hasCompass ? (360 - event.webkitCompassHeading) : (alpha || 0);
+
+  // Compose the full device rotation instead of reading yaw and pitch off alpha
+  // and beta separately. That shortcut is singular at beta = 90 - the phone
+  // held upright, which is exactly how you hold it to look at a bridge - where
+  // alpha and gamma turn about the same axis, so any roll of the handset leaks
+  // straight into the heading and swings the overlay by up to a quarter turn.
+  // The quaternion also carries the screen rotation properly, so landscape
+  // rolls the image rather than steering the view.
+  const q = arDeviceQuaternion(alphaUse, beta || 0, gamma || 0, scrAngle || 0);
+  arLiveQuat = arYupToSceneQuat(q);
+
+  // Forward vector, converted from the Y-up device world into the Z-up scene
+  // frame (X=easting, Y=northing, Z=elevation) that arOrbitAz/El are measured
+  // in. Keeping these in sync leaves the plan view, Move/Turn and drag controls
+  // working off the same numbers as before.
+  const fwd = arQRotate(q, { x: 0, y: 0, z: -1 });
+  const east = fwd.x, north = -fwd.z, up = fwd.y;
+  const rawAz = Math.atan2(north, east);
+  const rawEl = Math.atan2(up, Math.hypot(east, north));
 
   // Read-out values. Raw alpha is NOT a compass heading on iOS (it is relative
   // to an arbitrary origin there), so derive the true bearing the same way the
   // math above does, and report pitch relative to level rather than raw beta.
-  const hasCompass = typeof event.webkitCompassHeading === "number" && !isNaN(event.webkitCompassHeading);
   arDeviceOrientation.headingDeg = hasCompass
     ? event.webkitCompassHeading
     : (arOrientAbsolute ? ((360 - (alpha || 0)) % 360 + 360) % 360 : null);
