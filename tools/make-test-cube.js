@@ -2,8 +2,15 @@
 /**
  * Generate a georeferenced IFC4 test cube for AR testing.
  *
- * The cube is a solid box centred on a given WGS84 lat/lon, sitting on the
- * ground (base at map elevation 0), aligned so its faces face N/S/E/W.
+ * The cube is a solid box centred on a given WGS84 lat/lon, with its base at a
+ * given elevation, aligned so its faces face N/S/E/W.
+ *
+ * The base elevation is baked into the geometry's Z, not just written to
+ * IfcMapConversion.OrthogonalHeight: extractGeoreference() in ifc-viewer.js
+ * never reads OrthogonalHeight, and the AR eye is placed off modelElevMinM
+ * (the model's lowest geometry), so an elevation held only in metadata would
+ * be ignored. OrthogonalHeight is therefore 0 — the geometry already carries
+ * the full height above the CRS vertical datum.
  *
  * Georeferencing matches what ifc-viewer.js actually reads: IfcMapConversion +
  * IfcProjectedCRS (IfcSite RefLatitude/RefLongitude is written too, but the
@@ -14,6 +21,7 @@
  *
  * Usage:
  *   node tools/make-test-cube.js --lat 41.2 --lon -96.1 [--size-ft 12]
+ *                                [--base-ft 1043 | --base-m 317.9064]
  *                                [--epsg EPSG:7062] [--out test-models/cube-12ft.ifc]
  */
 
@@ -74,7 +82,7 @@ function dms(deg) {
 }
 
 function buildCubeIFC(opts) {
-  const { lat, lon, sizeM, epsg, groundElevM } = opts;
+  const { lat, lon, sizeM, epsg, baseElevM } = opts;
 
   const def = CRS_DEFS[epsg];
   if (!def) throw new Error(`EPSG ${epsg} is not in CRS_DEFS — the app could not georeference it.`);
@@ -107,15 +115,17 @@ function buildCubeIFC(opts) {
   // converts model metres into the CRS's US survey feet.
   const crsUnit = add("IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.)");
   const crs = add(`IFCPROJECTEDCRS('${epsg}','Nebraska LDP (test)','NAD83','NAVD88',$,$,#${crsUnit})`);
-  add(`IFCMAPCONVERSION(#${ctx},#${crs},${num(eastings)},${num(northings)},${num(groundElevM * US_FT_PER_M)},1.,0.,${num(US_FT_PER_M)})`);
+  // OrthogonalHeight is 0 on purpose: the geometry's Z already holds the full
+  // height above the vertical datum (see the note at the top of this file).
+  add(`IFCMAPCONVERSION(#${ctx},#${crs},${num(eastings)},${num(northings)},0.,1.,0.,${num(US_FT_PER_M)})`);
 
   // --- Spatial structure ---
   const siteObjPl = add(`IFCLOCALPLACEMENT($,#${worldPlacement})`);
-  const site = add(`IFCSITE('${ifcGuid()}',$,'Test Site',$,$,#${siteObjPl},$,$,.ELEMENT.,${dms(lat)},${dms(lon)},${num(groundElevM)},$,$)`);
+  const site = add(`IFCSITE('${ifcGuid()}',$,'Test Site',$,$,#${siteObjPl},$,$,.ELEMENT.,${dms(lat)},${dms(lon)},${num(baseElevM)},$,$)`);
   const bldObjPl = add(`IFCLOCALPLACEMENT(#${siteObjPl},#${worldPlacement})`);
   const building = add(`IFCBUILDING('${ifcGuid()}',$,'Test Cube',$,$,#${bldObjPl},$,$,.ELEMENT.,$,$,$)`);
   const storeyObjPl = add(`IFCLOCALPLACEMENT(#${bldObjPl},#${worldPlacement})`);
-  const storey = add(`IFCBUILDINGSTOREY('${ifcGuid()}',$,'Ground',$,$,#${storeyObjPl},$,$,.ELEMENT.,0.)`);
+  const storey = add(`IFCBUILDINGSTOREY('${ifcGuid()}',$,'Ground',$,$,#${storeyObjPl},$,$,.ELEMENT.,${num(baseElevM)})`);
   add(`IFCRELAGGREGATES('${ifcGuid()}',$,$,$,#${project},(#${site}))`);
   add(`IFCRELAGGREGATES('${ifcGuid()}',$,$,$,#${site},(#${building}))`);
   add(`IFCRELAGGREGATES('${ifcGuid()}',$,$,$,#${building},(#${storey}))`);
@@ -141,14 +151,17 @@ function buildCubeIFC(opts) {
   const shapeRep = add(`IFCSHAPEREPRESENTATION(#${ctx},'Body','SweptSolid',(#${solid}))`);
   const prodShape = add(`IFCPRODUCTDEFINITIONSHAPE($,$,(#${shapeRep}))`);
 
-  const cubePt = add("IFCCARTESIANPOINT((0.,0.,0.))");
+  // Lift the whole solid so its base sits at the requested elevation. This is
+  // what sets modelElevMinM, which the AR eye uses as its ground datum.
+  const cubePt = add(`IFCCARTESIANPOINT((0.,0.,${num(baseElevM)}))`);
   const cubeZ = add("IFCDIRECTION((0.,0.,1.))");
   const cubeX = add("IFCDIRECTION((1.,0.,0.))");
   const cubeAxis = add(`IFCAXIS2PLACEMENT3D(#${cubePt},#${cubeZ},#${cubeX})`);
   const cubePl = add(`IFCLOCALPLACEMENT(#${storeyObjPl},#${cubeAxis})`);
 
   const sizeFt = sizeM / M_PER_FT;
-  const desc = `${sizeFt.toFixed(0)} ft cube | GPS ${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+  const baseFt = baseElevM / M_PER_FT;
+  const desc = `${sizeFt.toFixed(0)} ft cube | GPS ${lat.toFixed(6)}, ${lon.toFixed(6)} | base ${baseFt.toFixed(1)} ft`;
   const proxy = add(`IFCBUILDINGELEMENTPROXY('${ifcGuid()}',$,'Test Cube ${sizeFt.toFixed(0)}ft','${desc}',$,#${cubePl},#${prodShape},$,.NOTDEFINED.)`);
   add(`IFCRELCONTAINEDINSPATIALSTRUCTURE('${ifcGuid()}',$,'Contents',$,(#${proxy}),#${storey})`);
 
@@ -161,6 +174,9 @@ function buildCubeIFC(opts) {
   pv("Northing_usft", `IFCREAL(${num(northings)})`);
   pv("EdgeLength_ft", `IFCREAL(${num(sizeFt)})`);
   pv("EdgeLength_m", `IFCREAL(${num(sizeM)})`);
+  pv("BaseElevation_ft", `IFCREAL(${num(baseFt)})`);
+  pv("BaseElevation_m", `IFCREAL(${num(baseElevM)})`);
+  pv("TopElevation_ft", `IFCREAL(${num(baseFt + sizeFt)})`);
   const pset = add(`IFCPROPERTYSET('${ifcGuid()}',$,'Pset_TestCube',$,(${props.map((p) => "#" + p).join(",")}))`);
   add(`IFCRELDEFINESBYPROPERTIES('${ifcGuid()}',$,$,$,(#${proxy}),#${pset})`);
 
@@ -192,12 +208,19 @@ function main() {
   }
   const sizeFt = args["size-ft"] != null && args["size-ft"] !== true ? Number(args["size-ft"]) : 12;
   const epsg = typeof args.epsg === "string" ? args.epsg : "EPSG:7062";
-  const groundElevM = args["ground-m"] != null && args["ground-m"] !== true ? Number(args["ground-m"]) : 0;
+  // Base elevation above the CRS vertical datum. --base-ft wins if both given.
+  let baseElevM = 0;
+  if (args["base-ft"] != null && args["base-ft"] !== true) baseElevM = Number(args["base-ft"]) * M_PER_FT;
+  else if (args["base-m"] != null && args["base-m"] !== true) baseElevM = Number(args["base-m"]);
+  if (!isFinite(baseElevM)) {
+    console.error("--base-ft / --base-m must be a number");
+    process.exit(1);
+  }
   const out = typeof args.out === "string"
     ? args.out
     : path.join("test-models", `cube-${sizeFt}ft.ifc`);
 
-  const built = buildCubeIFC({ lat, lon, sizeM: sizeFt * M_PER_FT, epsg, groundElevM });
+  const built = buildCubeIFC({ lat, lon, sizeM: sizeFt * M_PER_FT, epsg, baseElevM });
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, built.text, "utf8");
 
@@ -205,6 +228,8 @@ function main() {
   console.log(`  centre   ${lat.toFixed(6)}, ${lon.toFixed(6)}`);
   console.log(`  ${epsg}  E=${built.eastings.toFixed(3)} N=${built.northings.toFixed(3)} (us-ft)`);
   console.log(`  edge     ${sizeFt} ft = ${(sizeFt * M_PER_FT).toFixed(4)} m`);
+  console.log(`  base     ${(baseElevM / M_PER_FT).toFixed(2)} ft = ${baseElevM.toFixed(4)} m`);
+  console.log(`  top      ${(baseElevM / M_PER_FT + sizeFt).toFixed(2)} ft = ${(baseElevM + sizeFt * M_PER_FT).toFixed(4)} m`);
 }
 
 if (require.main === module) main();
