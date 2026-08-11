@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v191";
+const BUILD_VERSION = "v192";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -298,6 +298,8 @@ const arFwdBtn             = document.getElementById("arFwdBtn");
 const arBackBtn            = document.getElementById("arBackBtn");
 const arResetViewBtn       = document.getElementById("arResetViewBtn");
 const arMiniSatBtn         = document.getElementById("arMiniSatBtn");
+const arFovSlider          = document.getElementById("arFovSlider");
+const arFovValue           = document.getElementById("arFovValue");
 const arStatusMessage      = document.getElementById("arStatusMessage");
 const arUseCurrentLocation = document.getElementById("arUseCurrentLocation");
 const arSelectLocationButton = document.getElementById("arSelectLocationButton");
@@ -342,6 +344,9 @@ let arScreenAngleRad       = 0;     // screen-orientation offset (radians)
 const AR_DEFAULT_CAMERA_HFOV_DEG = 82;
 let arCameraHFovDeg        = (() => { const v = parseFloat(localStorage.getItem("arCameraHFovDeg")); return isFinite(v) && v > 20 && v < 160 ? v : AR_DEFAULT_CAMERA_HFOV_DEG; })();
 let arCameraFovSource      = "default 82\u00b0 (H)";
+let arCameraEffVFovDeg     = 0;   // vertical fov actually rendered, after crop
+let arCameraEffHFovDeg     = 0;   // horizontal equivalent, for the read-out
+let arCameraStreamSize     = "";  // native stream dimensions, for the read-out
 let arGeoFailReason        = "";
 // Real-world AR is the goal: stand at the bridge and see the IFC on the real
 // structure. The old "test framing" put the eye at a model-relative standoff,
@@ -1752,6 +1757,26 @@ function registerEvents() {
   if (arFwdBtn) arFwdBtn.addEventListener("click", () => arMoveForward(arMetersToUnits(2)));
   if (arBackBtn) arBackBtn.addEventListener("click", () => arMoveForward(-arMetersToUnits(2)));
   if (arResetViewBtn) arResetViewBtn.addEventListener("click", () => resetArView());
+  if (arFovSlider) {
+    const showFov = () => {
+      if (!arFovValue) return;
+      // Show the spec value being trimmed plus what is actually rendered after
+      // the cover-crop, since those differ and only the second one matters.
+      const eff = arCameraEffHFovDeg ? ` (${arCameraEffHFovDeg.toFixed(0)}° on screen)` : "";
+      arFovValue.textContent = `${arCameraHFovDeg.toFixed(1)}°${eff}`;
+    };
+    arFovSlider.value = String(arCameraHFovDeg);
+    showFov();
+    arFovSlider.addEventListener("input", () => {
+      const v = parseFloat(arFovSlider.value);
+      if (!isFinite(v)) return;
+      arCameraHFovDeg = v;
+      arCameraFovSource = "manual";
+      try { localStorage.setItem("arCameraHFovDeg", String(v)); } catch (_) {}
+      updateArCameraFov();
+      showFov();
+    });
+  }
   if (arMiniSatBtn) {
     const syncSatBtn = () => arMiniSatBtn.classList.toggle("is-on", arMiniSatelliteEnabled());
     syncSatBtn();
@@ -1946,6 +1971,9 @@ async function startArCameraFeed() {
       arCameraVideo.srcObject = arStream;
       arCameraVideo.onloadedmetadata = () => {
         arCameraVideo.play().catch((e) => console.log("AR video play:", e));
+        // videoWidth/Height are 0 until now, and the FOV maths needs the
+        // stream's real shape to know what the cover-crop is throwing away.
+        updateArCameraFov();
       };
     }
   } catch (error) {
@@ -2017,21 +2045,48 @@ function ensureArModelClone() {
 
 // Convert the configured HORIZONTAL fov to the VERTICAL fov three.js needs,
 // using the camera's current aspect ratio, then apply it.
+/**
+ * Match the render camera to what the video feed actually SHOWS.
+ *
+ * Two things have to line up or the overlay slides against the world as you
+ * pan - which looks like bad tracking even when the pose is perfect.
+ *
+ * 1. The spec FOV describes the sensor's long axis, so converting it to a
+ *    vertical FOV needs the VIDEO's aspect ratio, not the screen's. A 4:3
+ *    stream shown in a tall panel are different shapes.
+ * 2. #arCameraVideo is object-fit: cover, so the feed is cropped to fill the
+ *    panel. Whatever is cropped away is FOV you can no longer see, and the
+ *    render camera must lose it too.
+ */
 function updateArCameraFov() {
   if (!arRendererCamera) return;
-  const aspect = arRendererCamera.aspect && isFinite(arRendererCamera.aspect) ? arRendererCamera.aspect : 1;
+  const aDisp = (arRendererCamera.aspect && isFinite(arRendererCamera.aspect))
+    ? arRendererCamera.aspect : 1;
   const specFov = (arCameraHFovDeg || AR_DEFAULT_CAMERA_HFOV_DEG) * Math.PI / 180;
-  // A phone's quoted FOV refers to the sensor's LONG axis. In portrait the long
-  // axis is the screen's vertical, so the spec value IS the vertical fov; in
-  // landscape it is the horizontal fov and must be converted.
-  let vfov;
-  if (aspect <= 1) {
-    vfov = specFov;                                                   // portrait
-  } else {
-    vfov = 2 * Math.atan(Math.tan(specFov / 2) / Math.max(0.0001, aspect)); // landscape
-  }
-  arRendererCamera.fov = Math.max(1, Math.min(179, vfov * 180 / Math.PI));
+
+  // Native stream shape. Falls back to the display shape before metadata loads.
+  const vw = (arCameraVideo && arCameraVideo.videoWidth) || 0;
+  const vh = (arCameraVideo && arCameraVideo.videoHeight) || 0;
+  const aVid = (vw > 0 && vh > 0) ? (vw / vh) : aDisp;
+
+  // Spec FOV is across the sensor's long axis: vertical for a portrait stream,
+  // horizontal for a landscape one.
+  const vFovNative = (aVid <= 1)
+    ? specFov
+    : 2 * Math.atan(Math.tan(specFov / 2) / Math.max(0.0001, aVid));
+
+  // object-fit: cover crops the axis that overflows. Only a display WIDER than
+  // the stream crops height, and only cropped height changes the vertical FOV.
+  const vFovVisible = (aDisp > aVid)
+    ? 2 * Math.atan(Math.tan(vFovNative / 2) * (aVid / aDisp))
+    : vFovNative;
+
+  arRendererCamera.fov = Math.max(1, Math.min(179, vFovVisible * 180 / Math.PI));
   arRendererCamera.updateProjectionMatrix();
+  // Kept for the read-out: the horizontal angle actually on screen.
+  arCameraEffVFovDeg = arRendererCamera.fov;
+  arCameraEffHFovDeg = 2 * Math.atan(Math.tan(vFovVisible / 2) * aDisp) * 180 / Math.PI;
+  arCameraStreamSize = (vw && vh) ? `${vw}x${vh}` : "";
 }
 
 // Best-effort: try to read a real horizontal FOV from the live AR track. No
