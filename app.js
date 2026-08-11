@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v205";
+const BUILD_VERSION = "v206";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -744,12 +744,25 @@ function closeSettingsModal() {
 
 // Ensure the viewer is constructed and initialized. Resolves true when ready.
 async function ensureIfcViewer() {
+  // Check the one dependency the viewer cannot start without, and say so
+  // plainly. It used to fail somewhere further in with a generic message, which
+  // made a missing library look like a broken model.
+  if (typeof THREE === "undefined") {
+    console.error("[ifc] THREE is not loaded - vendor/three.min.js failed to load");
+    setStatus("3D library did not load. Tap 🔄 Clear cache & reload in Settings.");
+    return false;
+  }
   if (!ifcViewer) ifcViewer = new IFCViewer();
   if (ifcViewer._initPromise) return ifcViewer._initPromise;
   if (ifcViewer.model || ifcViewer.scene) return true; // already initialized
   ifcViewer._initPromise = ifcViewer.init(ifcViewerContainer).then((success) => {
     if (!success) { console.error("Failed to initialize IFC viewer"); setStatus("Failed to initialize 3D viewer"); }
     return success;
+  }).catch((e) => {
+    console.error("[ifc] viewer init threw:", e);
+    setStatus("3D viewer failed to start: " + ((e && e.message) || e));
+    ifcViewer._initPromise = null;   // let a retry actually retry
+    return false;
   });
   return ifcViewer._initPromise;
 }
