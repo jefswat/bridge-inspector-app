@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v189";
+const BUILD_VERSION = "v190";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -351,6 +351,13 @@ let arDemoFraming          = (localStorage.getItem("arDemoFraming") === "1");
 let arPoseMode             = "init";  // "geo" = live GPS/RTK anchor, "test" = manual true-scale placement, "demo" = tabletop, "none"
 let arEyeSeeded            = false;    // test mode: true once the eye has been placed, so Move/Turn/Elev persist frame-to-frame
 let arEyeHeightM           = 1.6;     // standing eye height above the reference elevation
+// How far the phone's altitude may sit from the model's base before it is
+// treated as a different vertical datum rather than a real height difference.
+// Comfortably larger than any bridge, smaller than a geoid separation.
+const AR_ALT_DATUM_TOLERANCE_M = 30;
+let arEyeElevSource        = "";      // which datum the standing elevation came from
+let arModelBaseM           = null;    // model's lowest point (metres), for the read-out
+let arEyeElevM             = null;    // resulting eye elevation (metres)
 let arElevOffsetM          = 0;       // manual elevation trim from the ELEVATION buttons
 // AR orbit controls (drag to rotate / wheel to zoom the test view)
 let arOrbitInitialized     = false;
@@ -2075,13 +2082,37 @@ function updateArEyeFromGeo(lat, lon, alt) {
     E = r[0]; N = r[1];
   } catch (e) { console.warn("[ar] proj4 failed:", e); arGeoFailReason = "proj4 transform failed"; return false; }
   if (!isFinite(E) || !isFinite(N)) { arGeoFailReason = "projection produced NaN"; return false; }
-  // Stand on the ground: prefer GPS altitude, else the model's LOWEST point
-  // (pier/abutment base). Using the model's mid-height put the eye floating
-  // inside the structure.
-  const groundElev = (alt != null && isFinite(alt))
-    ? alt
-    : (ifcViewer.modelElevMinM != null ? ifcViewer.modelElevMinM
-      : (ifcViewer.modelElevCenterM != null ? ifcViewer.modelElevCenterM : 0));
+  // Stand on the ground. GPS altitude is the obvious datum but the least
+  // trustworthy number the phone produces: Android reports height above the
+  // WGS84 ellipsoid while a model's vertical datum is usually orthometric, and
+  // the geoid separation is around -33 m in the upper Midwest. A model whose
+  // base is at elevation 0 against a phone reporting ~318 m puts the eye a
+  // whole 318 m above the structure, which is why it can render far below you.
+  //
+  // So sanity-check the altitude against the model's own base and fall back to
+  // standing on that base when they disagree. Being wrong about which surface
+  // you stand on costs a metre or two; a datum mismatch costs hundreds.
+  const modelBase = (ifcViewer.modelElevMinM != null && isFinite(ifcViewer.modelElevMinM))
+    ? ifcViewer.modelElevMinM
+    : ((ifcViewer.modelElevCenterM != null && isFinite(ifcViewer.modelElevCenterM))
+      ? ifcViewer.modelElevCenterM : null);
+  let groundElev;
+  if (alt != null && isFinite(alt) && modelBase != null
+      && Math.abs(alt - modelBase) > AR_ALT_DATUM_TOLERANCE_M) {
+    groundElev = modelBase;
+    arEyeElevSource = `model base (GPS alt ${Math.round(alt - modelBase)}m off)`;
+  } else if (alt != null && isFinite(alt)) {
+    groundElev = alt;
+    arEyeElevSource = "GPS altitude";
+  } else if (modelBase != null) {
+    groundElev = modelBase;
+    arEyeElevSource = "model base";
+  } else {
+    groundElev = 0;
+    arEyeElevSource = "datum 0";
+  }
+  arModelBaseM = modelBase;
+  arEyeElevM = groundElev + arEyeHeightM + arElevOffsetM;
   const p = arENToScene(E + arPanX, N + arPanY, groundElev + arMetersToUnits(arEyeHeightM + arElevOffsetM));
   if (!p || !isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) { arGeoFailReason = "scene transform NaN"; return false; }
   if (!arEyePos) arEyePos = new THREE.Vector3();
@@ -3238,7 +3269,14 @@ function updateArRender() {
         const age = arLastFixAtMs ? ` · ${Math.round((Date.now() - arLastFixAtMs) / 1000)}s ago` : "";
         suffix = acc + age;
       }
-      arLocationText.textContent = `📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}${suffix}`;
+      // Elevation line: the model's own base next to where the eye was put, and
+      // which datum won. Reading "base 0 ft" here is the fastest way to tell an
+      // IFC that was never given an elevation from one that was.
+      const ft = (m) => (m / 0.3048).toFixed(0);
+      const elev = (arModelBaseM != null && arEyeElevM != null)
+        ? ` | ⛰ base ${ft(arModelBaseM)}ft · eye ${ft(arEyeElevM)}ft · ${arEyeElevSource}`
+        : "";
+      arLocationText.textContent = `📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}${suffix}${elev}`;
     } else if (usingGps) {
       // Ticked but no fix yet: say which, so a denied permission is not mistaken
       // for a slow lock.
