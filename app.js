@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v181";
+const BUILD_VERSION = "v182";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -326,7 +326,7 @@ let arPickerSelectedLng    = null;
 let arPanX                 = 0;  // manual pan in scene space (metres)
 let arPanY                 = 0;  // manual pan in scene space (metres)
 let arPivotOffsetM         = 0.6; // 0.6 metres behind the camera position
-let arDeviceOrientation    = { alpha: 0, beta: 0, gamma: 0 }; // from DeviceOrientationEvent
+let arDeviceOrientation    = { alpha: 0, beta: 0, gamma: 0, headingDeg: null, pitchDeg: 0 }; // from DeviceOrientationEvent
 let arPermissionGranted    = false;
 let arOrientAbsolute       = false; // true once an absolute/compass orientation source is active
 let arYawSmoothed          = null;  // low-pass filtered yaw (radians)
@@ -2675,7 +2675,13 @@ function smoothAngle(prev, target, a) {
 
 function onDeviceOrientation(event) {
   const alpha = event.alpha, beta = event.beta, gamma = event.gamma;
-  arDeviceOrientation = { alpha: alpha || 0, beta: beta || 0, gamma: gamma || 0 };
+  // headingDeg/pitchDeg are filled in below, once the absolute source is known;
+  // seed them so a read-out that lands between events cannot show undefined.
+  arDeviceOrientation = {
+    alpha: alpha || 0, beta: beta || 0, gamma: gamma || 0,
+    headingDeg: arDeviceOrientation ? arDeviceOrientation.headingDeg : null,
+    pitchDeg: (beta || 0) - 90,
+  };
   if (alpha == null && beta == null) return;
 
   // Prefer an absolute (true-north) source. Once we have one, ignore relative
@@ -2695,8 +2701,8 @@ function onDeviceOrientation(event) {
   arScreenAngleRad = (scrAngle || 0) * Math.PI / 180;
 
   // Absolute compass heading. iOS exposes webkitCompassHeading (clockwise from
-  // north); Android's absolute alpha is CCW. Keep the existing +alpha (CCW)
-  // convention so the plan view — which already tracks correctly — is unchanged.
+  // north); Android's absolute alpha is CCW, i.e. alpha ~= -heading. Both
+  // branches therefore produce -heading in radians.
   let rawAz;
   if (typeof event.webkitCompassHeading === "number" && !isNaN(event.webkitCompassHeading)) {
     rawAz = (-event.webkitCompassHeading) * Math.PI / 180;
@@ -2704,7 +2710,25 @@ function onDeviceOrientation(event) {
     rawAz = (alpha || 0) * Math.PI / 180;
   }
   rawAz -= arScreenAngleRad;
+  // Compass -> scene azimuth. arOrbitAz is measured CCW from +X in a Z-up scene
+  // where +X is easting and +Y is northing (baked in fitCameraToObject), so a
+  // compass heading h maps to PI/2 - h, not -h. Every other producer of
+  // arOrbitAz already uses that frame via atan2(dy, dx); without this quarter
+  // turn, live-GPS AR renders east when you face north. Test mode hid the error
+  // because arTestYawOffset below absorbs any constant offset. The same
+  // convention is used by positionArCameraFromGeo and the viewer's
+  // positionCameraFromGeo, which build (sin h, ., -cos h) in M-space.
+  rawAz += Math.PI / 2;
   const rawEl = ((beta || 0) - 90) * Math.PI / 180;
+
+  // Read-out values. Raw alpha is NOT a compass heading on iOS (it is relative
+  // to an arbitrary origin there), so derive the true bearing the same way the
+  // math above does, and report pitch relative to level rather than raw beta.
+  arDeviceOrientation.headingDeg =
+    (typeof event.webkitCompassHeading === "number" && !isNaN(event.webkitCompassHeading))
+      ? event.webkitCompassHeading
+      : (arOrientAbsolute ? ((360 - (alpha || 0)) % 360 + 360) % 360 : null);
+  arDeviceOrientation.pitchDeg = (beta || 0) - 90;
 
   // Low-pass smoothing removes the frame-to-frame jitter and the gimbal spikes
   // that appear when the phone is tilted up (beta near 90) to view the bridge.
@@ -2773,8 +2797,8 @@ function updateArRender() {
     alt = null;
   }
   
-  const heading = Math.round(arDeviceOrientation.alpha);
-  const pitch = Math.round(arDeviceOrientation.beta);
+  const headingDeg = arDeviceOrientation.headingDeg;
+  const pitch = Math.round(arDeviceOrientation.pitchDeg || 0);
   const roll = Math.round(arDeviceOrientation.gamma);
 
   // Update display text
@@ -2782,12 +2806,13 @@ function updateArRender() {
     arLocationText.textContent = isFinite(lat) ? `📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}` : "📍 test framing (no location)";
   }
   if (arAttitudeText) {
-    arAttitudeText.textContent = `Heading: ${heading}° | Pitch: ${pitch}° | Roll: ${roll}°`;
+    const h = (headingDeg == null || !isFinite(headingDeg)) ? "--" : Math.round(headingDeg);
+    arAttitudeText.textContent = `Heading: ${h}° | Pitch: ${pitch}° | Roll: ${roll}°`;
   }
-  
+
   // Render IFC to canvas
   if (ifcViewer && ifcViewer.model) {
-    renderIfcToArCanvas(lat, lon, heading, pitch, alt);
+    renderIfcToArCanvas(lat, lon, alt);
   } else if (arStatusMessage) {
     arStatusMessage.textContent = "Load the 3D model first, then reopen AR view.";
   }
@@ -2804,7 +2829,10 @@ function renderArScene() {
   ifcViewer.scene.background = prevBg;
 }
 
-function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
+// The look direction comes from arOrbitAz/arOrbitEl (set in
+// onDeviceOrientation), not from the sensor read-out, so no heading/pitch
+// arguments are taken here.
+function renderIfcToArCanvas(lat, lon, alt) {
   if (!ifcViewer || !ifcViewer.scene || !arRenderer) return;
   // Ensure model bounds / plan-view data exist (also seeds a fallback eye).
   const framed = frameArModelForTest();
