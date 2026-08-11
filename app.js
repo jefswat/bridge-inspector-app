@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v188";
+const BUILD_VERSION = "v189";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -1702,13 +1702,17 @@ function registerEvents() {
       arSelectedLocation = { lat: arPickerSelectedLat, lng: arPickerSelectedLng };
       arSelectedLocationIsManual = true;
       arSelectedLocationName = `${arPickerSelectedLat.toFixed(5)}, ${arPickerSelectedLng.toFixed(5)}`;
-      arUseCurrentLocation.checked = false;
+      // Picking a location by hand is an explicit choice of test mode, so this
+      // one does stick.
+      setArUseCurrentLocation(false);
       arEyeSeeded = false; // re-teleport the test eye to the newly picked spot
       closeArLocationPickerModal();
       setStatus(`AR location set to ${arSelectedLocationName}`);
     }
   });
   if (arUseCurrentLocation) arUseCurrentLocation.addEventListener("change", () => {
+    // Remember the choice so the next AR session opens the same way.
+    try { localStorage.setItem(AR_USE_GPS_KEY, arUseCurrentLocation.checked ? "1" : "0"); } catch (_) {}
     if (arUseCurrentLocation.checked) {
       setStatus("AR view will use live device GPS (best with an RTK fix).");
       // Always (re)start the watch. The old code only fetched when there was no
@@ -1782,18 +1786,18 @@ async function openArViewModal() {
   if (!arSelectedLocationIsManual) {
     const bridgeLoc = activeBridgeLocation();
     const fp = b.ifcFootprint;
+    // Seed the fallback location used by test mode. This does NOT decide the
+    // GPS mode: that is restored from the saved preference further down, and
+    // clearing the checkbox here would have quietly overridden it.
     if (currentLocation && isFinite(currentLocation.lat) && isFinite(currentLocation.lng)) {
       arSelectedLocation = offsetLocationNorth(currentLocation.lat, currentLocation.lng, 4.572);
       arSelectedLocationIsManual = false;
-      if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
     } else if (bridgeLoc && isFinite(bridgeLoc.lat) && isFinite(bridgeLoc.lng)) {
       arSelectedLocation = { lat: bridgeLoc.lat, lng: bridgeLoc.lng };
       arSelectedLocationIsManual = false;
-      if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
     } else if (fp && fp.center && isFinite(fp.center.lat) && isFinite(fp.center.lon)) {
       arSelectedLocation = { lat: fp.center.lat, lng: fp.center.lon };
       arSelectedLocationIsManual = false;
-      if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
     }
   }
   if (ifcViewerModal && !ifcViewerModal.hidden) closeIfcViewerModal();
@@ -1857,10 +1861,10 @@ async function openArViewModal() {
   // over the relative "deviceorientation" event to avoid drift.
   try { window.addEventListener("deviceorientationabsolute", onDeviceOrientation); } catch (_) {}
   
-  // Default to the stable, true-scale TEST mode (no GPS) so the overlay is
-  // usable without an RTK fix. The user ticks "Use current location" to switch
-  // to live GPS/RTK anchoring when they have a good fix.
-  if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
+  // Restore the last choice rather than forcing test mode every open. First run
+  // still defaults to the stable, true-scale TEST mode (no GPS), which is usable
+  // without an RTK fix; ticking "Use current location" now sticks.
+  setArUseCurrentLocation(arUseGpsPreference(), { persist: false });
 
   // Start the fix warming up regardless of that checkbox: a cold receiver can
   // take tens of seconds outdoors, and it should not only begin counting from
@@ -4534,6 +4538,25 @@ function startAprilTagPreviewLoop() {
       aprilPreviewBusy = false;
     }
   }, APRIL_PREVIEW_INTERVAL_MS);
+}
+
+// Whether the AR view anchors to live GPS, remembered across sessions. Opening
+// AR used to force this off every time, so a field session meant re-ticking it
+// on every open. Defaults to off for a first run, matching the old behaviour.
+const AR_USE_GPS_KEY = "arUseCurrentLocation";
+
+function arUseGpsPreference() {
+  return localStorage.getItem(AR_USE_GPS_KEY) === "1";
+}
+
+// Single place that moves the checkbox, so the stored preference can never
+// drift from what is on screen.
+function setArUseCurrentLocation(on, opts) {
+  const persist = !opts || opts.persist !== false;
+  if (arUseCurrentLocation) arUseCurrentLocation.checked = !!on;
+  if (persist) {
+    try { localStorage.setItem(AR_USE_GPS_KEY, on ? "1" : "0"); } catch (_) {}
+  }
 }
 
 // ── AR live GPS watch ─────────────────────────────────────────────────────────
