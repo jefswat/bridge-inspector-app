@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v197";
+const BUILD_VERSION = "v198";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -305,6 +305,8 @@ const arFovResetBtn        = document.getElementById("arFovResetBtn");
 const arGeoidValue         = document.getElementById("arGeoidValue");
 const arGeoidSetBtn        = document.getElementById("arGeoidSetBtn");
 const arGeoidResetBtn      = document.getElementById("arGeoidResetBtn");
+const arGeoidLookupBtn     = document.getElementById("arGeoidLookupBtn");
+const arGeoidEnterBtn      = document.getElementById("arGeoidEnterBtn");
 const arStatusMessage      = document.getElementById("arStatusMessage");
 const arUseCurrentLocation = document.getElementById("arUseCurrentLocation");
 const arSelectLocationButton = document.getElementById("arSelectLocationButton");
@@ -382,6 +384,10 @@ let arEyeElevSource        = "";      // which datum the standing elevation came
 let arModelBaseM           = null;    // model's lowest point (metres), for the read-out
 let arEyeElevM             = null;    // resulting eye elevation (metres)
 let arAltDeltaM            = null;    // corrected altitude minus model base
+let arGroundSource         = "";      // where the ground reference came from
+// NOAA NGS geoid height service. Returns the separation N for a lat/lon, which
+// is what converts the phone's ellipsoidal height to an orthometric elevation.
+const AR_GEOID_API = "https://geodesy.noaa.gov/api/geoid/ght";
 let arElevOffsetM          = 0;       // manual elevation trim from the ELEVATION buttons
 // AR orbit controls (drag to rotate / wheel to zoom the test view)
 let arOrbitInitialized     = false;
@@ -1792,11 +1798,15 @@ function registerEvents() {
     if (raw == null) { setStatus("No GPS altitude yet - wait for a fix, then calibrate."); return; }
     // Default to the model's own base: standing at the foot of the structure is
     // the usual case, and it saves looking a number up.
-    const suggestFt = (arModelBaseM != null && isFinite(arModelBaseM))
+    // Only suggest the model's elevation when it came from IfcSite, which is an
+    // authored ground level. The lowest geometry is not: a model with piles or
+    // footings has its minimum well below grade, and offering that as "the
+    // ground you are standing on" would calibrate the datum underground.
+    const suggestFt = (arGroundSource === "IfcSite" && arModelBaseM != null && isFinite(arModelBaseM))
       ? (arModelBaseM / 0.3048).toFixed(0) : "";
     const answer = prompt(
       `Phone reports ${(raw / 0.3048).toFixed(0)} ft here.\n\n` +
-      "Enter the TRUE elevation of the ground you are standing on, in feet:",
+      "Enter the TRUE elevation of the GROUND under your feet, in feet:",
       suggestFt);
     if (answer == null) return;
     const trueFt = parseFloat(answer);
@@ -1806,6 +1816,36 @@ function registerEvents() {
     arEyeSeeded = false;   // re-place the eye with the corrected datum
     showGeoid();
     setStatus(`Ground datum set: ${(arGeoidSepM / 0.3048).toFixed(1)} ft added to reported altitude.`);
+  });
+  const applyGeoidOffset = (offsetM, how) => {
+    arGeoidSepM = offsetM;
+    try { localStorage.setItem(AR_GEOID_KEY, String(offsetM)); } catch (_) {}
+    arEyeSeeded = false;   // re-place the eye with the corrected datum
+    showGeoid();
+    setStatus(`Ground datum ${how}: ${(offsetM / 0.3048).toFixed(1)} ft added to reported altitude.`);
+  };
+  if (arGeoidLookupBtn) arGeoidLookupBtn.addEventListener("click", async () => {
+    const loc = currentLocation || arSelectedLocation;
+    if (!loc || !isFinite(loc.lat)) { setStatus("No position yet - wait for a fix."); return; }
+    arGeoidLookupBtn.disabled = true;
+    const was = arGeoidLookupBtn.textContent;
+    arGeoidLookupBtn.textContent = "🌐 …";
+    const r = await fetchGeoidSeparationM(loc.lat, loc.lng != null ? loc.lng : loc.lon);
+    arGeoidLookupBtn.textContent = was;
+    arGeoidLookupBtn.disabled = false;
+    if (!r.ok) { setStatus(`Geoid lookup failed: ${r.reason}. Use N… to enter it by hand.`); return; }
+    applyGeoidOffset(r.offsetM, `from NOAA${r.model ? " " + r.model : ""} (N=${r.separationM.toFixed(2)} m)`);
+  });
+  if (arGeoidEnterBtn) arGeoidEnterBtn.addEventListener("click", () => {
+    const cur = (arGeoidSepM != null && isFinite(arGeoidSepM)) ? (-arGeoidSepM).toFixed(2) : "";
+    const answer = prompt(
+      "Geoid separation N, in METRES (negative across the continental US).\n\n" +
+      "Orthometric elevation H = h - N, so the app adds -N to the reported altitude.",
+      cur);
+    if (answer == null) return;
+    const n = parseFloat(answer);
+    if (!isFinite(n)) { setStatus("Separation not recognised - unchanged."); return; }
+    applyGeoidOffset(-n, `set from N=${n.toFixed(2)} m`);
   });
   if (arGeoidResetBtn) arGeoidResetBtn.addEventListener("click", () => {
     arGeoidSepM = null;
@@ -2315,10 +2355,17 @@ function updateArEyeFromGeo(lat, lon, alt) {
   // So sanity-check the altitude against the model's own base and fall back to
   // standing on that base when they disagree. Being wrong about which surface
   // you stand on costs a metre or two; a datum mismatch costs hundreds.
-  const modelBase = (ifcViewer.modelElevMinM != null && isFinite(ifcViewer.modelElevMinM))
-    ? ifcViewer.modelElevMinM
-    : ((ifcViewer.modelElevCenterM != null && isFinite(ifcViewer.modelElevCenterM))
-      ? ifcViewer.modelElevCenterM : null);
+  // Ground reference, best source first. IfcSite.RefElevation is the authored
+  // ground level; the model's lowest geometry is only a stand-in for it, and a
+  // wrong one as soon as the model contains piles or footings below grade.
+  const modelBase = (ifcViewer.siteRefElevM != null && isFinite(ifcViewer.siteRefElevM))
+    ? ifcViewer.siteRefElevM
+    : ((ifcViewer.modelElevMinM != null && isFinite(ifcViewer.modelElevMinM))
+      ? ifcViewer.modelElevMinM
+      : ((ifcViewer.modelElevCenterM != null && isFinite(ifcViewer.modelElevCenterM))
+        ? ifcViewer.modelElevCenterM : null));
+  arGroundSource = (ifcViewer.siteRefElevM != null && isFinite(ifcViewer.siteRefElevM))
+    ? "IfcSite" : "lowest geometry";
   // standEye: whether the reference elevation is the GROUND you are standing on,
   // in which case the standing eye height is added. A GPS altitude is already
   // the receiver's own position - the phone in your hand, or a pole-mounted
@@ -4856,6 +4903,36 @@ function setArUseCurrentLocation(on, opts) {
   if (arUseCurrentLocation) arUseCurrentLocation.checked = !!on;
   if (persist) {
     try { localStorage.setItem(AR_USE_GPS_KEY, on ? "1" : "0"); } catch (_) {}
+  }
+}
+
+/**
+ * Fetch the geoid separation N at a position from NOAA NGS.
+ *
+ * N is the height of the geoid above the ellipsoid, so an orthometric
+ * elevation is H = h - N, and the offset this app stores (added to the
+ * reported altitude) is therefore -N.
+ *
+ * Online only, and US coverage only - the service is NGS's. Where it is not
+ * available the separation can be typed in by hand instead; it is a regional
+ * constant, so looking it up once from any geoid calculator works equally well.
+ */
+async function fetchGeoidSeparationM(lat, lon) {
+  if (!isFinite(lat) || !isFinite(lon)) return { ok: false, reason: "no position" };
+  try {
+    const url = `${AR_GEOID_API}?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`;
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
+    const j = await res.json();
+    // The service has used more than one key for this over time; accept any of
+    // the plausible spellings rather than depending on one.
+    const n = [j.geoidHeight, j.geoid_height, j.height, j.N]
+      .map((v) => Number(v))
+      .find((v) => isFinite(v));
+    if (n == null) return { ok: false, reason: "no geoid height in response" };
+    return { ok: true, separationM: n, offsetM: -n, model: j.geoidModel || j.model || "" };
+  } catch (e) {
+    return { ok: false, reason: (e && e.message) || "network error" };
   }
 }
 

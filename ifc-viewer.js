@@ -526,6 +526,20 @@ class IFCViewer {
 
     if (!mc) return null; // not georeferenced via map conversion
 
+    // IfcSite.RefElevation is the site's GROUND level. Worth having separately
+    // from the model's lowest geometry: a model containing piles, footings or
+    // drilled shafts has its lowest point well below grade, so using that as
+    // "the ground you stand on" would put the viewer underground.
+    this.siteRefElevM = null;
+    try {
+      const siteIds = ifc.GetLineIDsWithType(modelID, WebIFC.IFCSITE);
+      if (siteIds && siteIds.size && siteIds.size() > 0) {
+        const site = ifc.GetLine(modelID, siteIds.get(0));
+        const re = Number(val(site.RefElevation));
+        if (isFinite(re)) this.siteRefElevM = re;
+      }
+    } catch (e) { /* no site, or no RefElevation on it */ }
+
     const eastings  = Number(val(mc.Eastings)  ?? 0);
     const northings = Number(val(mc.Northings) ?? 0);
     const scale     = Number(val(mc.Scale)     ?? 1) || 1;
