@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v184";
+const BUILD_VERSION = "v185";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -2173,34 +2173,53 @@ function frameArModelForTest() {
  * Clear every manual adjustment to the AR viewpoint and re-anchor.
  *
  * Drops the accumulated pan, elevation offset, turn, pinch/zoom and drag state,
- * discards the seeded eye so it is re-placed from the current location, and
- * forgets the sensor offset so the next reading re-aims at the model. Mirrors
- * the reset block in openArViewModal, minus the things that belong to opening
- * the modal (camera feed, listeners, minimap mode).
+ * and re-places the eye from the current location. Afterwards the view is the
+ * raw sensor orientation: point the phone somewhere and that is what you see,
+ * in test mode as well as live GPS.
  *
- * arOrientAbsolute is deliberately NOT cleared: once an absolute (true-north)
- * source has been seen, re-arming it would let a relative event latch an
- * arbitrary origin and make the heading worse, not better.
+ * Two things are deliberately NOT done here.
+ *
+ * arOrbitInitialized stays set. Clearing it re-runs the default standoff
+ * framing, which stands you off along the model's shorter horizontal axis --
+ * and for a model as wide as it is deep (a test cube) that tie resolves the
+ * same way every time, so every reset swung the view to face north regardless
+ * of where you were pointing. Reset clears adjustments; it does not re-frame.
+ *
+ * arOrientAbsolute stays set too: once an absolute (true-north) source has been
+ * seen, re-arming it would let a relative event latch an arbitrary origin and
+ * make the heading worse, not better.
  */
 function resetArView() {
   arPanX = 0;
   arPanY = 0;
   arElevOffsetM = 0;
-  arOrbitInitialized = false;   // frameArModelForTest re-aims at the model
   arOrbitDragging = false;
-  arEyePos = null;
-  arEyeSeeded = false;
-  arTestLookAnchored = false;   // next reading re-captures the phone offset
+  arEyeSeeded = false;          // re-place the eye from the location, in place
+  // Zero the test-mode look offset and keep it zero: "anchored" with no offset
+  // means the view follows the phone exactly, which is what clearing the
+  // adjustments should leave you with. Re-anchoring instead would recapture an
+  // offset that swings the view back onto the model.
   arTestYawOffset = 0;
   arTestPitchOffset = 0;
-  arTestAimAz = null;
-  arTestAimEl = null;
-  arYawSmoothed = null;         // drop the low-pass history so it snaps
-  arPitchSmoothed = null;
+  arTestLookAnchored = true;
+  // The test-mode branch in onDeviceOrientation only runs with an aim set, so
+  // keep one; its value no longer matters now the offsets are zero.
+  if (arTestAimAz == null) arTestAimAz = 0;
+  if (arTestAimEl == null) arTestAimEl = 0;
   arMiniDragTarget = null;
   arPointers.clear();
   arPinchLastDist = 0;
-  if (arStatusMessage) arStatusMessage.textContent = "View reset - all manual adjustments cleared.";
+  // Apply the current sensor reading immediately rather than waiting for the
+  // next event, so the reset is visible even if the stream is slow or absent.
+  if (arYawSmoothed != null && isFinite(arYawSmoothed)) arOrbitAz = arYawSmoothed;
+  if (arPitchSmoothed != null && isFinite(arPitchSmoothed)) {
+    arOrbitEl = Math.max(-1.4, Math.min(1.4, arPitchSmoothed));
+  }
+  if (arStatusMessage) {
+    arStatusMessage.textContent = arHasOrientation
+      ? "View reset - adjustments cleared, view follows the phone."
+      : "View reset - adjustments cleared.";
+  }
   applyArViewCamera();
 }
 
