@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v202";
+const BUILD_VERSION = "v203";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -11104,11 +11104,49 @@ let gridRectifyN = 10;           // grid nodes per side
 // common case and matches the previous implicit assumption.
 let gridRectifyCellWmm = 100;
 let gridRectifyCellHmm = 100;
+// Full fan angle of the laser grid, in degrees, across the whole pattern. 0
+// means "assume the dots are evenly spaced on the surface".
+//
+// This matters because a grid laser emits rays at equal ANGLE, not equal
+// spacing. Where those rays land on a flat surface the spacing grows as
+// tan(theta), so the outer dots sit further apart than the inner ones even
+// with the laser perfectly square to the wall. Warping that pattern to an
+// evenly spaced grid therefore squeezes the edges of the image inward -
+// a systematic error that no amount of careful dot-dragging can remove,
+// because the assumption is wrong rather than the input.
+//
+// Given the fan angle the true relative positions are known analytically, so
+// the destination grid can be built with tan spacing and the error disappears.
+let gridRectifyFanDeg = 0;
 function gridRectifyReadCellSize() {
   const w = parseFloat((document.getElementById("gridRectifyCellW") || {}).value);
   const h = parseFloat((document.getElementById("gridRectifyCellH") || {}).value);
+  const f = parseFloat((document.getElementById("gridRectifyFan") || {}).value);
   if (isFinite(w) && w > 0) gridRectifyCellWmm = w;
   if (isFinite(h) && h > 0) gridRectifyCellHmm = h;
+  gridRectifyFanDeg = (isFinite(f) && f > 0 && f < 179) ? f : 0;
+}
+
+/**
+ * Normalised 0..1 positions of the destination grid lines along one axis.
+ *
+ * Uniform when no fan angle is known. With one, positions follow tan(theta)
+ * across the fan, which is where an equal-angle projector actually puts its
+ * dots on a flat surface square to it.
+ */
+function gridRectifyAxisPositions(n, fanDeg) {
+  const out = new Array(n);
+  if (!(fanDeg > 0)) {
+    for (let i = 0; i < n; i++) out[i] = i / (n - 1);
+    return out;
+  }
+  const half = (fanDeg / 2) * Math.PI / 180;
+  const t0 = Math.tan(-half), t1 = Math.tan(half);
+  for (let i = 0; i < n; i++) {
+    const th = -half + (i / (n - 1)) * (2 * half);
+    out[i] = (Math.tan(th) - t0) / (t1 - t0);
+  }
+  return out;
 }
 // Columns:rows of real extent. The grid is square in COUNT, so the aspect is
 // just the ratio of the cell dimensions.
@@ -11327,7 +11365,6 @@ async function rectifyAndSaveGrid() {
     const outImg = oCtx.createImageData(outW, outH);
     const out = outImg.data;
 
-    const cellW = outW / (N - 1), cellH = outH / (N - 1);
 
     /**
      * Homography taking the unit square to a grid cell's source quad, cached
@@ -11383,15 +11420,31 @@ async function rectifyAndSaveGrid() {
       return out4;
     };
 
+    // Destination grid-line positions. Uniform, or tan-spaced when the laser's
+    // fan angle is known. Precompute the cell each output pixel falls in, so
+    // the non-uniform case costs no more per pixel than the uniform one.
+    const axX = gridRectifyAxisPositions(N, gridRectifyFanDeg);
+    const axY = gridRectifyAxisPositions(N, gridRectifyFanDeg);
+    const buildLut = (len, ax) => {
+      const cell = new Int32Array(len), frac = new Float32Array(len);
+      let k = 0;
+      for (let d = 0; d < len; d++) {
+        const t = (d + 0.5) / len;
+        while (k < N - 2 && t >= ax[k + 1]) k++;
+        const span = Math.max(1e-9, ax[k + 1] - ax[k]);
+        cell[d] = k;
+        frac[d] = (t - ax[k]) / span;
+      }
+      return { cell, frac };
+    };
+    const lutX = buildLut(outW, axX), lutY = buildLut(outH, axY);
+
     for (let dy = 0; dy < outH; dy++) {
-      // cell row
-      let jf = dy / cellH;
-      let j = Math.floor(jf); if (j > N - 2) j = N - 2; if (j < 0) j = 0;
-      const v = jf - j;
+      const j = lutY.cell[dy];
+      const v = lutY.frac[dy];
       for (let dx = 0; dx < outW; dx++) {
-        let ifc = dx / cellW;
-        let i = Math.floor(ifc); if (i > N - 2) i = N - 2; if (i < 0) i = 0;
-        const u = ifc - i;
+        const i = lutX.cell[dx];
+        const u = lutX.frac[dx];
         // Per-cell PROJECTIVE map, not bilinear. A flat surface photographed
         // obliquely maps to the image by a homography, and bilinear
         // interpolation inside a cell is only an approximation to it - straight

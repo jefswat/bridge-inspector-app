@@ -23,14 +23,14 @@
   <!-- proj4 (map projection / georeferencing) -->
   <script src="vendor/proj4.js"></script>
   <!-- web-ifc (IFC parsing) loaded dynamically as ES module in ifc-viewer.js -->
-  <link rel="stylesheet" href="styles.css?v=20260811-100000" />
+  <link rel="stylesheet" href="styles.css?v=20260811-103000" />
 </head>
 <body>
 
 <header>
   <h1>📷 Photo Vault <span id="buildStamp" style="font-size:.55rem;font-weight:400;opacity:.7;vertical-align:middle;">build …</span></h1>
   <div style="display:flex;gap:8px;align-items:center;">
-    <a class="map-nav-link" href="map.html?v=20260811-100000">🗺 Map summary</a>
+    <a class="map-nav-link" href="map.html?v=20260811-103000">🗺 Map summary</a>
     <button id="openSettingsButton" class="secondary" hidden>⚙ Settings</button>
     <button id="openPeerTransferViewTop" class="secondary">🔁 Transfer</button>
     <button id="installButton" class="secondary" hidden>⬇ Install App</button>
@@ -560,11 +560,15 @@
             <option value="12">12 × 12</option>
           </select>
         </label>
-        <label class="grid-rectify-size" title="Real spacing between laser dots ON THE SURFACE. Sets the output's shape, and gives it a mm-per-pixel scale so measurements off the rectified image are metric. Leave equal for a square grid.">
+        <label class="grid-rectify-size" title="Real spacing between adjacent laser dots ON THE SURFACE, at the centre of the pattern. Sets the output's shape and its mm-per-pixel scale, so measurements off the rectified image are metric. Leave equal for a square grid.">
           <span>Cell mm</span>
           <input id="gridRectifyCellW" type="number" min="1" step="1" value="100" style="width:4.5em;" />
           <span>×</span>
           <input id="gridRectifyCellH" type="number" min="1" step="1" value="100" style="width:4.5em;" />
+        </label>
+        <label class="grid-rectify-size" title="Full fan angle of the laser grid, corner to corner across the whole pattern, from its spec sheet. A grid laser emits equal ANGLES, so its dots spread as tan(theta) on a flat surface and are NOT evenly spaced. Setting this removes that error. Leave 0 to assume even spacing.">
+          <span>Fan°</span>
+          <input id="gridRectifyFan" type="number" min="0" max="179" step="0.5" value="0" style="width:4.5em;" />
         </label>
         <button id="gridRectifyAutoBtn" type="button" class="secondary">✨ Auto-detect</button>
         <button id="gridRectifyResetBtn" type="button" class="secondary">↺ Reset grid</button>
@@ -618,8 +622,8 @@
 <script src="vendor/cv.js?v=20260716-211500"></script>
 <script src="vendor/aruco.js?v=20260716-211500"></script>
 <script src="vendor/apriltag_36h11.js?v=20260716-211500"></script>
-<script src="ifc-viewer.js?v=20260811-100000"></script>
-<script src="ifc-export.js?v=20260811-100000"></script>
-<script src="app.js?v=20260811-100000"></script>
+<script src="ifc-viewer.js?v=20260811-103000"></script>
+<script src="ifc-export.js?v=20260811-103000"></script>
+<script src="app.js?v=20260811-103000"></script>
 </body>
 </html>
