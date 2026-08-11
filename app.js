@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v204";
+const BUILD_VERSION = "v205";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -850,11 +850,15 @@ function openIfcForPhoto(record) {
 
   const aim = () => {
     if (hasLoc && typeof ifcViewer.positionCameraFromGeo === "function") {
-      const ok = ifcViewer.positionCameraFromGeo(loc.lat, loc.lng, record.heading, record.attitude, loc.alt);
+      // Correct the datum before aiming: the raw altitude is ellipsoidal on
+      // Android and would put the camera far below the structure.
+      const eyeAlt = correctedEyeElevM(loc.alt);
+      const warn = eyeElevWarning(eyeAlt);
+      const ok = ifcViewer.positionCameraFromGeo(loc.lat, loc.lng, record.heading, record.attitude, eyeAlt);
       setStatus(ok
         ? (isFinite(loc.alt)
             ? "3D camera set to the photo's GPS location, direction & elevation. Use ▲▼ Elev to fine-tune height. Click an element to tag it."
-            : "3D camera set to the photo's location & direction. Click an element to tag it.")
+            : "3D camera set to the photo's location & direction. Click an element to tag it.") + warn
         : "Model has no georeference matching this photo — showing default view.");
     } else if (!hasLoc) {
       setStatus("This photo has no location yet — set one to aim the 3D camera. You can still tag elements.");
@@ -1511,9 +1515,11 @@ function registerEvents() {
       if (!useLoc || !isFinite(useLoc.lat)) { setStatus("No GPS fix yet — stand outside and try again."); return; }
       const heading = (ori && ori.heading != null) ? ori.heading : currentHeading;
       const attitude = (ori && ori.attitude != null) ? ori.attitude : currentAttitude;
-      const ok = ifcViewer.positionCameraFromGeo(useLoc.lat, useLoc.lng, heading, attitude, useLoc.alt);
+      const eyeAlt = correctedEyeElevM(useLoc.alt);
+      const ok = ifcViewer.positionCameraFromGeo(useLoc.lat, useLoc.lng, heading, attitude, eyeAlt);
+      const elevNote = (eyeAlt != null) ? ` · eye ${(eyeAlt / 0.3048).toFixed(0)} ft` : "";
       setStatus(ok
-        ? `3D view snapped to you: ${useLoc.lat.toFixed(5)}, ${useLoc.lng.toFixed(5)}${heading != null ? ` · heading ${Math.round(heading)}°` : ""}.`
+        ? `3D view snapped to you: ${useLoc.lat.toFixed(5)}, ${useLoc.lng.toFixed(5)}${heading != null ? ` · heading ${Math.round(heading)}°` : ""}${elevNote}.${eyeElevWarning(eyeAlt)}`
         : "Model has no georeference — cannot place the view from GPS.");
     } catch (e) {
       console.warn("[ifc] snap to me:", e);
@@ -5068,6 +5074,62 @@ async function fetchGeoidSeparationM(lat, lon) {
   } catch (e) {
     return { ok: false, reason: (e && e.message) || "network error" };
   }
+}
+
+/**
+ * Bring a phone-reported altitude onto the model's vertical datum, and give an
+ * eye elevation to stand at when there is no usable altitude.
+ *
+ * The AR path has done this since the datum work; the 3D viewer's
+ * positionCameraFromGeo took the raw altitude, so a photo-aimed or snapped 3D
+ * view landed the same ~95 ft below the model that the AR overlay used to.
+ * Same correction, one place, used by both.
+ *
+ * Returns metres on the model's datum, or null if nothing sensible is known.
+ */
+function groundReferenceElevM() {
+  if (!ifcViewer) return null;
+  if (ifcViewer.siteRefElevM != null && isFinite(ifcViewer.siteRefElevM)) return ifcViewer.siteRefElevM;
+  if (ifcViewer.modelElevMinM != null && isFinite(ifcViewer.modelElevMinM)) return ifcViewer.modelElevMinM;
+  return null;
+}
+
+/**
+ * Note for the status line when the eye elevation looks like an uncorrected
+ * vertical datum rather than a real height.
+ *
+ * The tolerance that rejects a bad altitude has to sit above any plausible
+ * real height difference, and a geoid separation can fall just under it - in
+ * the upper Midwest it is about 29 m against a 30 m tolerance. Rather than
+ * tighten the threshold and start rejecting genuine heights on tall
+ * structures, say what is happening and point at the fix.
+ */
+function eyeElevWarning(eyeAltM) {
+  const base = groundReferenceElevM();
+  if (eyeAltM == null || base == null) return "";
+  const d = eyeAltM - base;
+  if (Math.abs(d) <= 10) return "";
+  const ft = (d / 0.3048).toFixed(0);
+  const calibrated = (arGeoidSepM != null && isFinite(arGeoidSepM));
+  return calibrated
+    ? ` ⚠ ${ft} ft from model ground — check the ground datum.`
+    : ` ⚠ ${ft} ft from model ground — set Ground datum in the AR view to correct it.`;
+}
+
+function correctedEyeElevM(altRaw) {
+  const base = groundReferenceElevM();
+  let alt = (altRaw != null && isFinite(altRaw)) ? altRaw : null;
+  // Geoid separation first, so the sanity check below compares like with like.
+  if (alt != null && arGeoidSepM != null && isFinite(arGeoidSepM)) alt += arGeoidSepM;
+  if (alt != null && base != null && Math.abs(alt - base) > AR_ALT_DATUM_TOLERANCE_M) {
+    // Still wildly off: the altitude is on a different datum, so stand on the
+    // model's own ground rather than trust it.
+    return base + arEyeHeightM;
+  }
+  if (alt != null) return alt;
+  // No altitude at all: stand on the ground, not at the model's mid-height,
+  // which is what the viewer falls back to on its own and leaves you floating.
+  return (base != null) ? base + arEyeHeightM : null;
 }
 
 // ── AR live GPS watch ─────────────────────────────────────────────────────────
