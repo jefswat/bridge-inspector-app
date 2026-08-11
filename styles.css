@@ -1927,3 +1927,26 @@ select {
   outline-offset: 2px;
   border-radius: 8px;
 }
+
+/* ── Post-capture follow-up ── */
+/* Sits under the status bar after a shot: tag the photo you just took without
+   walking back through the gallery to find it. */
+.post-capture-actions {
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto 8px;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  background: var(--accent-weak);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.post-capture-label {
+  font-size: .8rem;
+  font-weight: 600;
+  color: var(--muted);
+}

@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v203";
+const BUILD_VERSION = "v204";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -205,6 +205,7 @@ const ifcInspectionPsetCard = document.getElementById("ifcInspectionPsetCard");
 const ifcTaggedPhotos    = document.getElementById("ifcTaggedPhotos");
 const ifcSetPhotoLocationButton = document.getElementById("ifcSetPhotoLocationButton");
 const ifcLinkToPhotoButton = document.getElementById("ifcLinkToPhotoButton");
+const ifcSnapToMeButton = document.getElementById("ifcSnapToMeButton");
 const ifcClearSelectionButton = document.getElementById("ifcClearSelectionButton");
 const ifcConditionRatingInput = document.getElementById("ifcConditionRatingInput");
 const ifcApplyConditionPsetButton = document.getElementById("ifcApplyConditionPsetButton");
@@ -1476,6 +1477,53 @@ function registerEvents() {
   if (ifcClearSelectionButton) ifcClearSelectionButton.addEventListener("click", () => clearIfcSelection());
   if (ifcApplyConditionPsetButton) ifcApplyConditionPsetButton.addEventListener("click", () => { void applyConditionPropertySetToSelection(); });
   if (ifcApplyInspectionPsetButton) ifcApplyInspectionPsetButton.addEventListener("click", () => { void addIfcInspectionPropertySet(); });
+  // Post-capture follow-up actions.
+  const postTag = document.getElementById("postCaptureTagBtn");
+  const postAr = document.getElementById("postCaptureArBtn");
+  const postDismiss = document.getElementById("postCaptureDismissBtn");
+  if (postDismiss) postDismiss.addEventListener("click", () => hidePostCaptureActions());
+  if (postTag) postTag.addEventListener("click", () => {
+    const rec = postCaptureRecord;
+    hidePostCaptureActions();
+    if (rec) openIfcForPhoto(rec);
+  });
+  if (postAr) postAr.addEventListener("click", () => {
+    hidePostCaptureActions();
+    openArViewModal();
+  });
+
+  // Put the 3D camera where the phone is, looking where the phone looks. The
+  // photo-driven aim already existed; this is the live equivalent, for walking
+  // the site with the model open rather than reviewing a shot after the fact.
+  if (ifcSnapToMeButton) ifcSnapToMeButton.addEventListener("click", async () => {
+    if (!ifcViewer || !ifcViewer.model) { setStatus("Load the bridge IFC first."); return; }
+    ifcSnapToMeButton.disabled = true;
+    const was = ifcSnapToMeButton.textContent;
+    ifcSnapToMeButton.textContent = "🧍 Locating…";
+    try {
+      // Take a fresh fix and a fresh heading rather than reusing whatever the
+      // last photo left behind - the whole point is where you are NOW.
+      const [loc, ori] = await Promise.all([
+        getFreshLocation(8000),
+        getFreshOrientation(2000),
+      ]);
+      const useLoc = loc || currentLocation;
+      if (!useLoc || !isFinite(useLoc.lat)) { setStatus("No GPS fix yet — stand outside and try again."); return; }
+      const heading = (ori && ori.heading != null) ? ori.heading : currentHeading;
+      const attitude = (ori && ori.attitude != null) ? ori.attitude : currentAttitude;
+      const ok = ifcViewer.positionCameraFromGeo(useLoc.lat, useLoc.lng, heading, attitude, useLoc.alt);
+      setStatus(ok
+        ? `3D view snapped to you: ${useLoc.lat.toFixed(5)}, ${useLoc.lng.toFixed(5)}${heading != null ? ` · heading ${Math.round(heading)}°` : ""}.`
+        : "Model has no georeference — cannot place the view from GPS.");
+    } catch (e) {
+      console.warn("[ifc] snap to me:", e);
+      setStatus("Snap to me failed: " + (e && e.message ? e.message : e));
+    } finally {
+      ifcSnapToMeButton.textContent = was;
+      ifcSnapToMeButton.disabled = false;
+    }
+  });
+
   if (ifcLinkToPhotoButton) ifcLinkToPhotoButton.addEventListener("click", async () => {
     if (!ifcSelectedElements.length) { setStatus("Select one or more elements in the 3D model first."); return; }
     if (!ifcLinkedPhotoId) {
@@ -5225,6 +5273,7 @@ async function capturePhoto() {
     setStatus("⚠ Depth mode on but server not connected (state: " + wsState + "). Photo saved without depth.");
   }
 
+  let savedRecord = null;
   try {
     // Refresh location + orientation at the instant of capture so each photo
     // gets its own fresh GPS fix and camera angle.
@@ -5240,7 +5289,7 @@ async function capturePhoto() {
       if (freshOri.attitude != null) currentAttitude = freshOri.attitude;
       headingText.textContent = orientationSummary();
     }
-    await savePhoto(mainBlob, thermalBlob, getCaptureComment(), captureLoc, currentHeading, facingMode, depthBlob, plyText, normalizeTags(captureTags), {
+    savedRecord = await savePhoto(mainBlob, thermalBlob, getCaptureComment(), captureLoc, currentHeading, facingMode, depthBlob, plyText, normalizeTags(captureTags), {
       attitude: currentAttitude,
       aprilTags: aprilTagResult.ids,
       aprilTagDetections: aprilTagResult.detections.map((d) => ({ id: d.id, cornersNormalized: d.cornersNormalized, hammingDistance: d.hammingDistance })),
@@ -5253,6 +5302,7 @@ async function capturePhoto() {
   }
   clearCaptureDraft();
   closeCaptureModal();
+  if (savedRecord) showPostCaptureActions(savedRecord);
   if (depthModeEnabled && !depthBlob) {
     setStatus(`⚠ Photo saved (+ stereo) but DEPTH FAILED — depth server not connected. Run start_servers.bat, then re-check Depth mode.`);
   } else {
@@ -5341,6 +5391,36 @@ async function savePhoto(blob, thermalBlob = null, comment = "", location = null
   const record = { id: createId(), bridgeId: activeBridgeId, createdAt: new Date().toISOString(), comment, location, heading, facing, blob, thermalBlob, depthBlob, plyText, tags: normalizeTags(tags), ...(extra || {}) };
   await runTransaction("readwrite", (store) => store.put(record));
   await renderSavedPhotos();
+  // Returned so callers can offer follow-up actions on the photo just taken -
+  // tagging it to model elements, for instance - without re-querying for it.
+  return record;
+}
+
+// ── Post-capture follow-up ────────────────────────────────────────────────────
+// Offer to tag the photo just taken straight away. Reaching element tagging
+// otherwise means going back to the gallery, opening the photo's Map &
+// navigation and tapping View in 3D - three steps for something you almost
+// always want in the moment, standing in front of the element.
+
+let postCaptureRecord = null;
+let postCaptureTimer = null;
+
+function showPostCaptureActions(record) {
+  const bar = document.getElementById("postCaptureActions");
+  if (!bar || !record) return;
+  postCaptureRecord = record;
+  bar.hidden = false;
+  // Auto-dismiss: this is an offer, not a task list, and it should not sit
+  // there competing with the next shot.
+  if (postCaptureTimer) clearTimeout(postCaptureTimer);
+  postCaptureTimer = setTimeout(hidePostCaptureActions, 30000);
+}
+
+function hidePostCaptureActions() {
+  const bar = document.getElementById("postCaptureActions");
+  if (bar) bar.hidden = true;
+  if (postCaptureTimer) { clearTimeout(postCaptureTimer); postCaptureTimer = null; }
+  postCaptureRecord = null;
 }
 
 // ── Guided pier scan (photogrammetry burst) ───────────────────────────────────
