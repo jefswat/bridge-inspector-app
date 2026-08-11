@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Photo Vault</title>
-  <meta name="theme-color" content="#0f172a" />
+  <meta name="theme-color" content="#f5f7fa" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icons/icon.svg" />
   <!-- Leaflet -->
@@ -23,14 +23,14 @@
   <!-- proj4 (map projection / georeferencing) -->
   <script src="vendor/proj4.js"></script>
   <!-- web-ifc (IFC parsing) loaded dynamically as ES module in ifc-viewer.js -->
-  <link rel="stylesheet" href="styles.css?v=20260811-090000" />
+  <link rel="stylesheet" href="styles.css?v=20260811-093000" />
 </head>
 <body>
 
 <header>
   <h1>📷 Photo Vault <span id="buildStamp" style="font-size:.55rem;font-weight:400;opacity:.7;vertical-align:middle;">build …</span></h1>
   <div style="display:flex;gap:8px;align-items:center;">
-    <a class="map-nav-link" href="map.html?v=20260811-090000">🗺 Map summary</a>
+    <a class="map-nav-link" href="map.html?v=20260811-093000">🗺 Map summary</a>
     <button id="openSettingsButton" class="secondary" hidden>⚙ Settings</button>
     <button id="openPeerTransferViewTop" class="secondary">🔁 Transfer</button>
     <button id="installButton" class="secondary" hidden>⬇ Install App</button>
@@ -79,7 +79,7 @@
       <button id="newImageButton">📸 New image</button>
       <button id="scanToggleBtn" class="secondary" disabled>▶ Start scan</button>
       <button id="sketchButton" class="secondary">✏ Sketch</button>
-      <label class="secondary" style="padding:7px 14px;border-radius:8px;border:1px solid #334155;background:#273449;font-size:.85rem;font-weight:600;cursor:pointer;">
+      <label class="secondary" style="padding:7px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);font-size:.85rem;font-weight:600;cursor:pointer;">
         📂 Import
         <input id="filePicker" type="file" accept="image/*" multiple hidden />
       </label>
@@ -155,21 +155,21 @@
         </div>
         <div id="refineRow" class="camera-selector" hidden style="gap:8px;align-items:center;">
           <span style="font-size:.8rem;font-weight:600;white-space:nowrap;">🎚 Depth detail</span>
-          <span style="font-size:.72rem;color:#94a3b8;">Sharp</span>
+          <span style="font-size:.72rem;color:var(--muted);">Sharp</span>
           <input type="range" id="refineStrength" min="0" max="100" value="50" step="1" style="flex:1;min-width:90px;" />
-          <span style="font-size:.72rem;color:#94a3b8;">Filled</span>
-          <span id="refineStrengthVal" style="font-size:.72rem;color:#cbd5e1;width:2.4em;text-align:right;">0.50</span>
+          <span style="font-size:.72rem;color:var(--muted);">Filled</span>
+          <span id="refineStrengthVal" style="font-size:.72rem;color:var(--muted);width:2.4em;text-align:right;">0.50</span>
         </div>
         <div id="cutoffRow" class="camera-selector" hidden style="gap:8px;align-items:center;">
           <span style="font-size:.8rem;font-weight:600;white-space:nowrap;">📏 Depth cutoff</span>
-          <span style="font-size:.72rem;color:#94a3b8;">0.25 m</span>
+          <span style="font-size:.72rem;color:var(--muted);">0.25 m</span>
           <input type="range" id="depthCutoff" min="0.25" max="4" value="1" step="0.05" style="flex:1;min-width:90px;" />
-          <span style="font-size:.72rem;color:#94a3b8;">4 m</span>
-          <span id="depthCutoffVal" style="font-size:.72rem;color:#cbd5e1;width:3.2em;text-align:right;">1.00 m</span>
+          <span style="font-size:.72rem;color:var(--muted);">4 m</span>
+          <span id="depthCutoffVal" style="font-size:.72rem;color:var(--muted);width:3.2em;text-align:right;">1.00 m</span>
         </div>
         <div id="calibPanel" class="overlay-panel" hidden>
           <div class="panel-header-row"><h3>📐 Stereo Calibration</h3><button id="calibCloseBtn" class="secondary" style="padding:3px 10px;">✕</button></div>
-          <p style="font-size:.78rem;color:#94a3b8;">If you know your camera specs, enter them below. Otherwise click <strong>Auto-calibrate</strong> with a checkerboard pattern visible to both cameras.</p>
+          <p style="font-size:.78rem;color:var(--muted);">If you know your camera specs, enter them below. Otherwise click <strong>Auto-calibrate</strong> with a checkerboard pattern visible to both cameras.</p>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
             <label class="labeled-field"><span class="field-label">Focal length (px)</span><input id="calFocal" type="number" class="meta-input" value="700" /></label>
             <label class="labeled-field"><span class="field-label">Baseline (mm)</span><input id="calBaseline" type="number" class="meta-input" value="60" /></label>
@@ -181,7 +181,7 @@
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <button id="saveCalibBtn">💾 Save calibration</button>
             <button id="autoCalibBtn" class="secondary">🎯 Auto-calibrate with checkerboard</button>
-            <span id="calibStatus" style="font-size:.8rem;color:#94a3b8;align-self:center;"></span>
+            <span id="calibStatus" style="font-size:.8rem;color:var(--muted);align-self:center;"></span>
           </div>
         </div>
       </section>
@@ -192,16 +192,16 @@
             <h3>🗺 CAD Overlay (KML / KMZ)</h3>
             <span id="kmlFileName"></span>
             <button id="clearKmlButton" class="secondary" hidden>✕ Clear</button>
-            <label style="padding:5px 11px;border-radius:7px;border:1px solid #334155;background:#273449;font-size:.82rem;font-weight:600;cursor:pointer;">
+            <label style="padding:5px 11px;border-radius:7px;border:1px solid var(--border);background:var(--surface2);font-size:.82rem;font-weight:600;cursor:pointer;">
               📁 Load file
               <input id="kmlFilePicker" type="file" accept=".kml,.kmz" hidden />
             </label>
           </div>
-          <p id="kmlStatus" style="font-size:.8rem;color:#94a3b8;">No overlay loaded. Load a KML or KMZ file to overlay CAD drawings on all maps.</p>
+          <p id="kmlStatus" style="font-size:.8rem;color:var(--muted);">No overlay loaded. Load a KML or KMZ file to overlay CAD drawings on all maps.</p>
           <div id="kmlOpacityRow" style="display:none;align-items:center;gap:9px;margin-top:6px;">
-            <label for="kmlOpacity" style="font-size:.8rem;color:#94a3b8;white-space:nowrap;">Overlay opacity</label>
+            <label for="kmlOpacity" style="font-size:.8rem;color:var(--muted);white-space:nowrap;">Overlay opacity</label>
             <input id="kmlOpacity" type="range" min="0" max="100" value="100" style="flex:1;" />
-            <span id="kmlOpacityVal" style="font-size:.8rem;color:#cbd5e1;width:3ch;text-align:right;">100</span>
+            <span id="kmlOpacityVal" style="font-size:.8rem;color:var(--muted);width:3ch;text-align:right;">100</span>
           </div>
         </div>
       </section>
@@ -222,10 +222,10 @@
 </div>
 
 <!-- Debug console panel -->
-<div id="debugConsolePanel" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:9999;background:#0f172a;border-top:2px solid #ef4444;max-height:35vh;overflow-y:auto;font-family:monospace;font-size:.7rem;padding:6px 8px;color:#f1f5f9;">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;position:sticky;top:0;background:#0f172a;padding-bottom:4px;border-bottom:1px solid #1e293b;">
-    <span style="color:#ef4444;font-weight:700;">🐛 Console</span>
-    <button id="debugConsoleCloseBtn" style="background:none;border:none;color:#94a3b8;cursor:pointer;font-size:0.9rem;padding:0 4px;">✕</button>
+<div id="debugConsolePanel" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:9999;background:var(--surface2);border-top:2px solid #ef4444;max-height:35vh;overflow-y:auto;font-family:monospace;font-size:.7rem;padding:6px 8px;color:var(--text);">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;position:sticky;top:0;background:var(--surface2);padding-bottom:4px;border-bottom:1px solid #1e293b;">
+    <span style="color:var(--danger);font-weight:700;">🐛 Console</span>
+    <button id="debugConsoleCloseBtn" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:0.9rem;padding:0 4px;">✕</button>
   </div>
   <div id="debugConsoleLog"></div>
 </div>
@@ -381,8 +381,8 @@
       <button type="button" class="secondary ifc-view-btn" data-view="side" title="Side view">▥ Side</button>
     </div>
 
-    <div id="ifcViewerContainer" class="ifc-viewer-container" style="width:100%;height:500px;background:#fafafa;border-radius:8px;position:relative;border:1px solid #cbd5e1;">
-      <div id="ifcViewerPlaceholder" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;color:#64748b;">
+    <div id="ifcViewerContainer" class="ifc-viewer-container" style="width:100%;height:500px;background:var(--surface);border-radius:8px;position:relative;border:1px solid #cbd5e1;">
+      <div id="ifcViewerPlaceholder" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;color:var(--muted);">
         <p style="margin:0;">📤 Upload an IFC file to start</p>
         <p style="margin:5px 0 0;font-size:.85rem;opacity:.7;">Rotate: drag • Zoom: scroll • Click elements to select</p>
       </div>
@@ -407,17 +407,17 @@
       </div>
       <div id="ifcSelectedElement" class="status-bar" style="margin:8px 0;">No element selected</div>
       <div id="ifcViewerPsets" class="ifc-viewer-psets" style="display:grid;gap:10px;margin:8px 0 12px;">
-        <div id="ifcConditionPsetCard" style="display:grid;gap:8px;padding:8px;border:1px solid #334155;border-radius:8px;background:#111827;">
-          <div style="font-size:.82rem;font-weight:700;color:#e2e8f0;">Element property set (condition rating)</div>
+        <div id="ifcConditionPsetCard" style="display:grid;gap:8px;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);">
+          <div style="font-size:.82rem;font-weight:700;color:var(--text);">Element property set (condition rating)</div>
           <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
-            <label for="ifcConditionRatingInput" style="font-size:.8rem;color:#94a3b8;">Condition rating</label>
+            <label for="ifcConditionRatingInput" style="font-size:.8rem;color:var(--muted);">Condition rating</label>
             <input id="ifcConditionRatingInput" class="meta-input" type="text" placeholder="e.g. 6 or Fair" style="min-width:180px;max-width:260px;" />
             <button id="ifcApplyConditionPsetButton" class="secondary" disabled>🏷 Apply to selected element(s)</button>
           </div>
           <div id="ifcConditionSummary" class="status-bar" style="margin:0;">No condition rating set for selected element.</div>
         </div>
-        <div id="ifcInspectionPsetCard" style="display:grid;gap:8px;padding:8px;border:1px solid #334155;border-radius:8px;background:#111827;">
-          <div style="font-size:.82rem;font-weight:700;color:#e2e8f0;">IFC-wide inspection property set</div>
+        <div id="ifcInspectionPsetCard" style="display:grid;gap:8px;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);">
+          <div style="font-size:.82rem;font-weight:700;color:var(--text);">IFC-wide inspection property set</div>
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;">
             <label class="labeled-field"><span class="field-label">Inspection date</span><input id="ifcInspectionDateInput" type="date" class="meta-input" /></label>
             <label class="labeled-field"><span class="field-label">Inspector name</span><input id="ifcInspectorNameInput" type="text" class="meta-input" placeholder="Inspector name" /></label>
@@ -460,9 +460,9 @@
       <canvas id="arOverlayCanvas" style="position:absolute;top:0;left:0;width:100%;height:100%;"></canvas>
       
       <div class="ar-location-display">
-        <div id="arLocationText" style="font-size:.85rem;color:#e2e8f0;"></div>
-        <div id="arAttitudeText" style="font-size:.75rem;color:#94a3b8;margin-top:3px;"></div>
-        <div id="arFpsText" style="font-size:.75rem;color:#fbbf24;margin-top:3px;">Render FPS: measuring...</div>
+        <div id="arLocationText" style="font-size:.85rem;color:var(--text);"></div>
+        <div id="arAttitudeText" style="font-size:.75rem;color:var(--muted);margin-top:3px;"></div>
+        <div id="arFpsText" style="font-size:.75rem;color:var(--warn);margin-top:3px;">Render FPS: measuring...</div>
       </div>
       
       <!-- Mini plan view: drag the arrow to reposition (AR view only) -->
@@ -476,22 +476,22 @@
       
       <div class="ar-hud-panel">
       <div class="ar-opacity-controls">
-        <label for="arOpacitySlider" style="font-size:.8rem;color:#94a3b8;margin-right:6px;">Model opacity</label>
+        <label for="arOpacitySlider" style="font-size:.8rem;color:var(--muted);margin-right:6px;">Model opacity</label>
         <input id="arOpacitySlider" type="range" min="0" max="100" value="60" style="width:120px;" />
-        <span id="arOpacityValue" style="font-size:.75rem;color:#cbd5e1;margin-left:6px;width:2.4em;">0.60</span>
+        <span id="arOpacityValue" style="font-size:.75rem;color:var(--muted);margin-left:6px;width:2.4em;">0.60</span>
       </div>
 
       <div class="ar-opacity-controls">
-        <label for="arFovSlider" style="font-size:.8rem;color:#94a3b8;margin-right:6px;" title="Camera field of view. No browser API reports this, so trim it until the overlay stops sliding against the world as you pan.">Camera FOV</label>
+        <label for="arFovSlider" style="font-size:.8rem;color:var(--muted);margin-right:6px;" title="Camera field of view. No browser API reports this, so trim it until the overlay stops sliding against the world as you pan.">Camera FOV</label>
         <input id="arFovSlider" type="range" min="40" max="120" step="0.5" value="82" style="width:120px;" />
-        <span id="arFovValue" style="font-size:.75rem;color:#cbd5e1;margin-left:6px;">82°</span>
+        <span id="arFovValue" style="font-size:.75rem;color:var(--muted);margin-left:6px;">82°</span>
         <button id="arFovMeasureBtn" type="button" class="ar-mini-sat-btn" title="Measure the real camera FOV via WebXR. Opens an AR session for a moment, reads the device's camera projection, then closes it.">📐 Measure</button>
         <button id="arFovResetBtn" type="button" class="ar-mini-sat-btn" title="Discard the saved FOV and go back to the 82° main-lens default. Use this if you trimmed the slider before the feed was pinned to 1x.">↺</button>
       </div>
 
       <div class="ar-opacity-controls">
-        <label style="font-size:.8rem;color:#94a3b8;margin-right:6px;" title="Phones report height above the WGS84 ellipsoid, survey elevations are orthometric (NAVD88). Stand on ground of known elevation and calibrate once; the offset is regional and holds for the whole area.">Ground datum</label>
-        <span id="arGeoidValue" style="font-size:.75rem;color:#cbd5e1;margin-right:6px;">uncalibrated</span>
+        <label style="font-size:.8rem;color:var(--muted);margin-right:6px;" title="Phones report height above the WGS84 ellipsoid, survey elevations are orthometric (NAVD88). Stand on ground of known elevation and calibrate once; the offset is regional and holds for the whole area.">Ground datum</label>
+        <span id="arGeoidValue" style="font-size:.75rem;color:var(--muted);margin-right:6px;">uncalibrated</span>
         <button id="arGeoidSetBtn" type="button" class="ar-mini-sat-btn" title="Calibrate from where you stand: enter the true elevation of the GROUND under your feet, and the offset to your phone's reported altitude is stored.">⇱ Set here</button>
         <button id="arGeoidLookupBtn" type="button" class="ar-mini-sat-btn" title="Look up the geoid separation for this position from NOAA NGS (needs a connection, US coverage).">🌐 Geoid</button>
         <button id="arGeoidEnterBtn" type="button" class="ar-mini-sat-btn" title="Type the geoid separation N directly, from any geoid calculator. Regional constant, so one value covers your whole working area.">N…</button>
@@ -537,9 +537,9 @@
       <span class="scan-title">📍 Select AR view location</span>
       <button id="closeArLocationPickerButton" type="button" class="secondary">✕ Close</button>
     </div>
-    <div id="arLocationPickerMap" style="width:100%;height:400px;border:1px solid #334155;border-radius:8px;margin:12px 0;"></div>
+    <div id="arLocationPickerMap" style="width:100%;height:400px;border:1px solid var(--border);border-radius:8px;margin:12px 0;"></div>
     <div style="display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:12px;">
-      <span id="arLocationPickerStatus" style="font-size:.8rem;color:#94a3b8;flex:1;">Click on map to select location</span>
+      <span id="arLocationPickerStatus" style="font-size:.8rem;color:var(--muted);flex:1;">Click on map to select location</span>
       <button id="arLocationPickerApplyBtn" class="secondary" disabled>📍 Use this location</button>
     </div>
   </div>
@@ -612,8 +612,8 @@
 <script src="vendor/cv.js?v=20260716-211500"></script>
 <script src="vendor/aruco.js?v=20260716-211500"></script>
 <script src="vendor/apriltag_36h11.js?v=20260716-211500"></script>
-<script src="ifc-viewer.js?v=20260811-090000"></script>
-<script src="ifc-export.js?v=20260811-090000"></script>
-<script src="app.js?v=20260811-090000"></script>
+<script src="ifc-viewer.js?v=20260811-093000"></script>
+<script src="ifc-export.js?v=20260811-093000"></script>
+<script src="app.js?v=20260811-093000"></script>
 </body>
 </html>
