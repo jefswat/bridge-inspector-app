@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v195";
+const BUILD_VERSION = "v196";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -396,6 +396,10 @@ let arModelFootprintXY     = null;  // convex-hull outline [{x,y}...] of the mod
 let arMiniView             = null;  // {minx,maxx,miny,maxy} square plan-view extent (E/N metres, or scene X/Y fallback)
 let arMiniGeoMode          = false; // true when the plan view is drawn in georeferenced E/N (matches Map summary)
 let arMiniZoom             = 1;     // plan-view pinch zoom; >1 is zoomed in
+// Plan-view dot geometry. The separation must exceed twice the grab radius or
+// the two hit areas overlap and a position drag can be read as a re-aim.
+const AR_MINI_GRAB_PX      = 22;
+const AR_MINI_DIR_DOT_PX   = 58;
 const arMiniPointers       = new Map(); // pointerId -> {x,y} for the plan-view pinch
 let arMiniPinchStartDist   = 0;
 let arMiniPinchStartZoom   = 1;
@@ -2762,7 +2766,9 @@ function arDirDotMini() {
   const b = arMiniExtent();
   const W = arMiniMap.width, pad = 14;
   const worldPerPx = (b.maxx - b.minx) / Math.max(1, W - 2 * pad);
-  const dist = worldPerPx * 42; // ~42 px in front of the eye
+  // Far enough in front that the two grab radii cannot overlap: the separation
+  // exceeds 2 * AR_MINI_GRAB_PX, leaving a dead band between them.
+  const dist = worldPerPx * AR_MINI_DIR_DOT_PX;
   const h = arHeadingWorld();
   return arModelToMini(eye.x + h.x * dist, eye.y + h.y * dist);
 }
@@ -2794,13 +2800,19 @@ function onArMiniPointerDown(e) {
     try { arMiniMap.setPointerCapture(e.pointerId); } catch (_) {}
     return;
   }
-  // Choose the nearer dot (position vs direction) within grab radius.
+  // Position takes priority inside its own grab radius, and only a clear grab
+  // of the green dot re-aims. Picking whichever dot was merely NEARER made the
+  // heading-side edge of the position dot count as a direction grab - the dots
+  // sit close together and arMiniApply runs on pointerdown - so trying to move
+  // yourself would swing the view instead.
   const eye = arEyeWorld();
   const pe = eye ? arModelToMini(eye.x, eye.y) : null;
   const pd = arDirDotMini();
   const dEye = pe ? Math.hypot(cx - pe.cx, cy - pe.cy) : Infinity;
   const dDir = pd ? Math.hypot(cx - pd.cx, cy - pd.cy) : Infinity;
-  arMiniDragTarget = (dDir < dEye && dDir < 26) ? "dir" : "pos";
+  if (dEye <= AR_MINI_GRAB_PX) arMiniDragTarget = "pos";
+  else if (dDir <= AR_MINI_GRAB_PX) arMiniDragTarget = "dir";
+  else arMiniDragTarget = "pos";   // empty map: move, never re-aim
   arMiniDragging = true;
   arMiniApply(cx, cy);
   try { arMiniMap.setPointerCapture(e.pointerId); } catch (_) {}
@@ -2835,13 +2847,22 @@ function arMiniApply(cx, cy) {
   const w = arMiniToModel(cx, cy);
   if (!w) return;
   if (arMiniDragTarget === "dir") {
-    // Point the look direction toward the dragged spot.
+    // Point the look direction toward the dragged spot. Only this branch may
+    // touch the view angle; moving the position dot leaves it alone entirely.
     if (arMiniGeoMode) {
       const eyeEN = arSceneToEN(arEyePos);
       const target = arENToScene(w.x, w.y, eyeEN.mY);
       arOrbitAz = Math.atan2(target.y - arEyePos.y, target.x - arEyePos.x);
     } else {
       arOrbitAz = Math.atan2(w.y - arEyePos.y, w.x - arEyePos.x);
+    }
+    // Re-anchor the phone offset onto the new aim. Without this the very next
+    // orientation event recomputes arOrbitAz from the old offset and the drag
+    // is undone before it is ever drawn.
+    if (!arLiveGpsActive() && arYawSmoothed != null && isFinite(arYawSmoothed)) {
+      arTestYawOffset = arOrbitAz - arYawSmoothed;
+      arTestLookAnchored = true;
+      if (arTestAimAz == null) arTestAimAz = arOrbitAz;
     }
   } else {
     // Move the eye (keep current elevation).
