@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v190";
+const BUILD_VERSION = "v191";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -2096,24 +2096,30 @@ function updateArEyeFromGeo(lat, lon, alt) {
     ? ifcViewer.modelElevMinM
     : ((ifcViewer.modelElevCenterM != null && isFinite(ifcViewer.modelElevCenterM))
       ? ifcViewer.modelElevCenterM : null);
-  let groundElev;
+  // standEye: whether the reference elevation is the GROUND you are standing on,
+  // in which case the standing eye height is added. A GPS altitude is already
+  // the receiver's own position - the phone in your hand, or a pole-mounted
+  // antenna - so adding 1.6 m on top of it double-counts your height and sinks
+  // the model by that much.
+  let groundElev, standEye;
   if (alt != null && isFinite(alt) && modelBase != null
       && Math.abs(alt - modelBase) > AR_ALT_DATUM_TOLERANCE_M) {
-    groundElev = modelBase;
+    groundElev = modelBase; standEye = true;
     arEyeElevSource = `model base (GPS alt ${Math.round(alt - modelBase)}m off)`;
   } else if (alt != null && isFinite(alt)) {
-    groundElev = alt;
+    groundElev = alt; standEye = false;
     arEyeElevSource = "GPS altitude";
   } else if (modelBase != null) {
-    groundElev = modelBase;
+    groundElev = modelBase; standEye = true;
     arEyeElevSource = "model base";
   } else {
-    groundElev = 0;
+    groundElev = 0; standEye = true;
     arEyeElevSource = "datum 0";
   }
   arModelBaseM = modelBase;
-  arEyeElevM = groundElev + arEyeHeightM + arElevOffsetM;
-  const p = arENToScene(E + arPanX, N + arPanY, groundElev + arMetersToUnits(arEyeHeightM + arElevOffsetM));
+  const eyeRiseM = (standEye ? arEyeHeightM : 0) + arElevOffsetM;
+  arEyeElevM = groundElev + eyeRiseM;
+  const p = arENToScene(E + arPanX, N + arPanY, groundElev + arMetersToUnits(eyeRiseM));
   if (!p || !isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) { arGeoFailReason = "scene transform NaN"; return false; }
   if (!arEyePos) arEyePos = new THREE.Vector3();
   arEyePos.copy(p);
