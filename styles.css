@@ -19,6 +19,12 @@
   --orange: #ea580c;
   --success: #15803d;
   --warn: #b45309;
+  /* Chrome that floats over the live camera feed keeps a dark translucent
+     background in the light theme, so it needs its own text ramp - the page
+     tokens above are near-black and vanish against it. */
+  --overlay-text: #f8fafc;
+  --overlay-muted: #cbd5e1;
+  --overlay-border: rgba(255, 255, 255, .22);
   --shadow-sm: 0 1px 2px rgba(17, 24, 39, .05);
   --shadow: 0 1px 3px rgba(17, 24, 39, .08), 0 1px 2px rgba(17, 24, 39, .04);
   --radius: 12px;
@@ -192,7 +198,7 @@ main {
   bottom: 8px;
   z-index: 2;
   background: rgba(0, 0, 0, 0.65);
-  color: var(--text);
+  color: var(--overlay-text);
   font-size: 0.74rem;
   line-height: 1.3;
   padding: 5px 8px;
@@ -502,7 +508,7 @@ button {
   font-size: 0.85rem;
   font-weight: 600;
   background: var(--accent);
-  color: #0c4a6e;
+  color: #ffffff;
   transition: background .15s, opacity .15s;
   white-space: nowrap;
 }
@@ -1279,11 +1285,11 @@ select {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 6px 8px; background: rgba(0,0,0,.66);
 }
-.crack-bar .crack-stat { font-size: .74rem; color: var(--danger); font-weight: 600; white-space: nowrap; }
-.crack-bar .crack-sens { font-size: .7rem; color: var(--muted); display: flex; align-items: center; gap: 5px; flex: 1; min-width: 120px; }
+.crack-bar .crack-stat { font-size: .74rem; color: #fca5a5; font-weight: 600; white-space: nowrap; }
+.crack-bar .crack-sens { font-size: .7rem; color: var(--overlay-muted); display: flex; align-items: center; gap: 5px; flex: 1; min-width: 120px; }
 .crack-bar .crack-sens input { flex: 1; }
 .crack-bar button { padding: 3px 9px; font-size: .74rem; }
-.crack-bar .crack-vert { font-size: .7rem; color: var(--muted); display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.crack-bar .crack-vert { font-size: .7rem; color: var(--overlay-muted); display: flex; align-items: center; gap: 4px; white-space: nowrap; }
 
 /* ── IFC 3D Viewer Modal ──────────────────────────────────────────────────── */
 .ifc-viewer-dialog {
@@ -1770,7 +1776,7 @@ select {
 
 .ar-minimap-label {
   font-size: 0.62rem;
-  color: var(--muted);
+  color: var(--overlay-muted);
   margin-top: 3px;
 }
 
@@ -1820,7 +1826,7 @@ select {
   flex-basis: 100%;
   text-align: center;
   font-size: 0.6rem;
-  color: var(--muted);
+  color: var(--overlay-muted);
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
@@ -1904,7 +1910,7 @@ select {
 
 .ar-control-btn:hover {
   background: var(--accent);
-  color: var(--text);
+  color: #ffffff;
   border-color: var(--accent);
 }
 
@@ -1915,6 +1921,21 @@ select {
 #arStatusMessage {
   font-size: 0.8rem;
   pointer-events: none;
+  color: var(--overlay-text);
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+/* The hairline on every floating AR panel came from --border, a light-theme
+   grey that reads as a bright outline on a dark pill. */
+.ar-location-display,
+.ar-minimap-wrap,
+.ar-move-controls,
+.ar-opacity-controls,
+.ar-pan-controls {
+  border-color: var(--overlay-border);
+  color: var(--overlay-text);
 }
 
 

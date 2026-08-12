@@ -25,14 +25,14 @@
   <!-- proj4 (map projection / georeferencing) -->
   <script src="vendor/proj4.js"></script>
   <!-- web-ifc (IFC parsing) loaded dynamically as ES module in ifc-viewer.js -->
-  <link rel="stylesheet" href="styles.css?v=20260812-020000" />
+  <link rel="stylesheet" href="styles.css?v=20260812-193000" />
 </head>
 <body>
 
 <header>
   <h1>📷 Photo Vault <span id="buildStamp" style="font-size:.55rem;font-weight:400;opacity:.7;vertical-align:middle;">build …</span></h1>
   <div style="display:flex;gap:8px;align-items:center;">
-    <a class="map-nav-link" href="map.html?v=20260812-020000">🗺 Map summary</a>
+    <a class="map-nav-link" href="map.html?v=20260812-193000">🗺 Map summary</a>
     <button id="openSettingsButton" class="secondary" hidden>⚙ Settings</button>
     <button id="openPeerTransferViewTop" class="secondary">🔁 Transfer</button>
     <button id="installButton" class="secondary" hidden>⬇ Install App</button>
@@ -472,8 +472,8 @@
       <canvas id="arOverlayCanvas" style="position:absolute;top:0;left:0;width:100%;height:100%;"></canvas>
       
       <div class="ar-location-display">
-        <div id="arLocationText" style="font-size:.85rem;color:var(--text);"></div>
-        <div id="arAttitudeText" style="font-size:.75rem;color:var(--muted);margin-top:3px;"></div>
+        <div id="arLocationText" style="font-size:.85rem;color:var(--overlay-text);"></div>
+        <div id="arAttitudeText" style="font-size:.75rem;color:var(--overlay-muted);margin-top:3px;"></div>
         <div id="arFpsText" style="font-size:.75rem;color:var(--warn);margin-top:3px;">Render FPS: measuring...</div>
       </div>
       
@@ -488,22 +488,22 @@
       
       <div class="ar-hud-panel">
       <div class="ar-opacity-controls">
-        <label for="arOpacitySlider" style="font-size:.8rem;color:var(--muted);margin-right:6px;">Model opacity</label>
+        <label for="arOpacitySlider" style="font-size:.8rem;color:var(--overlay-muted);margin-right:6px;">Model opacity</label>
         <input id="arOpacitySlider" type="range" min="0" max="100" value="60" style="width:120px;" />
-        <span id="arOpacityValue" style="font-size:.75rem;color:var(--muted);margin-left:6px;width:2.4em;">0.60</span>
+        <span id="arOpacityValue" style="font-size:.75rem;color:var(--overlay-muted);margin-left:6px;width:2.4em;">0.60</span>
       </div>
 
       <div class="ar-opacity-controls">
-        <label for="arFovSlider" style="font-size:.8rem;color:var(--muted);margin-right:6px;" title="Camera field of view. No browser API reports this, so trim it until the overlay stops sliding against the world as you pan.">Camera FOV</label>
+        <label for="arFovSlider" style="font-size:.8rem;color:var(--overlay-muted);margin-right:6px;" title="Camera field of view. No browser API reports this, so trim it until the overlay stops sliding against the world as you pan.">Camera FOV</label>
         <input id="arFovSlider" type="range" min="40" max="120" step="0.5" value="82" style="width:120px;" />
-        <span id="arFovValue" style="font-size:.75rem;color:var(--muted);margin-left:6px;">82°</span>
+        <span id="arFovValue" style="font-size:.75rem;color:var(--overlay-muted);margin-left:6px;">82°</span>
         <button id="arFovMeasureBtn" type="button" class="ar-mini-sat-btn" title="Measure the real camera FOV via WebXR. Opens an AR session for a moment, reads the device's camera projection, then closes it.">📐 Measure</button>
         <button id="arFovResetBtn" type="button" class="ar-mini-sat-btn" title="Discard the saved FOV and go back to the 82° main-lens default. Use this if you trimmed the slider before the feed was pinned to 1x.">↺</button>
       </div>
 
       <div class="ar-opacity-controls">
-        <label style="font-size:.8rem;color:var(--muted);margin-right:6px;" title="Phones report height above the WGS84 ellipsoid, survey elevations are orthometric (NAVD88). Stand on ground of known elevation and calibrate once; the offset is regional and holds for the whole area.">Ground datum</label>
-        <span id="arGeoidValue" style="font-size:.75rem;color:var(--muted);margin-right:6px;">uncalibrated</span>
+        <label style="font-size:.8rem;color:var(--overlay-muted);margin-right:6px;" title="Phones report height above the WGS84 ellipsoid, survey elevations are orthometric (NAVD88). Stand on ground of known elevation and calibrate once; the offset is regional and holds for the whole area.">Ground datum</label>
+        <span id="arGeoidValue" style="font-size:.75rem;color:var(--overlay-muted);margin-right:6px;">uncalibrated</span>
         <button id="arGeoidSetBtn" type="button" class="ar-mini-sat-btn" title="Calibrate from where you stand: enter the true elevation of the GROUND under your feet, and the offset to your phone's reported altitude is stored.">⇱ Set here</button>
         <button id="arGeoidLookupBtn" type="button" class="ar-mini-sat-btn" title="Look up the geoid separation for this position from NOAA NGS (needs a connection, US coverage).">🌐 Geoid</button>
         <button id="arGeoidEnterBtn" type="button" class="ar-mini-sat-btn" title="Type the geoid separation N directly, from any geoid calculator. Regional constant, so one value covers your whole working area.">N…</button>
@@ -634,8 +634,8 @@
 <script src="vendor/cv.js?v=20260716-211500"></script>
 <script src="vendor/aruco.js?v=20260716-211500"></script>
 <script src="vendor/apriltag_36h11.js?v=20260716-211500"></script>
-<script src="ifc-viewer.js?v=20260812-020000"></script>
-<script src="ifc-export.js?v=20260812-020000"></script>
-<script src="app.js?v=20260812-020000"></script>
+<script src="ifc-viewer.js?v=20260812-193000"></script>
+<script src="ifc-export.js?v=20260812-193000"></script>
+<script src="app.js?v=20260812-193000"></script>
 </body>
 </html>

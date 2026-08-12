@@ -1,0 +1,149 @@
+// Captures the UI screenshots the field guide embeds. Run a static server on
+// the repo root first, then:  node tools/guide/capture-shots.js [port]
+//
+// Requires playwright. Set PLAYWRIGHT_MODULE if it is not resolvable from here.
+const path = require('path');
+const PW = process.env.PLAYWRIGHT_MODULE || 'playwright';
+const { chromium } = require(PW);
+const DIR = path.join(__dirname, 'shots') + path.sep;
+const PORT = process.argv[2] || '8099';
+require('fs').mkdirSync(DIR, { recursive: true });
+(async () => {
+  const b = await chromium.launch();
+  const c = await b.newContext({ serviceWorkers:'block', viewport:{width:1100,height:1000}, deviceScaleFactor:2 });
+  const p = await c.newPage();
+  const errs=[]; p.on('pageerror',e=>errs.push(e.message));
+  await p.goto(`http://127.0.0.1:${PORT}/index.html`,{waitUntil:'domcontentloaded'});
+  await p.waitForTimeout(2000);
+
+  const shot = async (sel, name, prep) => {
+    if (prep) await p.evaluate(prep);
+    await p.waitForTimeout(200);
+    const el = await p.$(sel);
+    if (!el) { console.log('MISSING', name, sel); return; }
+    const box = await el.boundingBox();
+    if (!box || box.width < 5 || box.height < 5) { console.log('EMPTY', name, JSON.stringify(box)); return; }
+    await el.screenshot({ path: DIR + name + '.png' });
+    console.log('ok', name, Math.round(box.width)+'x'+Math.round(box.height));
+  };
+  const hide = (sel) => p.evaluate((s)=>{const e=document.querySelector(s); if(e) e.hidden=true;}, sel);
+
+  // ── 1. Clear cache card in Settings ────────────────────────────────────────
+  await shot('#settingsModal .settings-body section.card:nth-of-type(1)', '01-clear-cache', () => {
+    const m=document.getElementById('settingsModal'); m.hidden=false; m.style.display='flex';
+    document.querySelectorAll('#settingsModal button[disabled]').forEach(x=>x.disabled=false);
+  });
+  await hide('#settingsModal');
+
+  // ── 2. IFC upload controls in the 3D viewer ───────────────────────────────
+  await shot('.ifc-viewer-controls', '02-ifc-upload', () => {
+    const m=document.getElementById('ifcViewerModal'); m.hidden=false; m.style.display='flex';
+    document.querySelectorAll('#ifcViewerModal button[disabled]').forEach(x=>x.disabled=false);
+    const s=document.getElementById('ifcFileStatus'); if(s) s.textContent='Loaded: InfraBridge-Raleigh.ifc';
+  });
+
+  // ── 3. Element tagging row + selection status ─────────────────────────────
+  await shot('#ifcViewerModal .actions-row:last-of-type', '03-tagging-buttons', () => {
+    const s=document.getElementById('ifcSelectedElement');
+    if(s) s.textContent='Tagged: 2 elements — click elements to add/remove selection';
+  });
+  await shot('#ifcSelectedElement', '03b-selected-element');
+  await hide('#ifcViewerModal');
+
+  // ── 4. AR entry button ────────────────────────────────────────────────────
+  await shot('.gallery-actions-row', '04-ar-button', () => {
+    document.getElementById('appView').hidden=false;
+    document.querySelectorAll('button[disabled]').forEach(x=>x.disabled=false);
+  });
+
+  // ── AR view. Nothing renders behind the HUD in a headless harness, so the
+  //    panels are shot one at a time with the others hidden. ────────────────
+  await p.evaluate(() => {
+    const m=document.getElementById('arViewModal'); m.hidden=false; m.style.display='flex';
+    document.getElementById('arLocationText').textContent='35.872061, -78.674703  ±4 m';
+    document.getElementById('arAttitudeText').textContent='Eye 126.0 m (NAVD88) · heading 118° ESE · pitch -2°';
+    document.getElementById('arStatusMessage').textContent='Model loaded: InfraBridge-Raleigh.ifc — 1,284 elements';
+    const b=document.querySelector('.ar-view-body'); if(b) b.style.background='#0b0f16';
+  });
+  const only = async (keep) => p.evaluate((k) => {
+    ['.ar-hud-panel','.ar-move-controls','.ar-minimap-wrap','.ar-location-display','#arStatusMessage','.ar-view-header']
+      .forEach(s=>document.querySelectorAll(s).forEach(e=>{e.style.visibility = k.includes(s) ? 'visible' : 'hidden';}));
+  }, keep);
+
+  await only(['.ar-view-header']);   await shot('.ar-view-header', '05-ar-header');
+  await only(['.ar-hud-panel']);     await shot('.ar-hud-panel', '06-ar-hud');
+                                     await shot('.ar-hud-panel .ar-opacity-controls:nth-of-type(3)', '06b-ground-datum');
+  await only(['.ar-move-controls']); await shot('.ar-move-controls', '07-ar-controls');
+  await only(['.ar-location-display']); await shot('.ar-location-display', '07b-ar-location');
+  await hide('#arViewModal');
+
+  // ── 8. Capture toolbar with the live geo + heading readout ────────────────
+  await shot('.actions-row', '08-capture-row', () => {
+    document.getElementById('geoText').textContent='Location: 35.87206, -78.67470 (±4m)';
+    document.getElementById('headingText').textContent='Direction: 118° ESE · Attitude: level';
+  });
+
+  // ── 9. Post-capture tagging offer ─────────────────────────────────────────
+  await shot('#postCaptureActions', '09-post-capture', () => {
+    const bar=document.getElementById('postCaptureActions'); bar.hidden=false; bar.style.display='flex';
+  });
+
+  // ── 10. AprilTag live detection status over the camera preview ────────────
+  await shot('#apriltagPreviewStatus', '10-apriltag', () => {
+    const m=document.getElementById('captureModal'); m.hidden=false; m.style.display='flex';
+    const s=document.getElementById('apriltagPreviewStatus');
+    if(s) s.textContent='AprilTag 36h11: id 7';
+  });
+
+  // ── 11. Pier scan HUD ─────────────────────────────────────────────────────
+  await shot('#scanHud', '11-scan-hud', () => {
+    const h=document.getElementById('scanHud');
+    h.hidden=false; h.removeAttribute('hidden'); h.style.display='block';
+    for (let n=h.parentElement; n && n!==document.body; n=n.parentElement) {
+      if (n.hidden) n.hidden=false;
+      if (getComputedStyle(n).display==='none') n.style.display='block';
+    }
+    const g=document.getElementById('scanGuide'); if(g) g.textContent='Good overlap — keep moving slowly';
+    const c1=document.getElementById('scanCount'); if(c1) c1.textContent='42 frames';
+    const f=document.getElementById('scanFocus'); if(f) f.textContent='Sharpness: good';
+    const o=document.getElementById('scanOverlapPct'); if(o) o.textContent='Move: 68%';
+    const bar=document.getElementById('scanOverlapBar'); if(bar){bar.style.width='68%';bar.classList.add('ready');}
+  });
+  await hide('#captureModal');
+
+  // ── 12. Start scan, on the main toolbar ──────────────────────────────────
+  await shot('.actions-row', '12-scan-start');
+
+  // ── 13. Photo annotator toolbar: AprilTag scale + measurement tools ───────
+  await p.evaluate(async () => {
+    const cv=document.createElement('canvas'); cv.width=8; cv.height=8;
+    const blob=await new Promise(r=>cv.toBlob(r,'image/png'));
+    openPhotoAnnotator({ id:'demo', blob, aprilTags:[7] });
+  });
+  await p.waitForTimeout(400);
+  await shot('#photoAnnotatorModal .sketch-toolbar', '13-annot-toolbar', () => {
+    const i=document.getElementById('annotScaleInfo');
+    if(i) i.textContent='Scale: 12.480 px/in (from tag)';
+  });
+  await p.evaluate(()=>{const m=document.getElementById('photoAnnotatorModal'); if(m) m.remove();});
+
+  // ── 14. Photo card actions: map/direction + 3D view per photo ─────────────
+  await shot('#guideCard .photo-actions', '14-photo-actions', () => {
+    const t=document.getElementById('photoCardTemplate');
+    const node=t.content.cloneNode(true);
+    const wrap=document.createElement('div'); wrap.id='guideCard';
+    wrap.appendChild(node);
+    document.getElementById('photoGrid').hidden=false;
+    document.getElementById('photoGrid').appendChild(wrap);
+  });
+  await shot('#guideCard .card-body', '14b-photo-meta', () => {
+    const w=document.getElementById('guideCard');
+    w.querySelector('.card-time').textContent='12 Aug 2026, 10:41';
+    w.querySelector('.photo-comment-area').textContent='Pier 3 west face — map crack at construction joint';
+    w.querySelector('.photo-apriltag-area').textContent='AprilTag 36h11: id 7';
+    w.querySelector('.photo-tags-area').textContent='Tagged elements: Pier 3 Column, Pier 3 Cap';
+  });
+
+  if (errs.length) console.log('PAGEERRORS:', errs.slice(0,4));
+  await b.close();
+})();
