@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v208";
+const BUILD_VERSION = "v209";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
