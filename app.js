@@ -1,4 +1,4 @@
-const BUILD_VERSION = "v207";
+const BUILD_VERSION = "v208";
 const BUILD_STAMP = "2026-07-31 01:45:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
@@ -2894,8 +2894,38 @@ function buildArMiniGeoData() {
   for (const pr of projs) if (pr && Array.isArray(pr.footprint)) pushPoly(pr.key || "other", pr.footprint);
   if (Array.isArray(src.footprint)) pushPoly("__outline", src.footprint);
   if (allPts.length < 3) return null;
+  // Frame on the BULK of the model, not its total extent. A single stray
+  // element far from everything else - sample models routinely have one -
+  // drags a min/max extent toward itself, which pushes the structure you
+  // actually care about off into a corner and reads as the model being
+  // mis-placed when it is centred correctly. Trimming the outer few percent
+  // of points frames what is really there; the geometry is unchanged and
+  // still drawn in full, it just no longer decides the framing.
+  // Reject outliers by median absolute deviation rather than by percentile.
+  // A percentile trim assumes strays are a fixed fraction of the points; they
+  // are not - one stray element can carry any number of vertices, and trimming
+  // enough to remove it would start eating real geometry. MAD keys off how far
+  // a point sits from the middle in units of the model's own spread, so a lone
+  // element 40 m from everything is excluded whether it has three vertices or
+  // three thousand, while a genuinely long bridge is kept whole.
+  const median = (arr) => {
+    const a = arr.slice().sort((x, y) => x - y);
+    const m = a.length >> 1;
+    return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+  };
+  const Es = allPts.map((p) => p.E), Ns = allPts.map((p) => p.N);
+  const mE = median(Es), mN = median(Ns);
+  const madE = median(Es.map((v) => Math.abs(v - mE))) * 1.4826;
+  const madN = median(Ns.map((v) => Math.abs(v - mN))) * 1.4826;
+  const K = 4;
+  const keep = allPts.filter((p) =>
+    (!(madE > 0) || Math.abs(p.E - mE) <= K * madE) &&
+    (!(madN > 0) || Math.abs(p.N - mN) <= K * madN));
+  // If the filter would throw away most of the model the spread is genuine,
+  // not an outlier, so frame everything rather than crop the structure.
+  const framePts = (keep.length >= Math.max(3, allPts.length * 0.5)) ? keep : allPts;
   let minE = Infinity, maxE = -Infinity, minN = Infinity, maxN = -Infinity;
-  for (const p of allPts) {
+  for (const p of framePts) {
     if (p.E < minE) minE = p.E; if (p.E > maxE) maxE = p.E;
     if (p.N < minN) minN = p.N; if (p.N > maxN) maxN = p.N;
   }

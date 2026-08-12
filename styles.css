@@ -1856,7 +1856,7 @@ select {
   align-items: flex-end;
   gap: 6px;
   max-width: min(92vw, 420px);
-  max-height: calc(100% - 120px);
+  max-height: max(150px, calc(100% - 120px));
   overflow-y: auto;
 }
 
@@ -1949,4 +1949,45 @@ select {
   font-size: .8rem;
   font-weight: 600;
   color: var(--muted);
+}
+
+/* ── AR bottom layout on narrow screens ── */
+/* The plan view and the move controls were both anchored at bottom:46px, one
+   left and one centred, so as the control row grew it began covering the map.
+   On a phone the map shrinks and the controls move to the right of it, so the
+   two share the strip instead of stacking on top of each other. The canvas
+   keeps its 240px backing store — arMiniEventXY converts through the client
+   rect, so pointer maths follows the displayed size automatically. */
+@media (max-width: 760px) {
+  .ar-minimap-wrap {
+    padding: 4px;
+  }
+  /* #arMiniMap is an ID selector with its own 44vw cap, so match that
+     specificity or the shrink silently loses. */
+  #arMiniMap {
+    width: 128px;
+    height: 128px;
+    max-width: 128px;
+    max-height: 128px;
+  }
+  .ar-minimap-label {
+    font-size: 0.55rem;
+    max-width: 128px;
+  }
+  .ar-move-controls {
+    left: auto;
+    right: 8px;
+    transform: none;
+    max-width: calc(100% - 196px);
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    row-gap: 6px;
+  }
+  /* Keep the read-out panel clear of the map and controls. */
+  .ar-hud-panel {
+    max-width: calc(100% - 16px);
+    /* Floor the height: calc(100% - 210px) goes negative on a short viewport
+       and clamps the whole panel to zero, hiding the controls entirely. */
+    max-height: max(150px, calc(100% - 210px));
+  }
 }
