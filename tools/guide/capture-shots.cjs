@@ -73,6 +73,10 @@ require('fs').mkdirSync(DIR, { recursive: true });
   await only(['.ar-view-header']);   await shot('.ar-view-header', '05-ar-header');
   await only(['.ar-hud-panel']);     await shot('.ar-hud-panel', '06-ar-hud');
                                      await shot('.ar-hud-panel .ar-opacity-controls:nth-of-type(3)', '06b-ground-datum');
+                                     await shot('.ar-hud-panel .ar-opacity-controls:nth-of-type(2)', '06c-fov-row', () => {
+                                       const v=document.getElementById('arFovValue');
+                                       if(v) v.textContent='78.5\u00b0 \u00b7 measured (WebXR)';
+                                     });
   await only(['.ar-move-controls']); await shot('.ar-move-controls', '07-ar-controls');
   await only(['.ar-location-display']); await shot('.ar-location-display', '07b-ar-location');
   await hide('#arViewModal');
@@ -143,6 +147,88 @@ require('fs').mkdirSync(DIR, { recursive: true });
     w.querySelector('.photo-apriltag-area').textContent='AprilTag 36h11: id 7';
     w.querySelector('.photo-tags-area').textContent='Tagged elements: Pier 3 Column, Pier 3 Cap';
   });
+
+
+  // ── 15. Tag picker: the taxonomy the report sorts and captions from ───────
+  await shot('#guideTags', '15-tag-picker', () => {
+    const tags = { general:['Elevation'], structure:['Substructure'],
+                   issues:['Spalling','Cracking'], directions:['N'] };
+    const w = document.createElement('div');
+    w.id = 'guideTags';
+    w.style.cssText = 'background:var(--surface);padding:12px;max-width:760px;';
+    w.appendChild(buildTagPicker(tags));
+    document.body.appendChild(w);
+  });
+  await p.evaluate(()=>{const e=document.getElementById('guideTags'); if(e) e.remove();});
+
+  // ── 16. Report toolbar ────────────────────────────────────────────────────
+  await shot('.actions-row[style*="flex-end"]', '16-report-toolbar', () => {
+    document.querySelectorAll('#wordReportButton,#taggedElementsButton,#exportIfcButton,#clearAllButton')
+      .forEach(b=>{b.disabled=false;});
+  });
+
+  // ── 17/18. Report preview + ordering modal ────────────────────────────────
+  await p.evaluate(async () => {
+    // openReportModal needs records with real blobs; paint a few placeholders.
+    const mk = async (i, tags, comment) => {
+      const cv=document.createElement('canvas'); cv.width=240; cv.height=180;
+      const x=cv.getContext('2d');
+      x.fillStyle=['#7f8c9b','#8b7d6b','#6b7f8b'][i%3]; x.fillRect(0,0,240,180);
+      x.fillStyle='#e8edf3'; x.font='bold 18px sans-serif';
+      x.fillText('Photo '+(i+1), 14, 100);
+      const blob = await new Promise(r=>cv.toBlob(r,'image/jpeg',0.8));
+      return { id:'demo'+i, bridgeId:'demo', blob, tags, comment,
+               createdAt:new Date(Date.UTC(2026,7,12,14,i)).toISOString(),
+               location:{lat:35.87206,lng:-78.67470}, heading:118 };
+    };
+    const empty = () => ({general:[],structure:[],issues:[],directions:[]});
+    const recs = [
+      await mk(0, {...empty(), general:['Elevation'], directions:['N']}, ''),
+      await mk(1, {...empty(), general:['Approach'], directions:['SW']}, ''),
+      await mk(2, {...empty(), issues:['Spalling'], structure:['Substructure']},
+               'Pier 3 west face - spall with exposed rebar, approx 300 x 200 mm'),
+      await mk(3, empty(), 'Deck drain outlet'),
+    ];
+    openReportModal(recs);
+  });
+  await p.waitForTimeout(600);
+  await shot('#reportModal .report-modal-sub', '17-report-options');
+  await shot('#reportModal .report-modal-body', '18-report-sections');
+  await p.evaluate(()=>{const m=document.getElementById('reportModal'); if(m) m.remove();});
+
+  // ── 19-21. Base / Rover transfer ──────────────────────────────────────────
+  const showTransfer = () => p.evaluate(() => {
+    const c=document.getElementById('peerTransferCard');
+    c.hidden=false; c.style.display='flex';
+    document.querySelectorAll('#peerTransferCard button[disabled]').forEach(b=>{b.disabled=false;});
+  });
+  await showTransfer();
+  await shot('#peerTransferCard .scan-panel-head', '19-transfer-role');
+  await shot('#peerTransferCard .peer-transfer-actions', '20-transfer-steps');
+  // The send row is hidden unless this browser is the rover.
+  await shot('#peerSendRow', '21-transfer-send', () => {
+    const r=document.getElementById('peerRoleSelect'); if(r) r.value='rover';
+    const row=document.getElementById('peerSendRow'); if(row) row.hidden=false;
+    const a=document.getElementById('peerAutoSendCheck'); if(a) a.checked=true;
+  });
+  await shot('#peerConnState', '22-transfer-state', () => {
+    const s=document.getElementById('peerConnState');
+    if(s) s.textContent='Transfer link: connected (base)';
+  });
+  await hide('#peerTransferCard');
+
+  // ── 23. Condition rating + inspection property sets in the 3D viewer ──────
+  await p.evaluate(() => {
+    const m=document.getElementById('ifcViewerModal'); m.hidden=false; m.style.display='flex';
+    document.querySelectorAll('#ifcViewerModal button[disabled]').forEach(b=>{b.disabled=false;});
+    const s=document.getElementById('ifcConditionSummary');
+    if(s) s.textContent='Condition rating 5 (poor) on 2 elements.';
+    const r=document.getElementById('ifcConditionRatingInput'); if(r) r.value='5';
+    const l=document.getElementById('ifcConditionColorLegend'); if(l) l.hidden=false;
+  });
+  await shot('#ifcViewerModeBar', '23-condition-view');
+  await shot('#ifcViewerPsets', '24-psets');
+  await hide('#ifcViewerModal');
 
   if (errs.length) console.log('PAGEERRORS:', errs.slice(0,4));
   await b.close();

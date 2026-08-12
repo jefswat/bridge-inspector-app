@@ -60,8 +60,9 @@ H1 = S("H1", ss["Heading1"], fontName="Helvetica-Bold", fontSize=17, leading=21,
        textColor=INK, spaceBefore=0, spaceAfter=3)
 H1num = S("H1num", Body, fontName="Helvetica-Bold", fontSize=9, leading=11,
           textColor=ACCENT, spaceAfter=2)
+# keepWithNext stops a subheading stranding itself at the foot of a page.
 H2 = S("H2", ss["Heading2"], fontName="Helvetica-Bold", fontSize=11.5, leading=15,
-       textColor=INK, spaceBefore=12, spaceAfter=4)
+       textColor=INK, spaceBefore=12, spaceAfter=4, keepWithNext=1)
 Cap = S("Cap", Body, fontSize=8.3, leading=11.5, textColor=MUTED, spaceBefore=4,
         spaceAfter=13)
 Li = S("Li", Body, spaceAfter=4)
@@ -195,7 +196,7 @@ story = []
 
 # ── Cover ────────────────────────────────────────────────────────────────────
 story += [
-    Spacer(1, 1.5 * inch),
+    Spacer(1, 1.05 * inch),
     Paragraph("Bridge Inspector", Title),
     Paragraph("Field Guide", Title),
     Spacer(1, 10),
@@ -207,7 +208,7 @@ story += [
     Spacer(1, 26),
     Paragraph(f"Application build <b>{BUILD}</b>", Body),
     Paragraph("Installed as a PWA. Works offline once cached.", Body),
-    Spacer(1, 40),
+    Spacer(1, 26),
     Paragraph("<b>Contents</b>", H2),
     Spacer(1, 4),
 ]
@@ -216,13 +217,16 @@ toc = [
     ("1", "Clearing the app cache"),
     ("2", "Attaching the IFC model"),
     ("3", "Starting the AR view"),
-    ("4", "Correcting for geoid height differences"),
-    ("5", "Turning on GPS"),
+    ("4", "Camera field of view"),
+    ("5", "Correcting for geoid height differences"),
+    ("6", "Turning on GPS"),
     ("Part two — What the app can do", None),
-    ("6", "Tagging photos to model elements"),
-    ("7", "Geolocating photos"),
-    ("8", "AprilTags: scale and measurement"),
-    ("9", "Pier scanning for photogrammetry"),
+    ("7", "Tagging photos to model elements"),
+    ("8", "Geolocating photos"),
+    ("9", "AprilTags: scale and measurement"),
+    ("10", "Pier scanning for photogrammetry"),
+    ("11", "Report logging"),
+    ("12", "Working as a pair: transferring between devices"),
 ]
 rows = []
 for a, b in toc:
@@ -261,7 +265,7 @@ story += [
         "Rendering or geometry looks wrong in a way that a reload does not fix.",
     ]),
     Paragraph("It is not a fix for a bad GPS fix, a wrong heading, or a model in the "
-              "wrong place. Those are covered in sections 3 to 5.", Body),
+              "wrong place. Those are covered in sections 3 to 6.", Body),
     Paragraph("How to clear it", H2),
     steps([
         "Open <b>Settings</b> from the header.",
@@ -374,31 +378,123 @@ story += [
         "The trim survives closing and reopening the view, so you calibrate once per "
         "site. Use <b>Trim</b> to throw it away when you move to a different structure.",
         Body),
-    Paragraph("Camera field of view", H2),
     Paragraph(
-        "The overlay's perspective has to match the real lens, or the model will slide "
-        "against the world as you pan even when the position and heading are right. The "
-        "default is 82° horizontal, which is the main rear lens on a typical phone.",
+        "One more thing has to be right before the overlay will hold still: the "
+        "camera's field of view. That has a section of its own, next.", Body),
+]
+
+# ── 4. Camera field of view ──────────────────────────────────────────────────
+story += heading(4, "Camera field of view")
+story += [
+    Paragraph(
+        "Position tells the app where you are. Heading tells it which way you are "
+        "looking. Field of view tells it <i>how much of the world fits on the "
+        "screen</i> — and it is the setting people skip, because a wrong FOV does "
+        "not look wrong when you hold still. It only shows up when you move.",
         Body),
+    Paragraph("What a wrong FOV looks like", H2),
+    Paragraph(
+        "The renderer draws the model through a virtual camera. If that virtual "
+        "camera's cone is wider than the real lens, everything in the overlay is "
+        "drawn smaller and closer to the centre of frame than it should be; if it is "
+        "narrower, larger and further out. Centre a pier and it will look fine. "
+        "Then pan.", Body),
     bullets([
-        "<b>Measure</b> opens a WebXR session for a moment, reads the device's own "
-        "camera projection matrix, and sets the FOV from it. Use this first — it is the "
-        "only measurement that is not a guess.",
-        "The slider is the manual fallback: pan across a recognisable edge and trim "
-        "until the overlay stops sliding.",
-        "The circular-arrow button at the end of the row discards the saved value and "
-        "returns to the 82° default.",
+        "<b>The overlay slides the way you pan and lags behind</b> — the virtual "
+        "camera is too wide. The model appears painted on a pane of glass held in "
+        "front of you rather than fixed to the world.",
+        "<b>The overlay runs ahead of the world</b> — too narrow. Features at the "
+        "edge of frame separate from their real counterparts first.",
+        "<b>The centre lines up and the edges do not</b> — this is the tell.",
     ]),
+    Paragraph(
+        "That last point is the diagnostic worth remembering. A position error moves "
+        "the whole model together. A heading error rotates it. An FOV error is zero "
+        "at the centre of the screen and grows towards the edges — so if it sits "
+        "dead on the structure in the middle of frame and splays apart at the "
+        "corners, stop adjusting position and heading and fix the FOV.", Body),
+    shot("06c-fov-row", "The Camera FOV row in the heads-up panel. The read-out "
+         "shows the angle in use and where it came from."),
+    Paragraph("Measure it, do not guess", H2),
+    Paragraph(
+        "No web API reports a camera's field of view. "
+        "<font face='Courier'>getUserMedia</font> hands back a video stream and "
+        "nothing about the optics — <font face='Courier'>getSettings()</font> and "
+        "<font face='Courier'>getCapabilities()</font> simply have no such member. "
+        "That is why the app ships an 82° horizontal default, which is a spec-sheet "
+        "figure for a typical main rear lens and not a measurement of yours.", Body),
+    Paragraph(
+        "<b>Measure</b> gets around it. WebXR does expose the real optics: an "
+        "<font face='Courier'>immersive-ar</font> session hands back a projection "
+        "matrix built from the device's own camera intrinsics, and the field of view "
+        "falls straight out of two of its terms. The button opens a session for a "
+        "moment, reads one frame, and closes it again. Do this once per phone — the "
+        "value is saved.", Body),
+    bullets([
+        "It needs a user gesture, which is why it is a button rather than something "
+        "that happens automatically at start-up.",
+        "On Android it needs ARCore (Google Play Services for AR). Without it the "
+        "button reports <i>immersive-ar unsupported</i> and you fall back to the "
+        "slider.",
+        "The screen flashes into an AR session and straight back out. That is "
+        "expected, not a crash.",
+        "One caveat: this is the FOV of the <i>XR</i> view, which need not exactly "
+        "equal the video stream's — the two can pick different sensor crops. It is a "
+        "far better starting point than a spec sheet, but the slider is still there "
+        "to trim.",
+    ]),
+    Paragraph("Trimming it by hand", H2),
+    Paragraph(
+        "When Measure is unavailable, or afterwards to fine-tune, calibrate against "
+        "the world:", Body),
+    steps([
+        "Find a long straight edge you can identify in both the model and the real "
+        "structure — a girder, a barrier, a deck joint.",
+        "Line the overlay up on it with the edge at the <b>centre</b> of the screen, "
+        "using position and heading, not the FOV slider.",
+        "Pan slowly so that edge travels out towards the side of the screen.",
+        "If the overlay's edge falls behind the real one on the way out, the FOV is "
+        "too wide — reduce it. If it runs ahead, increase it.",
+        "Repeat until the edge tracks from centre to corner without separating.",
+    ]),
+    Paragraph(
+        "The circular-arrow button at the end of the row discards the saved value "
+        "and returns to the 82° default.", Body),
     callout("The camera is pinned to 1.0×",
-            "The AR feed requests 1.0× zoom, which keeps it on the main lens. This "
-            "matters: asking for the minimum available zoom would select the 0.5× "
-            "ultrawide, whose field of view is nearer 120°, and the 82° default "
-            "would then be badly wrong. If you trimmed the FOV slider before this was "
-            "the case, hit the circular-arrow reset and re-measure.",
+            "The AR feed explicitly requests 1.0× zoom, which keeps it on the main "
+            "lens. This matters more than it sounds: asking for the minimum "
+            "available zoom would select the 0.5× ultrawide on a modern phone, whose "
+            "field of view is nearer 120°. The 82° default would then be wildly "
+            "wrong, and the overlay would swim about while every other setting was "
+            "correct. If you trimmed the FOV slider at some earlier point, reset it "
+            "and re-measure.",
             "note"),
+    Paragraph("What the app derives from the number", H2),
+    Paragraph(
+        "What you set is the horizontal field of view of the lens. That is not what "
+        "reaches the renderer — three corrections come first, which is why the "
+        "read-out can differ from the figure you entered:", Body),
+    bullets([
+        "<b>Zoom.</b> Zoom narrows what the lens shows. The feed is normally pinned "
+        "at 1.0×, but a device may clamp or refuse that, and the render angle then "
+        "has to follow.",
+        "<b>Stream shape.</b> A spec FOV is quoted across the sensor's long axis — "
+        "vertical for a portrait stream, horizontal for a landscape one — so the "
+        "conversion uses the stream's native aspect ratio, not the screen's.",
+        "<b>Cover crop.</b> The video is displayed with "
+        "<font face='Courier'>object-fit: cover</font>, which crops whichever axis "
+        "overflows. A display wider than the stream crops height, and cropped height "
+        "changes the visible vertical field of view.",
+    ]),
+    Paragraph(
+        "Only after all three does the result become the renderer's vertical FOV. "
+        "The practical consequence: <b>a value trimmed in portrait is not "
+        "automatically right in landscape</b>, because the crop differs. If you "
+        "rotate the phone and the overlay stops tracking, that is why — trim it in "
+        "the orientation you actually work in.", Body),
 ]
 # ── 4. Geoid ─────────────────────────────────────────────────────────────────
-story += heading(4, "Correcting for geoid height differences")
+story += heading(5, "Correcting for geoid height differences")
 story += [
     Paragraph("Why the model floats or sinks", H2),
     Paragraph(
@@ -451,7 +547,7 @@ story += [
     shot("07b-ar-location", "Position and eye elevation, top left of the AR view."),
 ]
 # ── 5. GPS ───────────────────────────────────────────────────────────────────
-story += heading(5, "Turning on GPS")
+story += heading(6, "Turning on GPS")
 story += [
     Paragraph(
         "The AR view can take its eye position from live GPS or from a point you pick on "
@@ -524,7 +620,7 @@ story += [
 ]
 
 # ── 6. Tagging ───────────────────────────────────────────────────────────────
-story += heading(6, "Tagging photos to model elements")
+story += heading(7, "Tagging photos to model elements")
 story += [
     Paragraph(
         "A photo of a crack is worth much more when the report knows it is "
@@ -561,7 +657,7 @@ story += [
          "the linked elements."),
 ]
 # ── 7. Geolocating photos ────────────────────────────────────────────────────
-story += heading(7, "Geolocating photos")
+story += heading(8, "Geolocating photos")
 story += [
     Paragraph(
         "Every photo is stamped with the position and the direction the phone was "
@@ -593,7 +689,7 @@ story += [
             "note"),
 ]
 # ── 8. AprilTag ──────────────────────────────────────────────────────────────
-story += heading(8, "AprilTags: scale and measurement")
+story += heading(9, "AprilTags: scale and measurement")
 story += [
     Paragraph(
         "An AprilTag is a printed fiducial marker. Put one of known size in the frame "
@@ -645,7 +741,7 @@ story += [
         "than evenly, and supplying the fan angle removes that error.", Body),
 ]
 # ── 9. Pier scanning ─────────────────────────────────────────────────────────
-story += heading(9, "Pier scanning for photogrammetry")
+story += heading(10, "Pier scanning for photogrammetry")
 story += [
     Paragraph(
         "Pier scanning captures an overlapping image set of a surface for reconstruction "
@@ -687,6 +783,204 @@ story += [
             "surface as you go. Two slow passes at different heights beat one fast pass. "
             "The automatic trigger cannot rescue a set shot too quickly from too many "
             "distances.",
+            "note"),
+]
+
+
+# ── 10. Report logging ───────────────────────────────────────────────────────
+story += heading(11, "Report logging")
+story += [
+    Paragraph(
+        "Photos belong to a bridge, and the report is generated per bridge, from "
+        "the photos in it. The generator is not a dumb photo dump: it sorts the "
+        "photos into report sections and writes a caption for each one, both "
+        "driven by the tags you put on the photo. Tagging as you shoot is what "
+        "makes the report come out right.", Body),
+    Paragraph("Tag as you go", H2),
+    Paragraph("Four tag groups. Two of them decide the report's structure.", Body),
+    bullets([
+        "<b>General</b> - Elevation, Approach, Isometric. Any of these sends the "
+        "photo to the front of the report.",
+        "<b>Issues</b> - General Defect, Spalling, Cracking, Delamination, Joint "
+        "damage, Impact. Any of these sends the photo to the defects section.",
+        "<b>Structure in Photo</b> - Substructure, Superstructure, Deck, Barrier, "
+        "Joints, Guardrail, Approach Slab, Drainage. Recorded on the photo, not "
+        "used for sorting.",
+        "<b>Direction</b> - the eight compass points. Feeds the \u201clooking "
+        "North\u201d half of a general-view caption and the arrow on the location "
+        "map. If you leave it blank the photo\u2019s own compass heading is used, "
+        "so it is only worth setting when the heading is wrong or missing.",
+    ]),
+    shot("15-tag-picker", "The tag picker. Tags are multi-select - a photo can be "
+         "both Substructure and Spalling."),
+    Paragraph("How photos are sorted and captioned", H2),
+    Paragraph(
+        "Each photo lands in exactly one section, in this priority order:", Body),
+    bullets([
+        "<b>General Views</b> - anything with a General tag, ordered Elevation, "
+        "then Approach, then Isometric, then by capture time. Caption: "
+        "\u201cBridge Elevation View looking North\u201d and the like, built from "
+        "the General tag and the direction.",
+        "<b>Observed Defects</b> - anything left with an Issues tag. Caption: "
+        "<b>your comment, used verbatim</b>. With no comment it falls back to "
+        "\u201cDefect: Spalling, Cracking\u201d - readable, but not a finding. "
+        "This is the single highest-value habit in the app: write the comment on "
+        "the defect photo and the report writes itself.",
+        "<b>Additional Photographs</b> - everything else. Caption: the comment, "
+        "else \u201cView looking Southwest\u201d, else \u201cSite photograph\u201d.",
+    ]),
+    Paragraph("Preview and reorder before generating", H2),
+    steps([
+        "Tap <b>Word Report</b> on the toolbar. It opens a preview rather than "
+        "generating straight away.",
+        "Set the bridge name / subtitle if you want one on the title block.",
+        "Tick <b>Include a location map</b> to put a satellite thumbnail with a "
+        "camera-direction arrow under every photo.",
+        "Adjust the running order: the arrows reorder within a section, the "
+        "section menu moves a photo to a different one, the image menu picks which "
+        "capture is exported when a photo has more than one, and the cross leaves a "
+        "photo out entirely.",
+        "Tap <b>Generate .docx</b>.",
+    ]),
+    shot("16-report-toolbar", "The report toolbar."),
+    shot("17-report-options", "Title-block subtitle and the location-map toggle."),
+    shot("18-report-sections", "The ordering view. Note the captions: they are "
+         "derived, and they re-derive when you move a photo to another section - "
+         "drop a general view into Observed Defects and its caption becomes the "
+         "comment."),
+    callout("Save the layout",
+            "<b>Save layout</b> stores the running order on the bridge. Next time "
+            "you open the report it is reused, as long as the set of photos is "
+            "exactly the same. Add or delete a photo and the layout is rebuilt from "
+            "the tags, so save the layout last.",
+            "note"),
+    Paragraph("What comes out", H2),
+    Paragraph(
+        "A .docx, generated entirely on the device - nothing is uploaded. US "
+        "Letter, one-inch margins, Calibri, images fitted to about 480 by 600 "
+        "points, figures numbered per section. It opens in Word for editing, which "
+        "is the point: the app produces the photo log, you write the assessment "
+        "around it.", Body),
+    callout("Location maps need a connection",
+            "The map thumbnails are Esri satellite tiles at zoom 18 with the "
+            "roads and place-names overlays composited on top, fetched at "
+            "generation time. Generate the report in signal. Without a connection "
+            "each map degrades to a schematic direction arrow on a plain "
+            "background rather than failing the export, and a photo with no GPS "
+            "location gets no map at all.",
+            "warn"),
+    Paragraph("The raw archive", H2),
+    Paragraph(
+        "<b>Download ZIP</b> on the bridge banner is the other half of reporting. "
+        "It writes out every image - primary, secondary, depth map, deskewed "
+        "versions, annotation overlays - plus point clouds, any KML overlay, and "
+        "both a <font face='Courier'>metadata.json</font> and a "
+        "<font face='Courier'>metadata.csv</font> carrying comment, tags, location, "
+        "heading, attitude and AprilTag detections for every photo. That is the "
+        "file to keep for the record, and the one to hand to anyone who wants the "
+        "data rather than the document.", Body),
+]
+
+# ── 11. Transfer between devices ─────────────────────────────────────────────
+story += heading(12, "Working as a pair: transferring between devices")
+story += [
+    Paragraph(
+        "The intended two-person setup: the lead inspector works the structure with "
+        "a phone, taking photographs; a note taker follows with a tablet, receiving "
+        "each photo as it is taken and writing it up on a bigger screen while the "
+        "lead keeps moving. The link is direct between the two devices over WebRTC "
+        "- the photos never touch a server.", Body),
+    Paragraph("Roles", H2),
+    callout("The receiver is the Base",
+            "This trips people up. <b>Base</b> is the <i>receiver</i> and drives "
+            "the pairing; <b>Rover</b> is the <i>sender</i>. So the note taker\u2019s "
+            "tablet is the Base, and the lead inspector\u2019s phone - the one "
+            "actually taking pictures - is the Rover.",
+            "note"),
+    shot("19-transfer-role", "Set the role first. Everything else is greyed or "
+         "refused until the role matches what you are trying to do."),
+    Paragraph("Pairing the two devices", H2),
+    Paragraph(
+        "There is no signalling server, so the two devices have to exchange their "
+        "connection descriptions by hand. The QR route is much faster than typing.",
+        Body),
+    steps([
+        "Both devices: open <b>Transfer</b> and set the role - tablet to Base, "
+        "phone to Rover.",
+        "<b>Tablet (Base):</b> tap <b>1) Create offer</b>, then "
+        "<b>Show local as QR</b>.",
+        "<b>Phone (Rover):</b> tap <b>Scan QR to remote</b> and read the "
+        "tablet\u2019s code, then <b>2) Apply offer + create answer</b>, then "
+        "<b>Show local as QR</b>.",
+        "<b>Tablet (Base):</b> tap <b>Scan QR to remote</b>, read the phone\u2019s "
+        "code, then <b>3) Apply answer</b>.",
+        "Watch the status line settle on <b>Transfer link: connected</b>.",
+    ]),
+    shot("20-transfer-steps", "The three pairing steps, in order. Each device only "
+         "uses the ones for its role."),
+    shot("22-transfer-state", "Connected. The log pane underneath records every "
+         "state change and every file, which is where to look when it does not."),
+    Paragraph(
+        "If a camera will not read the code, <b>Copy local SDP</b> and paste it "
+        "into the other device\u2019s <b>Remote SDP</b> box by any means you like. "
+        "<b>Reset transfer session</b> tears everything down so you can start the "
+        "sequence again, which is usually quicker than debugging a half-open link.",
+        Body),
+    Paragraph("Sending photos", H2),
+    Paragraph(
+        "The moment the link opens, the Base sends the active bridge across and the "
+        "Rover opens it - creating it locally first if the phone has never seen it. "
+        "Both devices are then filing into the same bridge. <b>Sync bridge to "
+        "rover</b> re-sends it if the lead switches bridges.", Body),
+    Paragraph("On the phone, the sending device:", Body),
+    bullets([
+        "<b>Auto-send new captures</b> - the setting that makes the workflow work. "
+        "Every photo goes across as it is saved, with no extra tap. The choice is "
+        "remembered between sessions.",
+        "<b>Send from app photos</b> - pick from what is already stored, for "
+        "catching the tablet up on a backlog.",
+        "<b>Select photos to send</b> - send files from the device that were never "
+        "captured in the app.",
+    ]),
+    shot("21-transfer-send", "The sender controls. These appear only in the Rover "
+         "role."),
+    Paragraph(
+        "Files are chunked with backpressure handling, so a big photo will not "
+        "swamp the channel, and each one is hashed - re-sending the same image to "
+        "the same bridge is skipped rather than duplicated.", Body),
+    callout("Only the image crosses the link",
+            "This is the one thing to plan around. The transfer carries the image "
+            "bytes and the capture time - <b>not</b> the GPS location, the heading, "
+            "the tags, or the AprilTag detections. A received photo lands on the "
+            "tablet with no position, no tags, and a placeholder comment of "
+            "\u201cTransferred from rover: \u2026\u201d. So a report generated on "
+            "the tablet will have no location maps and no "
+            "\u201clooking North\u201d captions for transferred photos unless the "
+            "note taker fills them in.",
+            "warn"),
+    Paragraph("So decide which device holds the record", H2),
+    Paragraph(
+        "Two workable patterns, and it is worth picking one before you start rather "
+        "than discovering the difference at the end of the day:", Body),
+    bullets([
+        "<b>Tablet writes the report.</b> The note taker is going to be typing "
+        "anyway - so they type the comment, which becomes the defect caption "
+        "verbatim, and set the tags, which decide the sections. Accept that "
+        "transferred photos carry no GPS. This is the faster pattern and it is what "
+        "the live link is for.",
+        "<b>Phone holds the record.</b> Use the tablet as a live second screen for "
+        "review only, and at the end of the day move the whole bridge across with "
+        "<b>Download ZIP</b> on the phone and <b>Import ZIP</b> on the tablet. That "
+        "path is lossless - locations, headings, tags, comments, AprilTags, "
+        "annotations and overlays all come with it - and it is the one to use when "
+        "the report needs location maps.",
+    ]),
+    callout("It works with no signal",
+            "The link is peer-to-peer. It tries a public STUN server while "
+            "gathering candidates, but gives up after eight seconds and proceeds "
+            "regardless - so two devices on the same Wi-Fi, or on one phone\u2019s "
+            "hotspot, pair and transfer with no internet at all. Which is the point, "
+            "under a bridge.",
             "note"),
 ]
 
