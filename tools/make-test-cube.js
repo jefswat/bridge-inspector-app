@@ -36,6 +36,14 @@ const CRS_DEFS = {
     "+proj=tmerc +lat_0=40.25 +lon_0=-95.7333333333333 +k=1.000039 " +
     "+x_0=5029210.05842011 +y_0=2011684.02336805 +ellps=GRS80 " +
     "+towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs",
+  "EPSG:2264":
+    "+proj=lcc +lat_0=33.75 +lon_0=-79 +lat_1=36.1666666666667 " +
+    "+lat_2=34.3333333333333 +x_0=609601.219202438 +y_0=0 +ellps=GRS80 " +
+    "+towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs",
+  "EPSG:32119":
+    "+proj=lcc +lat_0=33.75 +lon_0=-79 +lat_1=36.1666666666667 " +
+    "+lat_2=34.3333333333333 +x_0=609601.22 +y_0=0 +ellps=GRS80 " +
+    "+towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs",
 };
 
 const US_FT_PER_M = 1 / 0.3048006096012192; // US survey foot
@@ -114,10 +122,15 @@ function buildCubeIFC(opts) {
   // Model X = map easting, model Y = map northing (no grid rotation), and Scale
   // converts model metres into the CRS's US survey feet.
   const crsUnit = add("IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.)");
-  const crs = add(`IFCPROJECTEDCRS('${epsg}','Nebraska LDP (test)','NAD83','NAVD88',$,$,#${crsUnit})`);
+  // MapConversion.Scale converts the model's metres into the CRS's own units,
+  // so it has to follow the chosen CRS rather than assume US survey feet.
+  const crsIsFeet = /\+units=us-ft/.test(def);
+  const unitsPerM = crsIsFeet ? US_FT_PER_M : 1;
+  const crsLabel = epsg + (crsIsFeet ? " (ftUS)" : " (m)");
+  const crs = add(`IFCPROJECTEDCRS('${epsg}','${crsLabel}','NAD83','NAVD88',$,$,#${crsUnit})`);
   // OrthogonalHeight is 0 on purpose: the geometry's Z already holds the full
   // height above the vertical datum (see the note at the top of this file).
-  add(`IFCMAPCONVERSION(#${ctx},#${crs},${num(eastings)},${num(northings)},0.,1.,0.,${num(US_FT_PER_M)})`);
+  add(`IFCMAPCONVERSION(#${ctx},#${crs},${num(eastings)},${num(northings)},0.,1.,0.,${num(unitsPerM)})`);
 
   // --- Spatial structure ---
   const siteObjPl = add(`IFCLOCALPLACEMENT($,#${worldPlacement})`);
@@ -195,6 +208,7 @@ function buildCubeIFC(opts) {
     text: header.concat(lines, footer).join("\n") + "\n",
     eastings,
     northings,
+    crsUnits: crsIsFeet ? "us-ft" : "m",
   };
 }
 
@@ -226,7 +240,7 @@ function main() {
 
   console.log(`Wrote ${out}`);
   console.log(`  centre   ${lat.toFixed(6)}, ${lon.toFixed(6)}`);
-  console.log(`  ${epsg}  E=${built.eastings.toFixed(3)} N=${built.northings.toFixed(3)} (us-ft)`);
+  console.log(`  ${epsg}  E=${built.eastings.toFixed(3)} N=${built.northings.toFixed(3)} (${built.crsUnits})`);
   console.log(`  edge     ${sizeFt} ft = ${(sizeFt * M_PER_FT).toFixed(4)} m`);
   console.log(`  base     ${(baseElevM / M_PER_FT).toFixed(2)} ft = ${baseElevM.toFixed(4)} m`);
   console.log(`  top      ${(baseElevM / M_PER_FT + sizeFt).toFixed(2)} ft = ${(baseElevM + sizeFt * M_PER_FT).toFixed(4)} m`);

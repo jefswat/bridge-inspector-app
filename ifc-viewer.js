@@ -452,7 +452,15 @@ class IFCViewer {
    * will be null but the raw easting/northing are still returned.
    */
   static CRS_DEFS = {
-    'EPSG:7062': '+proj=tmerc +lat_0=40.25 +lon_0=-95.7333333333333 +k=1.000039 +x_0=5029210.05842011 +y_0=2011684.02336805 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs'
+    // Nebraska low-distortion projection.
+    'EPSG:7062': '+proj=tmerc +lat_0=40.25 +lon_0=-95.7333333333333 +k=1.000039 +x_0=5029210.05842011 +y_0=2011684.02336805 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs',
+    // NAD83 / North Carolina (ftUS). A projection has to be used near the zone
+    // it was designed for: 1500 km off its central meridian, EPSG:7062 carries
+    // about 3% scale error and 10 degrees of grid convergence, which would show
+    // up as a model both oversized and visibly rotated from north.
+    'EPSG:2264': '+proj=lcc +lat_0=33.75 +lon_0=-79 +lat_1=36.1666666666667 +lat_2=34.3333333333333 +x_0=609601.219202438 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs',
+    // NAD83 / North Carolina (metres) - same zone, metric.
+    'EPSG:32119': '+proj=lcc +lat_0=33.75 +lon_0=-79 +lat_1=36.1666666666667 +lat_2=34.3333333333333 +x_0=609601.22 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs',
   };
 
   /**
