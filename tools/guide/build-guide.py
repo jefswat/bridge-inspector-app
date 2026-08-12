@@ -70,7 +70,7 @@ Note = S("Note", Body, fontSize=9.2, leading=13.2, spaceAfter=0)
 Title = S("Title2", ss["Title"], fontName="Helvetica-Bold", fontSize=27, leading=32,
           textColor=INK, alignment=TA_LEFT, spaceAfter=6)
 Sub = S("Sub", Body, fontSize=12.5, leading=17, textColor=MUTED, spaceAfter=2)
-TocItem = S("TocItem", Body, fontSize=10, leading=16, spaceAfter=0)
+TocItem = S("TocItem", Body, fontSize=9, leading=14.5, spaceAfter=0)
 
 
 def shot(name, caption, width=None, crop_w=None):
@@ -214,37 +214,116 @@ story += [
 ]
 toc = [
     ("Part one — Setting up in the field", None),
-    ("1", "Clearing the app cache"),
-    ("2", "Attaching the IFC model"),
-    ("3", "Starting the AR view"),
-    ("4", "Camera field of view"),
-    ("5", "Correcting for geoid height differences"),
-    ("6", "Turning on GPS"),
+    ("1", "Bridges: the unit of work"),
+    ("2", "Clearing the app cache"),
+    ("3", "Attaching the IFC model"),
+    ("4", "Starting the AR view"),
+    ("5", "Camera field of view"),
+    ("6", "Correcting for geoid height differences"),
+    ("7", "Turning on GPS"),
     ("Part two — What the app can do", None),
-    ("7", "Tagging photos to model elements"),
-    ("8", "Geolocating photos"),
-    ("9", "AprilTags: scale and measurement"),
-    ("10", "Pier scanning for photogrammetry"),
-    ("11", "Report logging"),
-    ("12", "Working as a pair: transferring between devices"),
+    ("8", "Tagging photos to model elements"),
+    ("9", "Condition ratings and compliant IFC export"),
+    ("10", "Geolocating photos"),
+    ("11", "AprilTags: scale and measurement"),
+    ("12", "Automatic crack detection"),
+    ("13", "Pier scanning for photogrammetry"),
+    ("14", "Stereo capture and depth maps"),
+    ("15", "Report logging"),
+    ("16", "Working as a pair: transferring between devices"),
+    ("Part three — The rest of the toolbox", None),
+    ("17", "CAD overlays (KML / KMZ)"),
+    ("18", "Sketches, installing, and the debug console"),
 ]
-rows = []
-for a, b in toc:
+# Eighteen sections plus three part headings no longer fit one column on the
+# cover, so the contents runs in two: down the left, then down the right.
+def toc_cell(a, b):
     if b is None:
-        rows.append([Paragraph(f"<b>{a}</b>", TocItem), ""])
-    else:
-        rows.append([Paragraph(f"<font color='#2563eb'><b>{a}</b></font>&nbsp;&nbsp;&nbsp;{b}",
-                               TocItem), ""])
-story.append(Table(rows, colWidths=[CONTENT_W * 0.75, CONTENT_W * 0.25],
+        return Paragraph(f"<b>{a}</b>", TocItem)
+    return Paragraph(
+        f"<font color='#2563eb'><b>{a}</b></font>&nbsp;&nbsp;&nbsp;{b}", TocItem)
+
+
+cells = [toc_cell(a, b) for a, b in toc]
+split = (len(cells) + 1) // 2
+left, right = cells[:split], cells[split:]
+right += [""] * (len(left) - len(right))
+story.append(Table(list(zip(left, right)),
+                   colWidths=[CONTENT_W * 0.5, CONTENT_W * 0.5],
                    style=TableStyle([
-                       ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                       ("LEFTPADDING", (0, 0), (0, -1), 0),
+                       ("LEFTPADDING", (1, 0), (1, -1), 12),
+                       ("RIGHTPADDING", (0, 0), (-1, -1), 0),
                        ("TOPPADDING", (0, 0), (-1, -1), 1),
                        ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+                       ("VALIGN", (0, 0), (-1, -1), "TOP"),
                    ])))
 story += [NextPageTemplate("body"), PageBreak()]
 
-# ── 1. Clearing the app cache ────────────────────────────────────────────────
-story += heading(1, "Clearing the app cache")
+# ── 1. Bridges ───────────────────────────────────────────────────────────────
+story += heading(1, "Bridges: the unit of work")
+story += [
+    Paragraph(
+        "Nothing in the app is loose. Every photo, sketch, scan set, tag, IFC model, "
+        "CAD overlay and report belongs to a <b>bridge</b>, and you work inside one "
+        "at a time. The first screen is the list of them.", Body),
+    shot("25-bridges-actions", "The four ways to get a bridge into the app."),
+    Paragraph("Four ways in", H2),
+    bullets([
+        "<b>New bridge</b> — a blank one with a title and description you type. Fine "
+        "for a structure you are only visiting once.",
+        "<b>Import by NBI #</b> — pull it straight out of the National Bridge "
+        "Inventory. The fastest correct option when you have the structure number.",
+        "<b>Bridges Near Me</b> — for when you do not. Uses your GPS and the NBI "
+        "coordinates to list what is around you.",
+        "<b>Import ZIP</b> — restore a bridge someone else archived, or one from a "
+        "previous device. This is the lossless path: photos, tags, comments, "
+        "locations, headings, AprilTag detections, annotations and the CAD overlay "
+        "all come back.",
+    ]),
+    Paragraph("Importing from the NBI", H2),
+    steps([
+        "Tap <b>Import by NBI #</b>.",
+        "Pick the state. The count beside each is how many structures it holds.",
+        "Paste the structure number, or several — one per line or comma separated.",
+        "Tap <b>Look up</b>, check the matches, then <b>Import selected</b>.",
+    ]),
+    shot("27-nbi-import", "Several numbers at once is the normal case — build the "
+         "day's route in one go before you leave."),
+    Paragraph(
+        "An imported bridge arrives titled from the NBI record, described as "
+        "<i>feature crossed &middot; year built &middot; NBI number</i>, and carries "
+        "the inventory coordinates as its location — which is what puts it on the map "
+        "before you have taken a single photo.", Body),
+    Paragraph("Finding what is around you", H2),
+    Paragraph(
+        "<b>Bridges Near Me</b> takes your current fix and searches the inventory "
+        "around it. Set a radius in miles and a result cap; the scope defaults to "
+        "auto-detecting your state, and widens to all states if you are near a line. "
+        "Results come back on a map and as a list — pick one and import it.", Body),
+    shot("28-nbi-near", "Radius, result cap and scope."),
+    callout("The inventory is bundled, not fetched",
+            "NBI data ships with the app as per-state files, so both of these work "
+            "with no connection once the app is cached. The consequence is that it is "
+            "a snapshot: as current as the build you are running, not as current as "
+            "the FHWA's servers.",
+            "note"),
+    Paragraph("Working inside a bridge", H2),
+    Paragraph(
+        "Opening one swaps to the workspace. The banner across the top is where the "
+        "bridge-level actions live.", Body),
+    shot("26-bridge-banner", "Back to the list, edit the title and description, "
+         "archive the whole thing to ZIP, open the 3D model, or open the "
+         "device-to-device transfer panel."),
+    callout("Deleting a bridge deletes its contents",
+            "Removing a bridge removes its photos, sketches, scans and its stored IFC "
+            "with it. The app confirms with the photo count in the prompt, but there "
+            "is no undo — take a ZIP first if there is any doubt.",
+            "warn"),
+]
+
+# ── 2. Clearing the app cache ────────────────────────────────────────────────
+story += heading(2, "Clearing the app cache")
 story += [
     Paragraph(
         "The app is a PWA. A service worker precaches every file it needs — HTML, "
@@ -265,7 +344,7 @@ story += [
         "Rendering or geometry looks wrong in a way that a reload does not fix.",
     ]),
     Paragraph("It is not a fix for a bad GPS fix, a wrong heading, or a model in the "
-              "wrong place. Those are covered in sections 3 to 6.", Body),
+              "wrong place. Those are covered in sections 4 to 7.", Body),
     Paragraph("How to clear it", H2),
     steps([
         "Open <b>Settings</b> from the header.",
@@ -287,8 +366,8 @@ story += [
             "standing under the structure you came to inspect.",
             "warn"),
 ]
-# ── 2. Attaching the IFC ─────────────────────────────────────────────────────
-story += heading(2, "Attaching the IFC model")
+# ── 3. Attaching the IFC ─────────────────────────────────────────────────────
+story += heading(3, "Attaching the IFC model")
 story += [
     Paragraph(
         "The IFC is loaded into the 3D viewer, and everything else — the AR overlay, "
@@ -331,8 +410,8 @@ story += [
             "trust a production model on site.",
             "note"),
 ]
-# ── 3. Starting the AR view ──────────────────────────────────────────────────
-story += heading(3, "Starting the AR view")
+# ── 4. Starting the AR view ──────────────────────────────────────────────────
+story += heading(4, "Starting the AR view")
 story += [
     Paragraph(
         "The AR view draws the loaded model over the live camera feed, positioned from "
@@ -341,7 +420,7 @@ story += [
         "the fix and the compass — which is what the controls in this section and the "
         "next two are for.", Body),
     steps([
-        "Load the IFC first (section 2). Without a model there is nothing to overlay.",
+        "Load the IFC first (section 3). Without a model there is nothing to overlay.",
         "From the main screen, tap <b>Augmented reality view</b>.",
         "Allow camera access when prompted, and location access if you have not already.",
         "Confirm the header reads <b>Camera: On</b>.",
@@ -383,8 +462,8 @@ story += [
         "camera's field of view. That has a section of its own, next.", Body),
 ]
 
-# ── 4. Camera field of view ──────────────────────────────────────────────────
-story += heading(4, "Camera field of view")
+# ── 5. Camera field of view ──────────────────────────────────────────────────
+story += heading(5, "Camera field of view")
 story += [
     Paragraph(
         "Position tells the app where you are. Heading tells it which way you are "
@@ -493,8 +572,8 @@ story += [
         "rotate the phone and the overlay stops tracking, that is why — trim it in "
         "the orientation you actually work in.", Body),
 ]
-# ── 4. Geoid ─────────────────────────────────────────────────────────────────
-story += heading(5, "Correcting for geoid height differences")
+# ── 6. Geoid ─────────────────────────────────────────────────────────────────
+story += heading(6, "Correcting for geoid height differences")
 story += [
     Paragraph("Why the model floats or sinks", H2),
     Paragraph(
@@ -546,8 +625,8 @@ story += [
         "floating above or below it.", Body),
     shot("07b-ar-location", "Position and eye elevation, top left of the AR view."),
 ]
-# ── 5. GPS ───────────────────────────────────────────────────────────────────
-story += heading(6, "Turning on GPS")
+# ── 7. GPS ───────────────────────────────────────────────────────────────────
+story += heading(7, "Turning on GPS")
 story += [
     Paragraph(
         "The AR view can take its eye position from live GPS or from a point you pick on "
@@ -614,13 +693,15 @@ story += [
     Paragraph(
         "Everything in part one exists to get the model standing in the right place. "
         "This part covers what that buys you: photos that know which element they are "
-        "of, photos that know where they were taken, measurements off a photo with no "
-        "tape, and image sets a photogrammetry pipeline can actually use.", Lead),
+        "of, condition ratings that go back into the IFC, photos that know where they "
+        "were taken, measurements off a photograph with no tape, image sets a "
+        "photogrammetry pipeline can use — and the report that comes out of all of "
+        "it.", Lead),
     PageBreak(),
 ]
 
-# ── 6. Tagging ───────────────────────────────────────────────────────────────
-story += heading(7, "Tagging photos to model elements")
+# ── 8. Tagging ───────────────────────────────────────────────────────────────
+story += heading(8, "Tagging photos to model elements")
 story += [
     Paragraph(
         "A photo of a crack is worth much more when the report knows it is "
@@ -656,8 +737,72 @@ story += [
     shot("14b-photo-meta", "A photo card's metadata: time, comment, detected tag, and "
          "the linked elements."),
 ]
-# ── 7. Geolocating photos ────────────────────────────────────────────────────
-story += heading(8, "Geolocating photos")
+# ── 9. Condition ratings ─────────────────────────────────────────────────────
+story += heading(9, "Condition ratings and compliant IFC export")
+story += [
+    Paragraph(
+        "Tagging a photo to an element says <i>this is a picture of that column</i>. "
+        "Rating an element says <i>that column is a 5</i>. The second is what an "
+        "owner's asset system actually wants, and the app writes it back into the IFC "
+        "as standard property sets.", Body),
+    Paragraph("Rating elements", H2),
+    steps([
+        "Open the 3D viewer with the model loaded and click the element, or several.",
+        "Type the rating in <b>Condition rating</b>. It takes an NBI-style number or "
+        "a word — <i>6</i> or <i>Fair</i> both work.",
+        "Tap <b>Apply to selected element(s)</b>. The summary line underneath "
+        "confirms what was written and to how many elements.",
+    ]),
+    shot("24-psets", "Element ratings on top, the model-wide inspection record "
+         "underneath."),
+    Paragraph(
+        "That second card is written once per model rather than per element: "
+        "inspection date, inspector name and firm. <b>Add inspection property set</b> "
+        "attaches it at project level, so the exported file carries who did the "
+        "inspection and when.", Body),
+    Paragraph("Seeing the ratings", H2),
+    Paragraph(
+        "<b>Condition assignment view</b> recolours the model by rating, which turns "
+        "a column of numbers into something you can read at a glance — and makes it "
+        "obvious which elements you have not got to yet.", Body),
+    shot("23-condition-view", "The toggle and its legend: 0-3 critical, 4-5 poor, "
+         "6-7 fair, 8-9 good."),
+    Paragraph("Which elements have photographs", H2),
+    Paragraph(
+        "<b>Tagged elements</b> on the toolbar lists every element in the bridge that "
+        "has photos tagged to it, with a thumbnail strip and a count against each. "
+        "Click a thumbnail to jump to the photo. It is the quickest way to see the "
+        "coverage you have — and the gaps.", Body),
+    shot("29-tagged-elements", "Empty until you tag something; section 8 covers the "
+         "tagging itself."),
+    Paragraph("Exporting", H2),
+    Paragraph(
+        "<b>Export compliant IFC</b> takes the original model text and appends real "
+        "IFC entities to it — an <font face='Courier'>IfcPropertySet</font> plus an "
+        "<font face='Courier'>IfcRelDefinesByProperties</font> per write. Element "
+        "ratings go out as "
+        "<font face='Courier'>Pset_BridgeInspectionElementCondition</font> attached to "
+        "the element; the inspection record goes out as "
+        "<font face='Courier'>Pset_BridgeInspection</font> attached to the project.",
+        Body),
+    steps([
+        "Tap <b>Export compliant IFC</b>.",
+        "Check the preview — it says how many project-level and element-level sets "
+        "are about to be written.",
+        "Confirm. The file downloads as "
+        "<i>&lt;bridge&gt;-inspection-psets-&lt;date&gt;.ifc</i>.",
+    ]),
+    callout("It needs the original file, and something to write",
+            "The export re-reads the source IFC text so the output is the real model "
+            "with your property sets added, not a stripped-down re-emit — so have the "
+            "original to hand. And it refuses to run with nothing to export: add at "
+            "least one condition rating or the inspection metadata first, or you get "
+            "<i>No IFC property sets to export yet</i>.",
+            "note"),
+]
+
+# ── 10. Geolocating photos ────────────────────────────────────────────────────
+story += heading(10, "Geolocating photos")
 story += [
     Paragraph(
         "Every photo is stamped with the position and the direction the phone was "
@@ -687,9 +832,22 @@ story += [
             "waiting for a better fix at the time. The direction arrow is normally "
             "right even when the position is not.",
             "note"),
+    Paragraph("Seeing the whole day at once", H2),
+    Paragraph(
+        "<b>Map summary</b> in the header opens every geolocated photo in the bridge "
+        "on one satellite map. Each photo is an arrow pointing the way the camera was "
+        "facing, so the coverage pattern is visible at a glance — which faces you "
+        "worked and which you circled without shooting. Click a marker to open the "
+        "photo with its metadata beside it.", Body),
+    Paragraph(
+        "It also draws the loaded IFC's footprint and its projection onto the map, and "
+        "restores the bridge's CAD overlay underneath — so photo positions can be read "
+        "against the model and the drawing rather than against bare imagery. "
+        "Overlays are covered in section 17.", Body),
+    shot("36-header", "Map summary sits next to the build number in the header."),
 ]
-# ── 8. AprilTag ──────────────────────────────────────────────────────────────
-story += heading(9, "AprilTags: scale and measurement")
+# ── 11. AprilTag ──────────────────────────────────────────────────────────────
+story += heading(11, "AprilTags: scale and measurement")
 story += [
     Paragraph(
         "An AprilTag is a printed fiducial marker. Put one of known size in the frame "
@@ -740,8 +898,44 @@ story += [
         "<i>angles</i>, so its dots spread as tan(angle) on a flat surface rather "
         "than evenly, and supplying the fan angle removes that error.", Body),
 ]
-# ── 9. Pier scanning ─────────────────────────────────────────────────────────
-story += heading(10, "Pier scanning for photogrammetry")
+# ── 12. Crack detection ──────────────────────────────────────────────────────
+story += heading(12, "Automatic crack detection")
+story += [
+    Paragraph(
+        "Every photo card carries a <b>Cracks</b> button. It runs a detector over the "
+        "image, paints what it finds in red on top, and reports the cracked area as a "
+        "percentage of the frame.", Body),
+    shot("30-crack-bar", "The control strip, over the photo. The percentage is live — "
+         "it re-runs as you move the sensitivity slider."),
+    bullets([
+        "<b>Sensitivity</b> — the whole point of the slider is that you sweep it. "
+        "Wind it up until noise appears, back off until only the real features "
+        "survive, and read the number there.",
+        "<b>Ignore vertical lines</b> — on by default. Form lines, lift joints and "
+        "conduit runs are vertical and get picked up as cracks otherwise. Turn it off "
+        "when you are actually looking at vertical cracking.",
+        "<b>Save</b> — composites the red overlay onto the full-resolution photo and "
+        "downloads it. The original photo in the app is untouched.",
+        "<b>Hide</b> / <b>Show</b> — toggle the overlay so you can compare against the "
+        "bare image.",
+    ]),
+    Paragraph(
+        "It runs on whichever version of the photo is on display, so if you have "
+        "rectified a shot with the grid tool the detector sees the rectified image — "
+        "which is the one you want, because in a rectified frame the percentage means "
+        "something geometrically.", Body),
+    callout("A screening aid, not a measurement",
+            "The percentage is cracked <i>area of the frame</i>, so it depends on how "
+            "close you stood and what else is in shot. It is good for ranking which "
+            "faces need attention and for showing that something changed between "
+            "cycles at the same standoff. It is not a crack width, and it should not "
+            "go into a report as one. For widths, put an AprilTag in frame and "
+            "measure off the photo — section 11.",
+            "warn"),
+]
+
+# ── 13. Pier scanning ─────────────────────────────────────────────────────────
+story += heading(13, "Pier scanning for photogrammetry")
 story += [
     Paragraph(
         "Pier scanning captures an overlapping image set of a surface for reconstruction "
@@ -787,8 +981,73 @@ story += [
 ]
 
 
-# ── 10. Report logging ───────────────────────────────────────────────────────
-story += heading(11, "Report logging")
+# ── 14. Stereo and depth ─────────────────────────────────────────────────────
+story += heading(14, "Stereo capture and depth maps")
+story += [
+    Paragraph(
+        "With a second camera attached, the app can capture a stereo pair and turn it "
+        "into a depth map and a point cloud stored alongside the photograph. This is "
+        "the most involved feature in the app and the one with a hard external "
+        "dependency, so read the box below before you plan a day around it.", Body),
+    callout("This needs a depth server running",
+            "The stereo pipeline does not run in the browser. It talks to a local "
+            "depth server over a WebSocket on <font face='Courier'>localhost:8765</font>, "
+            "and that server is a separate program that is <b>not</b> shipped in this "
+            "repository. Without it, Depth map mode connects to nothing and the depth "
+            "controls do nothing. Everything else in this guide works standalone; this "
+            "section does not.",
+            "warn"),
+    Paragraph("Setting the cameras up", H2),
+    steps([
+        "Open <b>Settings</b>, then the <b>Camera</b> card.",
+        "Pick the <b>Main camera</b> if the device offers more than one. "
+        "<b>Flip camera</b> swaps front and rear.",
+        "Pick the <b>2nd camera</b> and tap <b>Start 2nd</b>. Its preview appears "
+        "beside the main one.",
+        "Tick <b>Depth map mode</b>. The second camera is treated as the right eye, "
+        "so mount it to the right of the main one.",
+    ]),
+    shot("31-camera-depth", "The Camera card with a second camera running and depth "
+         "mode on."),
+    bullets([
+        "<b>Depth detail</b> — sharp against filled. Sharp keeps edges honest and "
+        "leaves holes where the match failed; filled interpolates across them and "
+        "looks better at the cost of inventing surface.",
+        "<b>Depth cutoff</b> — 0.25 m to 4 m. Everything beyond it is discarded, which "
+        "keeps a pier face from being buried under the background behind it.",
+    ]),
+    Paragraph("Calibrating the pair", H2),
+    Paragraph(
+        "Stereo depth is metric only if the geometry of the pair is known. Two ways "
+        "to supply it:", Body),
+    shot("32-stereo-calib", "Enter known intrinsics, or let the checkerboard routine "
+         "solve for them."),
+    bullets([
+        "<b>Type the numbers</b> — focal length in pixels, baseline in millimetres, "
+        "the principal point, and the disparity search range. Use this when you have "
+        "a spec sheet or a previous calibration.",
+        "<b>Auto-calibrate with checkerboard</b> — show a <b>9&times;6 inner-corner</b> "
+        "checkerboard (that is 10&times;7 squares) to <b>both</b> lenses at once. It "
+        "collects 15 frames; tilt and move the board between them rather than holding "
+        "it still, and fill different parts of the frame.",
+    ]),
+    Paragraph(
+        "Baseline is the measurement people get wrong: it is the distance between the "
+        "two lens centres, and an error there scales every depth you produce.", Body),
+    Paragraph("What a capture stores", H2),
+    Paragraph(
+        "In depth mode a capture writes three things against one record — the "
+        "photograph, the depth map as an image, and a PLY point cloud. All three go "
+        "into the bridge ZIP, the depth map under "
+        "<font face='Courier'>images/</font> and the cloud under "
+        "<font face='Courier'>pointclouds/</font>, so the pair can be taken into "
+        "whatever you use downstream. The report generator can also export the depth "
+        "map instead of the photo for a given figure, which is occasionally the "
+        "clearer illustration of a spall.", Body),
+]
+
+# ── 15. Report logging ───────────────────────────────────────────────────────
+story += heading(15, "Report logging")
 story += [
     Paragraph(
         "Photos belong to a bridge, and the report is generated per bridge, from "
@@ -881,8 +1140,8 @@ story += [
         "data rather than the document.", Body),
 ]
 
-# ── 11. Transfer between devices ─────────────────────────────────────────────
-story += heading(12, "Working as a pair: transferring between devices")
+# ── 16. Transfer between devices ─────────────────────────────────────────────
+story += heading(16, "Working as a pair: transferring between devices")
 story += [
     Paragraph(
         "The intended two-person setup: the lead inspector works the structure with "
@@ -982,6 +1241,109 @@ story += [
             "hotspot, pair and transfer with no internet at all. Which is the point, "
             "under a bridge.",
             "note"),
+]
+
+# ── Part three divider ───────────────────────────────────────────────────────
+story.append(PageBreak())
+story += [
+    Spacer(1, 0.9 * inch),
+    Paragraph("Part three", Sub),
+    Paragraph("The rest of the toolbox", Title),
+    Spacer(1, 8),
+    Table([[""]], colWidths=[2.2 * inch], rowHeights=[2.6],
+          style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), ACCENT)])),
+    Spacer(1, 18),
+    Paragraph(
+        "Smaller things that do not belong to any one workflow, but that you will "
+        "want at some point: getting your own drawings onto the maps, drawing a "
+        "sketch when a photograph will not do, installing the app properly, and "
+        "getting an error log out of it when something misbehaves.", Lead),
+    PageBreak(),
+]
+
+# ── 17. CAD overlays ─────────────────────────────────────────────────────────
+story += heading(17, "CAD overlays (KML / KMZ)")
+story += [
+    Paragraph(
+        "You can drop your own drawing onto every map in the app — a general "
+        "arrangement, a deck plan, a scour survey, anything you can get out of CAD or "
+        "GIS as KML or KMZ. Once loaded it appears under the bridge map, under the "
+        "photo location editor, and on the map summary, so photo positions can be "
+        "read against the drawing rather than against bare satellite imagery.", Body),
+    shot("33-kml-overlay", "The CAD Overlay card in Settings."),
+    steps([
+        "Open <b>Settings</b> and find <b>CAD Overlay (KML / KMZ)</b>.",
+        "Tap <b>Load file</b> and pick a .kml or .kmz.",
+        "Set the opacity so the imagery still reads underneath. The setting is "
+        "remembered.",
+    ]),
+    Paragraph("What it handles", H2),
+    bullets([
+        "<b>KMZ</b> is unpacked in the browser. Images inside it are extracted and "
+        "embedded, so a KMZ with a raster ground overlay works offline afterwards — "
+        "nothing is fetched at draw time.",
+        "<b>Ground overlays</b> both ways: an axis-aligned "
+        "<font face='Courier'>LatLonBox</font>, including its rotation, and a "
+        "four-corner <font face='Courier'>gx:LatLonQuad</font> for a drawing that is "
+        "not north-up.",
+        "<b>Vector features</b> — paths and placemarks drawn over the map.",
+    ]),
+    Paragraph(
+        "The overlay is stored against the bridge, so each structure carries its own "
+        "drawing and switching bridges switches drawings. It is included in "
+        "<b>Download ZIP</b> — the original file where one was supplied, so what comes "
+        "out is what went in.", Body),
+    callout("Georeference it before you load it",
+            "The app places the overlay exactly where the KML says to. If the drawing "
+            "lands in the wrong field, the problem is upstream in whatever exported "
+            "it, and no control here will fix it. Check it against the satellite "
+            "basemap the first time you load it, at low opacity, before you rely on "
+            "it in the field.",
+            "warn"),
+]
+
+# ── 18. Odds and ends ────────────────────────────────────────────────────────
+story += heading(18, "Sketches, installing, and the debug console")
+story += [
+    Paragraph("Sketches", H2),
+    Paragraph(
+        "<b>Sketch</b> on the main toolbar opens a blank canvas. Draw with a finger or "
+        "a stylus — swatches, a custom colour, brush size, eraser, undo, clear.", Body),
+    shot("35-sketch-toolbar", "The sketch toolbar."),
+    Paragraph(
+        "The important part is what happens on save: a sketch is stored as a "
+        "<b>photo record</b>, with the same comment, tags and location as a "
+        "photograph. So it sorts into the report through exactly the same rules — tag "
+        "it with an Issue and it lands in Observed Defects with your comment as its "
+        "caption. Use it for the things a camera cannot capture: a crack map across a "
+        "whole face, a sketch of what is behind the fascia, a detail you can see but "
+        "not photograph.", Body),
+    Paragraph("Installing the app", H2),
+    Paragraph(
+        "<b>Install App</b> appears in the header when the browser offers it. "
+        "Installing makes it a standalone app with its own icon, and it is what makes "
+        "offline reliable rather than merely likely — an installed PWA keeps its cache "
+        "and its stored data rather than competing with the browser's own housekeeping.",
+        Body),
+    shot("36-header", "The header: build number beside the title, the map summary "
+         "link, Settings, Transfer, and Install App when it is available."),
+    Paragraph(
+        "The build number next to the title is worth knowing where to find. It is the "
+        "first thing to check when something described in this guide is not where it "
+        "should be — see section 2.", Body),
+    Paragraph("The debug console", H2),
+    Paragraph(
+        "Errors that would normally land in a browser console are invisible on a "
+        "phone. <b>Show error log</b> in Settings puts them on screen in a panel at "
+        "the bottom, with <b>Copy</b> to put the whole log on the clipboard and "
+        "<b>Clear</b> to start a fresh one.", Body),
+    shot("34-debug-console", "Off by default. Turn it on before reproducing a "
+         "problem, not after."),
+    Paragraph(
+        "When something misbehaves in the field, the useful sequence is: turn the log "
+        "on, do the thing that fails, copy the log, and send it with a note of the "
+        "build number. That is usually enough to identify the fault without anyone "
+        "having to reproduce it on the structure.", Body),
 ]
 
 # ── Build ────────────────────────────────────────────────────────────────────

@@ -230,6 +230,100 @@ require('fs').mkdirSync(DIR, { recursive: true });
   await shot('#ifcViewerPsets', '24-psets');
   await hide('#ifcViewerModal');
 
+
+  // ── 25-28. Bridges overview, banner, NBI import, Bridges Near Me ──────────
+  await shot('.bridges-head-actions', '25-bridges-actions', () => {
+    document.getElementById('bridgesView').hidden = false;
+  });
+  await shot('.bridge-banner', '26-bridge-banner', () => {
+    document.getElementById('bridgesView').hidden = true;
+    document.getElementById('appView').hidden = false;
+    document.getElementById('bridgeBannerTitle').textContent = 'Main St over Neuse River';
+    document.getElementById('bridgeBannerDesc').textContent =
+      'Wake County, NC · Built 1974 · NBI 910079';
+  });
+
+  await p.evaluate(() => { openNbiImport(); });
+  await p.waitForTimeout(900);
+  await shot('#nbiImport .bridge-dialog', '27-nbi-import', () => {
+    const t=document.getElementById('nbiNumbers'); if(t) t.value='910079\n883039900';
+  });
+  await p.evaluate(()=>{const m=document.getElementById('nbiImport'); if(m) m.remove();});
+
+  await p.evaluate(() => { void openNbiNearMe(); });
+  await p.waitForTimeout(900);
+  await shot('#nbiNearMe .nbi-near-controls', '28-nbi-near');
+  await p.evaluate(()=>{const m=document.getElementById('nbiNearMe'); if(m) m.remove();});
+
+  // ── 29. Tagged elements index ─────────────────────────────────────────────
+  await p.evaluate(() => { void openTaggedElementsModal(); });
+  await p.waitForTimeout(600);
+  await shot('.tagged-el-list, .ifc-tagged-empty', '29-tagged-elements');
+  await p.evaluate(()=>{
+    document.querySelectorAll('.settings-modal').forEach(m=>{
+      if (m.querySelector('.tagged-el-list, .ifc-tagged-empty')) m.remove();
+    });
+  });
+
+  // ── 30. Automatic crack detection ─────────────────────────────────────────
+  await p.evaluate(async () => {
+    const cv=document.createElement('canvas'); cv.width=420; cv.height=300;
+    const x=cv.getContext('2d');
+    x.fillStyle='#9aa3ad'; x.fillRect(0,0,420,300);
+    // A few dark lines so the detector has something to find.
+    x.strokeStyle='#2b2f35'; x.lineWidth=2;
+    x.beginPath(); x.moveTo(30,40); x.lineTo(180,150); x.lineTo(250,120); x.stroke();
+    x.beginPath(); x.moveTo(60,250); x.lineTo(300,210); x.stroke();
+    const blob=await new Promise(r=>cv.toBlob(r,'image/jpeg',0.9));
+    const t=document.getElementById('photoCardTemplate');
+    const frag=t.content.cloneNode(true);
+    const wrap=document.createElement('div'); wrap.id='crackCard';
+    wrap.appendChild(frag);
+    const grid=document.getElementById('photoGrid');
+    grid.hidden=false; grid.appendChild(wrap);
+    const card=wrap.querySelector('.photo-card');
+    card.querySelector('.main-img').src=URL.createObjectURL(blob);
+    attachCrackTool(card, { id:'crackdemo', blob });
+    const btn=[...card.querySelectorAll('.photo-actions button')]
+      .find(b=>b.textContent.includes('Cracks'));
+    if (btn) btn.click();
+  });
+  await p.waitForTimeout(2500);
+  await shot('#crackCard .crack-bar', '30-crack-bar');
+  await p.evaluate(()=>{const e=document.getElementById('crackCard'); if(e) e.remove();});
+
+  // ── 31-34. Settings: camera, depth, calibration, CAD overlay, debug ───────
+  const settings = () => p.evaluate(() => {
+    const m=document.getElementById('settingsModal'); m.hidden=false; m.style.display='flex';
+    document.querySelectorAll('#settingsModal button[disabled]').forEach(b=>{b.disabled=false;});
+    ['cameraSelector','mainCameraSelector','depthModeRow','refineRow','cutoffRow','calibPanel',
+     'startThermalButton','stopThermalButton','kmlOpacityRow','clearKmlButton']
+      .forEach(id=>{const e=document.getElementById(id); if(e){e.hidden=false;
+        if (e.style.display==='none') e.style.display='';}});
+    const c=document.getElementById('depthModeCheck'); if(c) c.checked=true;
+    const k=document.getElementById('kmlFileName'); if(k) k.textContent='deck-plan.kmz';
+    const ks=document.getElementById('kmlStatus');
+    if(ks) ks.textContent='Overlay loaded: 1 ground overlay, 34 paths. Shown on every map.';
+  });
+  await settings();
+  await shot('#settingsModal .settings-body section.card:nth-of-type(2)', '31-camera-depth');
+  await shot('#calibPanel', '32-stereo-calib');
+  await shot('#settingsModal .settings-body section.card:nth-of-type(3)', '33-kml-overlay');
+  await shot('#settingsModal .settings-body section.card:nth-of-type(4)', '34-debug-console');
+  await hide('#settingsModal');
+
+  // ── 35. Sketch ────────────────────────────────────────────────────────────
+  await p.evaluate(() => { openSketchModal(); });
+  await p.waitForTimeout(500);
+  await shot('#sketchModal .sketch-toolbar', '35-sketch-toolbar');
+  await p.evaluate(()=>{const m=document.getElementById('sketchModal'); if(m) m.remove();});
+
+  // ── 36. Header: map summary link and Install App ──────────────────────────
+  await shot('header', '36-header', () => {
+    document.getElementById('installButton').hidden=false;
+    document.getElementById('openSettingsButton').hidden=false;
+  });
+
   if (errs.length) console.log('PAGEERRORS:', errs.slice(0,4));
   await b.close();
 })();
