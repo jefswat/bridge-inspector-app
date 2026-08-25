@@ -398,11 +398,13 @@ story += [
         "position, and the source of the model's ground elevation.",
     ]),
     Paragraph(
-        "The projected CRS has to be one the app knows. The supported list is currently "
-        "EPSG:7062 (Nebraska LDP, ftUS), EPSG:2264 and EPSG:32119 (North Carolina, ftUS "
-        "and metric), and EPSG:2263 and EPSG:32118 (New York Long Island, ftUS and "
-        "metric). A model in any other CRS will load and display, but it will not "
-        "georeference, and the AR view will have nothing to anchor to.", Body),
+        "The projected CRS has to be one the app knows — it is a fixed list in the "
+        "code, not a lookup. Currently: EPSG:7062 (Nebraska LDP, ftUS); EPSG:2264 "
+        "and EPSG:32119 (North Carolina, ftUS and metric); EPSG:2263 and EPSG:32118 "
+        "(New York Long Island, ftUS and metric); and EPSG:3418 and EPSG:26976 "
+        "(Iowa South, ftUS and metric). A model in any other CRS will load and "
+        "display, but it will not georeference, and the AR view will have nothing "
+        "to anchor to — adding a zone is a code change, not a setting.", Body),
     callout("Test models",
             "The repository ships georeferenced test files under <b>test-models/</b> — "
             "a 12&nbsp;ft cube and the InfraBridge model, each built for a specific "

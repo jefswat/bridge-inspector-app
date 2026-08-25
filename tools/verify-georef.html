@@ -1,0 +1,101 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>relocation check</title>
+<div id="c" style="width:600px;height:400px"></div>
+<script src="vendor/three.min.js"></script>
+<script src="vendor/proj4.js"></script>
+<script src="ifc-viewer.js"></script>
+<script>
+// Loads a relocated IFC through the app's own IFCViewer and reports where its
+// geometry actually lands, so the check exercises the same path the app does.
+//
+// One trap: loadIFCFile() ends with fitCameraToObject(), which BAKES a
+// re-centering translation and a +90 degree X rotation into the geometry. So
+// world coordinates after load are not true model coordinates, and inverting
+// the coordination matrix alone does not recover them - that mistake made a
+// known-good file look 48 m out.
+//
+// Both the bake and the coordination are rigid, so instead of trying to undo
+// them this measures the robust centre as an OFFSET from the bounding-box
+// centre in baked space (where x = easting, y = northing, z = elevation) and
+// applies that offset to the bounding-box centre that extractGeoreference
+// already resolved from unbaked geometry.
+(async () => {
+  const q = new URLSearchParams(location.search);
+  const path = q.get('f');
+  const tLat = parseFloat(q.get('lat')), tLon = parseFloat(q.get('lon'));
+  const out = { file: path };
+  try {
+    const v = new IFCViewer('c');
+    await v.init();
+    const buf = await (await fetch(path)).arrayBuffer();
+    const file = new File([buf], path.split('/').pop());
+    await v.loadIFCFile(file, { excludeRebar: true });
+    const g = v.georef;
+    out.loaded = !!v.model;
+    out.hasGeoref = !!g;
+    if (!g) {
+      let n = 0; if (v.model) v.model.traverse((o) => { if (o.isMesh) n++; });
+      out.meshCount = n;
+      out.note = 'extractGeoreference returned nothing - no IfcMapConversion, '
+               + 'or it threw during load';
+      window.__r = out; return;
+    }
+    Object.assign(out, {
+      epsg: g && g.epsg,
+      hasLatLon: !!(g && g.hasLatLon),
+      scale: g && g.scale,
+      rotationDeg: g && g.rotationDeg,
+      elevMinM: Number.isFinite(v.modelElevMinM) ? +v.modelElevMinM.toFixed(3) : null,
+      elevMaxM: Number.isFinite(v.modelElevMaxM) ? +v.modelElevMaxM.toFixed(3) : null,
+      siteRefElevM: v.siteRefElevM,
+      bboxCentre: { lat: g.center.lat, lon: g.center.lon },
+      eastings: g.eastings, northings: g.northings,
+      // Rotation is 0 in every file this tool writes, so this inverts cleanly.
+      bboxCentreModel: { x: +((g.center.E - g.eastings) / g.scale).toFixed(3),
+                         y: +((g.center.N - g.northings) / g.scale).toFixed(3) },
+    });
+
+    // Per-mesh centres in baked world space.
+    const cx = [], cy = [];
+    const all = new THREE.Box3();
+    v.model.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      o.geometry.computeBoundingBox();
+      const b = o.geometry.boundingBox;
+      const c = new THREE.Vector3(
+        (b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2, (b.min.z + b.max.z) / 2);
+      o.localToWorld(c);
+      cx.push(c.x); cy.push(c.y);
+      all.expandByObject(o);
+    });
+    const pct = (a, p) => { const s = a.slice().sort((m, n) => m - n);
+      return s[Math.min(s.length - 1, Math.max(0, Math.round((s.length - 1) * p)))]; };
+    const robustX = (pct(cx, 0.05) + pct(cx, 0.95)) / 2;
+    const robustY = (pct(cy, 0.05) + pct(cy, 0.95)) / 2;
+    const bboxX = (all.min.x + all.max.x) / 2;
+    const bboxY = (all.min.y + all.max.y) / 2;
+    out.meshCount = cx.length;
+    out.robustMinusBboxM = { east: +(robustX - bboxX).toFixed(3),
+                             north: +(robustY - bboxY).toFixed(3) };
+
+    // Offset is in metres on the ground; the CRS is in its own units.
+    const perM = /us-ft/.test(IFCViewer.CRS_DEFS[g.epsg]) ? 1 / 0.3048006096012192 : 1;
+    const E = g.center.E + (robustX - bboxX) * perM;
+    const N = g.center.N + (robustY - bboxY) * perM;
+    const [lon, lat] = proj4(g.epsg, 'WGS84', [E, N]);
+    out.robustCentre = { lat, lon, E: +E.toFixed(3), N: +N.toFixed(3) };
+
+    if (isFinite(tLat)) {
+      const mLat = 111132.92 - 559.82 * Math.cos(2 * tLat * Math.PI / 180);
+      const mLon = 111412.84 * Math.cos(tLat * Math.PI / 180)
+                 - 93.5 * Math.cos(3 * tLat * Math.PI / 180);
+      out.offsetFromTargetM = {
+        north: +((lat - tLat) * mLat).toFixed(3),
+        east:  +((lon - tLon) * mLon).toFixed(3),
+      };
+    }
+  } catch (e) { out.error = e.message + '\n' + e.stack; }
+  window.__r = out;
+})();
+</script>

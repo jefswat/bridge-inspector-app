@@ -52,6 +52,15 @@ const CRS_DEFS = {
     "+proj=lcc +lat_1=41.0333333333333 +lat_2=40.6666666666667 " +
     "+lat_0=40.1666666666667 +lon_0=-74 +x_0=300000 +y_0=0 +ellps=GRS80 " +
     "+towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs",
+  // NAD83 / Iowa South (ftUS) and metric. Des Moines metro.
+  "EPSG:3418":
+    "+proj=lcc +lat_0=40 +lon_0=-93.5 +lat_1=41.7833333333333 " +
+    "+lat_2=40.6166666666667 +x_0=500000.00001016 +y_0=0 +ellps=GRS80 " +
+    "+towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs",
+  "EPSG:26976":
+    "+proj=lcc +lat_0=40 +lon_0=-93.5 +lat_1=41.7833333333333 " +
+    "+lat_2=40.6166666666667 +x_0=500000 +y_0=0 +ellps=GRS80 " +
+    "+towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs",
   "EPSG:32119":
     "+proj=lcc +lat_0=33.75 +lon_0=-79 +lat_1=36.1666666666667 " +
     "+lat_2=34.3333333333333 +x_0=609601.22 +y_0=0 +ellps=GRS80 " +
