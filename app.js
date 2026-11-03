@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v214";
-const BUILD_STAMP = "2026-11-03 20:00:00";
+const BUILD_VERSION = "v215";
+const BUILD_STAMP = "2026-11-03 21:00:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -1781,6 +1781,12 @@ function registerEvents() {
   if (peerCopyLocalSdpBtn) peerCopyLocalSdpBtn.addEventListener("click", () => copyLocalSdp());
   if (peerShowQrBtn) peerShowQrBtn.addEventListener("click", () => renderPeerLocalQr());
   if (peerScanQrBtn) peerScanQrBtn.addEventListener("click", () => { void startPeerQrScan(); });
+  const peerQuickStartBtn = document.getElementById("peerQuickStartBtn");
+  const peerQuickScanBtn = document.getElementById("peerQuickScanBtn");
+  if (peerQuickStartBtn) peerQuickStartBtn.addEventListener("click", () => { void peerQuickStart(); });
+  if (peerQuickScanBtn) peerQuickScanBtn.addEventListener("click", () => { void startPeerQrScan(); });
+  if (peerRoleSelect) peerRoleSelect.addEventListener("change", syncPeerQuickUi);
+  syncPeerQuickUi();
   if (peerClearSessionBtn) peerClearSessionBtn.addEventListener("click", () => resetPeerSession(false));
   const peerSyncBridgeBtn = document.getElementById("peerSyncBridgeBtn");
   if (peerSyncBridgeBtn) peerSyncBridgeBtn.addEventListener("click", () => {
@@ -2007,6 +2013,7 @@ function registerEvents() {
 
 
 function updatePeerTransferUi() {
+  if (typeof syncPeerQuickUi === "function") syncPeerQuickUi();
   peerState.autoSend = localStorage.getItem("peer-auto-send-captures") !== "0";
   peerState.role = (peerRoleSelect && peerRoleSelect.value === "rover") ? "rover" : "base";
   if (peerSendRow) peerSendRow.hidden = peerState.role !== "rover";
@@ -2052,6 +2059,8 @@ async function openArViewModal() {
   if (ifcViewerModal && !ifcViewerModal.hidden) closeIfcViewerModal();
   
   arViewModal.hidden = false;
+  document.body.classList.add("modal-open");
+  initArLayoutToggles();
   arActive = true;
   arRenderFrames = 0;
   arRenderSampleStartMs = performance.now();
@@ -2063,7 +2072,7 @@ async function openArViewModal() {
     arCameraVideo.style.display = "";
     arCameraVideo.style.zIndex = "1";
   }
-  if (arCameraToggleBtn) arCameraToggleBtn.textContent = "📷 Camera: On";
+  if (arCameraToggleBtn) arCameraToggleBtn.textContent = "📷 On";
   if (arOverlayCanvas) {
     arOverlayCanvas.style.opacity = "1";
     arOverlayCanvas.style.zIndex = "2";
@@ -2153,9 +2162,45 @@ async function openArViewModal() {
   startArRenderLoop();
 }
 
+// ── AR layout toggles ─────────────────────────────────────────────────────────
+// The AR view is full screen; its settings rows (opacity, FOV, ground datum)
+// fold behind the ⚙ button and the debug strip collapses to one line, so the
+// camera feed keeps most of a phone screen. Both choices persist per device.
+const AR_SETTINGS_OPEN_KEY = "arSettingsPanelOpen";
+const AR_DEBUG_COLLAPSED_KEY = "arDebugCollapsed";
+let arLayoutTogglesBound = false;
+function lsGet(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (_) {} }
+function setArSettingsOpen(open) {
+  const panel = document.getElementById("arHudPanel");
+  const btn = document.getElementById("arSettingsToggleBtn");
+  if (panel) panel.classList.toggle("is-open", !!open);
+  if (btn) { btn.setAttribute("aria-expanded", open ? "true" : "false"); btn.classList.toggle("is-on", !!open); }
+}
+function initArLayoutToggles() {
+  const saved = lsGet(AR_SETTINGS_OPEN_KEY);
+  // Default: open on a wide screen, folded on a phone.
+  setArSettingsOpen(saved == null ? window.innerWidth > 760 : saved === "1");
+  const hud = document.getElementById("arDebugHud");
+  if (hud) hud.classList.toggle("is-collapsed", lsGet(AR_DEBUG_COLLAPSED_KEY) === "1");
+  if (arLayoutTogglesBound) return;
+  arLayoutTogglesBound = true;
+  const btn = document.getElementById("arSettingsToggleBtn");
+  if (btn) btn.addEventListener("click", () => {
+    const open = !(document.getElementById("arHudPanel") || {}).classList?.contains("is-open");
+    setArSettingsOpen(open);
+    lsSet(AR_SETTINGS_OPEN_KEY, open ? "1" : "0");
+  });
+  if (hud) hud.addEventListener("click", () => {
+    const c = hud.classList.toggle("is-collapsed");
+    lsSet(AR_DEBUG_COLLAPSED_KEY, c ? "1" : "0");
+  });
+}
+
 function closeArViewModal() {
   if (!arViewModal) return;
   arViewModal.hidden = true;
+  document.body.classList.remove("modal-open");
   arActive = false;
   stopArCameraFeed();
   stopArGeoWatch();
@@ -3435,7 +3480,7 @@ function setArCameraEnabled(on) {
     stopArCameraFeed();
     if (arCameraVideo) arCameraVideo.style.display = "none";
   }
-  if (arCameraToggleBtn) arCameraToggleBtn.textContent = on ? "📷 Camera: On" : "📷 Camera: Off";
+  if (arCameraToggleBtn) arCameraToggleBtn.textContent = on ? "📷 On" : "📷 Off";
 }
 
 
@@ -3976,8 +4021,9 @@ function setPeerConnState(text) {
   if (peerConnState) peerConnState.textContent = text;
   // Reflect live connection state on the always-visible header button
   if (openPeerTransferViewTopBtn) {
-    const connected = text.includes("connected");
-    openPeerTransferViewTopBtn.textContent = connected ? "🔁 Transfer ●" : "🔁 Transfer";
+    // "disconnected" also contains "connected"; match the word on its own.
+    const connected = /(^|[^a-z])connected\b/i.test(text) && !/disconnected/i.test(text);
+    openPeerTransferViewTopBtn.innerHTML = '🔁<span class="btn-label"> Transfer</span>' + (connected ? ' <span class="live-dot" aria-label="connected">●</span>' : "");
     openPeerTransferViewTopBtn.classList.toggle("peer-link-active", connected);
   }
 }
@@ -4043,6 +4089,40 @@ function parseRemoteSdp() {
   const obj = JSON.parse(raw);
   if (!obj || typeof obj.type !== "string" || typeof obj.sdp !== "string") throw new Error("Remote SDP is invalid.");
   return obj;
+}
+
+// Guided pairing: a scanned code is applied according to this device's role,
+// so pairing is "Base: start, Rover: scan, Base: scan" with no numbered steps.
+async function afterPeerQrScanned() {
+  let type = "";
+  try { type = parseRemoteSdp().type; } catch (_) { /* fall through */ }
+  if (peerState.role === "rover" && type === "offer") {
+    await peerApplyOffer();
+    if (peerLocalSdp && peerLocalSdp.value) {
+      renderPeerLocalQr();
+      setStatus("Now scan this code with the Base device.");
+    }
+  } else if (peerState.role === "base" && type === "answer") {
+    await peerApplyAnswer();
+  } else if (type) {
+    setStatus(`Scanned a pairing ${type}, but this device is set to ${peerState.role === "base" ? "Base" : "Rover"}. Check the role at the top.`);
+  } else {
+    setStatus("QR scanned, but it isn't a pairing code.");
+  }
+}
+
+async function peerQuickStart() {
+  if (peerState.role !== "base") { setStatus("Start pairing on the Base (receiving) device."); return; }
+  await peerCreateOffer();
+  if (peerLocalSdp && peerLocalSdp.value) {
+    renderPeerLocalQr();
+    setStatus("Scan this code with the Rover, then tap Scan code here to read its reply.");
+  }
+}
+
+function syncPeerQuickUi() {
+  const card = document.getElementById("peerTransferCard");
+  if (card && peerRoleSelect) card.dataset.role = peerRoleSelect.value;
 }
 
 async function peerCreateOffer() {
@@ -4257,7 +4337,7 @@ function runPeerQrScanLoop() {
       if (peerRemoteSdp) peerRemoteSdp.value = hit;
       stopPeerQrScan();
       appendPeerLog("Scanned QR into Remote SDP.");
-      setStatus("QR scanned. Apply offer/answer now.");
+      void afterPeerQrScanned();
       return;
     }
     peerQrScanLoopId = requestAnimationFrame(tick);
@@ -4336,9 +4416,9 @@ async function decodePeerQrFromFile(file) {
     }
     if (hit) {
       peerRemoteSdp.value = hit;
-      stopPeerQrScan("QR decoded from photo. Apply offer/answer now.");
+      stopPeerQrScan("QR decoded from photo.");
       appendPeerLog("Decoded QR from uploaded photo.");
-      setStatus("QR decoded. Apply offer/answer now.");
+      void afterPeerQrScanned();
     } else {
       if (peerQrScannerStatus) peerQrScannerStatus.textContent = "No QR found in photo — try a clearer image.";
     }
@@ -4400,7 +4480,21 @@ function attachPeerDataChannel(dc) {
     setPeerConnState("Transfer link: closed");
     if (peerSendFilesBtn) peerSendFilesBtn.disabled = true;
   };
-  dc.onmessage = (evt) => { void handlePeerMessage(evt.data); };
+  // Handle messages strictly in order. They used to run concurrently, so while
+  // one photo was being saved the next file-start replaced peerState.incoming,
+  // and the save's "incoming = null" then wiped the new transfer: every second
+  // photo of a burst was silently lost. A failure is logged, not left as an
+  // unhandled rejection with the receive state stuck.
+  dc.onmessage = (evt) => {
+    peerRxChain = peerRxChain
+      .then(() => handlePeerMessage(evt.data))
+      .catch((e) => {
+        console.warn("peer receive failed:", e);
+        appendPeerLog("Receive failed: " + ((e && e.message) || e));
+        setStatus("A received photo could not be saved: " + ((e && e.message) || e));
+        peerState.incoming = null;
+      });
+  };
 }
 
 // Rover receives bridge info from base and opens/creates the matching bridge.
@@ -4426,6 +4520,9 @@ async function handlePeerBridgeSync(msg) {
   await openBridge(id);
   setStatus(`📡 Bridge synced from base: "${b.title || id}". Ready to capture.`);
 }
+
+let peerRxChain = Promise.resolve();
+let peerTxChain = Promise.resolve();
 
 async function handlePeerMessage(data) {
   if (typeof data === "string") {
@@ -4468,6 +4565,15 @@ async function handlePeerMessage(data) {
 async function finalizeIncomingFile(fileId) {
   const incoming = peerState.incoming;
   if (!incoming || incoming.id !== fileId) return;
+  if (incoming.size && incoming.received !== incoming.size) {
+    // Truncated (sender aborted or the link dropped mid-file): do not save a
+    // broken image.
+    appendPeerLog(`Discarded ${incoming.name}: got ${incoming.received} of ${incoming.size} bytes.`);
+    setStatus(`Transfer of ${incoming.name} was incomplete — ask the rover to resend it.`);
+    peerState.incoming = null;
+    return;
+  }
+  if (!/^image\//.test(incoming.mime || "")) incoming.mime = "image/jpeg";
   const blob = new Blob(incoming.chunks, { type: incoming.mime || "image/jpeg" });
   let targetBridgeId = activeBridgeId || (bridges[0]?.id || null);
   if (!targetBridgeId) {
@@ -4520,11 +4626,17 @@ async function finalizeIncomingFile(fileId) {
   peerState.incoming = null;
 }
 
-async function waitForDcDrain(dc, maxBuffered = 4 * 1024 * 1024, target = 512 * 1024, timeoutMs = 8000) {
+async function waitForDcDrain(dc, maxBuffered = 4 * 1024 * 1024, target = 512 * 1024, stallMs = 15000) {
   if (dc.bufferedAmount <= maxBuffered) return;
-  const started = Date.now();
+  // Time out only when the buffer stops draining. A fixed total wait failed
+  // any photo on a link slower than ~440 KB/s, which weak field Wi-Fi is.
+  let last = dc.bufferedAmount;
+  let lastProgress = Date.now();
   while (dc.bufferedAmount > target) {
-    if (Date.now() - started > timeoutMs) throw new Error("Sender backpressure timeout.");
+    if (dc.readyState !== "open") throw new Error("Transfer link closed.");
+    const now = Date.now();
+    if (dc.bufferedAmount < last) { last = dc.bufferedAmount; lastProgress = now; }
+    if (now - lastProgress > stallMs) throw new Error("Transfer link stalled.");
     await new Promise((r) => setTimeout(r, 30));
   }
 }
@@ -4539,7 +4651,7 @@ async function peerSendSelectedFiles() {
   peerState.sending = true;
   if (peerSendFilesBtn) peerSendFilesBtn.disabled = true;
   try {
-    for (const f of files) await sendBlobOverDataChannel(f, f.name || "photo.jpg", f.type || "image/jpeg", dc);
+    for (const f of files) await sendBlobOverDataChannel(f, f.name || "photo.jpg", f.type || "image/jpeg", dc, f.lastModified ? new Date(f.lastModified).toISOString() : null);
     appendPeerLog(`Sent ${files.length} file(s).`);
     setStatus(`Sent ${files.length} photo${files.length === 1 ? "" : "s"}.`);
     if (peerFileInput) peerFileInput.value = "";
@@ -4551,11 +4663,23 @@ async function peerSendSelectedFiles() {
   }
 }
 
-async function sendBlobOverDataChannel(blob, name, mime, dc) {
+// Every send goes through one queue. Two sends at once (a manual send and an
+// auto-send) would interleave their chunks on the channel and corrupt both,
+// which is why auto-send used to drop the photo instead; now it waits its turn.
+function sendBlobOverDataChannel(blob, name, mime, dc, createdAt) {
+  const run = peerTxChain.then(() => sendBlobNow(blob, name, mime, dc, createdAt));
+  peerTxChain = run.catch(() => {});
+  return run;
+}
+
+async function sendBlobNow(blob, name, mime, dc, createdAt) {
+  if (!dc || dc.readyState !== "open") throw new Error("Transfer link not connected.");
   const id = createId();
   const CHUNK = 64 * 1024;
   const hash = await sha256HexFromBlob(blob);
-  dc.send(JSON.stringify({ t: "file-start", id, name: name || "photo.jpg", mime: mime || "image/jpeg", size: blob.size, hash, createdAt: new Date().toISOString() }));
+  // Carry the real capture time, not the moment of sending.
+  const when = createdAt && !isNaN(Date.parse(createdAt)) ? new Date(createdAt).toISOString() : new Date().toISOString();
+  dc.send(JSON.stringify({ t: "file-start", id, name: name || "photo.jpg", mime: mime || "image/jpeg", size: blob.size, hash, createdAt: when }));
   const buf = await blob.arrayBuffer();
   let sent = 0;
   while (sent < buf.byteLength) {
@@ -4575,17 +4699,16 @@ function queueAutoSendCapture(blob) {
     setStatus("⚠ Auto-send skipped — transfer link not connected. Open 🔁 Transfer to reconnect.");
     return;
   }
+  const capturedAt = new Date().toISOString();
   peerSendQueue = peerSendQueue.then(async () => {
-    if (peerState.sending) return;
-    peerState.sending = true;
+    // No "already sending" early return: that silently dropped any capture
+    // taken while another send ran. The transmit queue serialises them.
     try {
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      await sendBlobOverDataChannel(blob, `capture-${stamp}.jpg`, "image/jpeg", dc);
+      const stamp = capturedAt.replace(/[:.]/g, "-");
+      await sendBlobOverDataChannel(blob, `capture-${stamp}.jpg`, "image/jpeg", dc, capturedAt);
       setStatus("Photo saved and auto-sent.");
     } catch (e) {
       setStatus("Photo saved, but auto-send failed: " + e.message);
-    } finally {
-      peerState.sending = false;
     }
   }).catch((e) => console.warn("auto-send queue:", e));
 }
@@ -4697,7 +4820,7 @@ async function openPeerSavedPickerModal() {
         const rec = byId.get(id);
         if (!rec || !(rec.blob instanceof Blob)) continue;
         const stamp = String(rec.createdAt || new Date().toISOString()).replace(/[:.]/g, "-");
-        await sendBlobOverDataChannel(rec.blob, `saved-${stamp}-${rec.id.slice(0, 8)}.jpg`, "image/jpeg", dcNow);
+        await sendBlobOverDataChannel(rec.blob, `saved-${stamp}-${rec.id.slice(0, 8)}.jpg`, "image/jpeg", dcNow, rec.createdAt);
         sent++;
       }
       appendPeerLog(`Sent ${sent} saved app photo(s).`);
@@ -12203,3 +12326,18 @@ function scheduleExtraCrsPrefetch() {
   else window.addEventListener("load", kick, { once: true });
   window.addEventListener("online", () => prefetchExtraCrs());
 }
+
+// 3D viewer: on a phone the move pad and elevation buttons covered about a
+// third of the model, and drag/pinch already orbit and zoom. They now sit
+// behind a "Controls" toggle on narrow screens (CSS shows them on wide ones).
+(function bindIfcNavToggle() {
+  const btn = document.getElementById("ifcNavToggleBtn");
+  const box = document.getElementById("ifcViewerContainer");
+  if (!btn || !box) return;
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const collapsed = box.classList.toggle("nav-collapsed");
+    btn.setAttribute("aria-pressed", collapsed ? "false" : "true");
+    btn.classList.toggle("is-on", !collapsed);
+  });
+})();

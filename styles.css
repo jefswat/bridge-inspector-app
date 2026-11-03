@@ -57,7 +57,31 @@ header {
   top: 0;
   z-index: 50;
 }
+header {
+  /* Clear the notch / status bar when installed full-screen. */
+  padding-top: calc(10px + env(safe-area-inset-top));
+  padding-left: calc(14px + env(safe-area-inset-left));
+  padding-right: calc(14px + env(safe-area-inset-right));
+}
 header h1 { font-size: 1.1rem; font-weight: 700; flex: 1; }
+/* Title on one line, build stamp as a small second line - it used to wrap the
+   header to five lines on a phone. */
+.app-title { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
+.app-title-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.build-stamp {
+  font-size: .62rem; font-weight: 400; opacity: .7;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.header-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.live-dot { color: var(--success); }
+/* Icon-only buttons on a phone; the label is still read out (aria-label/title). */
+@media (max-width: 560px) {
+  .btn-label { display: none; }
+  .header-actions > a, .header-actions > button { padding: 8px 11px; font-size: 1rem; }
+  .bridge-banner-actions > button { padding: 7px 11px; }
+}
+body.modal-open { overflow: hidden; }
+main { padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
 #installButton { display: none; }
 #installButton:not([hidden]) { display: inline-flex; }
 
@@ -2027,3 +2051,184 @@ select {
     max-height: max(150px, calc(100% - 210px));
   }
 }
+
+
+/* ═════════════════════════════════════════════════════════════════════════
+   v215 layout pass
+   ═════════════════════════════════════════════════════════════════════════ */
+
+/* ── Bridge workspace ── */
+.capture-card .primary-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.btn-lg {
+  min-height: 52px;
+  font-size: 1rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.capture-card .secondary-actions { margin-top: 10px; }
+.file-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 7px 14px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface2); color: var(--text);
+  font-size: .85rem; font-weight: 600; cursor: pointer;
+}
+.file-btn:hover { background: var(--border); }
+.status-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.status-chips #geoText, .status-chips #headingText { flex: 0 1 auto; }
+.chip {
+  font-size: .75rem; color: var(--muted);
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 999px; padding: 3px 10px;
+}
+.export-menu {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; margin: 0 0 14px;
+}
+.export-menu > summary {
+  list-style: none; cursor: pointer; padding: 10px 14px;
+  font-weight: 700; font-size: .9rem; user-select: none;
+}
+.export-menu > summary::-webkit-details-marker { display: none; }
+.export-menu > summary::after { content: "▾"; float: right; color: var(--muted); }
+.export-menu[open] > summary::after { content: "▴"; }
+.export-menu-body {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 0 14px 12px;
+}
+.export-menu-danger {
+  flex-basis: 100%; display: flex; justify-content: flex-end;
+  border-top: 1px solid var(--border); padding-top: 10px; margin-top: 2px;
+}
+/* The intro paragraph only helps before the first bridge exists. */
+#bridgesView:has(#bridgesList .bridge-card) .bridges-intro { display: none; }
+
+/* ── Bridges list on a phone: thumbnail beside the title, not 140px above it ── */
+@media (max-width: 560px) {
+  .bridge-card { display: grid; grid-template-columns: 76px 1fr; }
+  .bridge-thumb { height: auto; min-height: 76px; font-size: 2rem; }
+  .bridge-card-body { padding: 10px 12px 6px; }
+  .bridge-card-actions { grid-column: 1 / -1; }
+}
+
+/* ── AR view: full screen ── */
+/* It had no positioning of its own, so it rendered in the page flow under the
+   workspace with a "90%" height of nothing - the page header showed through
+   and the controls stacked into a third of the screen. */
+.ar-view-modal {
+  position: fixed;
+  inset: 0;
+  background: #000;
+}
+.ar-view-container {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: #000;
+}
+.ar-view-header {
+  padding: calc(6px + env(safe-area-inset-top)) calc(10px + env(safe-area-inset-right)) 6px calc(10px + env(safe-area-inset-left));
+  background: rgba(2, 6, 23, .94);
+  border-bottom: 1px solid var(--overlay-border);
+  gap: 8px;
+}
+.ar-view-header .scan-title { color: var(--overlay-text); white-space: nowrap; font-size: .95rem; }
+.ar-view-controls-top { gap: 6px; flex-wrap: nowrap; }
+.ar-icon-btn { padding: 6px 10px; min-height: 36px; white-space: nowrap; }
+.ar-icon-btn.is-on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.ar-use-location-label {
+  padding: 6px 10px; min-height: 36px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface2); color: var(--text); font-weight: 600;
+}
+.ar-use-location-label:has(input:checked) { background: var(--accent); color: #fff; border-color: var(--accent); }
+/* Settings rows fold behind the ⚙ button. */
+.ar-hud-panel { display: none; }
+.ar-hud-panel.is-open { display: flex; }
+.ar-debug-hud {
+  padding-bottom: calc(6px + env(safe-area-inset-bottom));
+  cursor: pointer;
+}
+.ar-debug-hud.is-collapsed {
+  height: calc(1.35em + 12px + env(safe-area-inset-bottom));
+  overflow: hidden;
+}
+
+/* ── 3D viewer ── */
+.ifc-viewer-container {
+  width: 100%;
+  height: min(62dvh, 560px);
+  min-height: 280px;
+  background: var(--surface);
+  border-radius: 8px;
+  position: relative;
+  border: 1px solid var(--border-strong);
+}
+.ifc-nav-toggle {
+  display: none;
+  position: absolute; top: 8px; left: 8px; z-index: 6;
+  padding: 5px 10px; font-size: .78rem; font-weight: 600;
+  background: rgba(255, 255, 255, .88); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.ifc-nav-toggle.is-on { background: var(--accent); color: #fff; border-color: var(--accent); }
+@media (max-width: 760px) {
+  /* Only offer the toggle once a model is loaded (the controls are unhidden). */
+  .ifc-viewer-container:has(#ifcMoveControls:not([hidden])) .ifc-nav-toggle { display: inline-flex; }
+  .ifc-viewer-container.nav-collapsed .ifc-move-controls,
+  .ifc-viewer-container.nav-collapsed .ifc-elev-controls { display: none; }
+  .ifc-move-controls { grid-template-columns: repeat(3, 30px); grid-template-rows: repeat(3, 30px); padding: 5px; background: rgba(255,255,255,.6); left: 8px; bottom: 8px; }
+  .ifc-move-btn, .ifc-elev-btn { width: 30px; height: 30px; background: rgba(255,255,255,.85); }
+  .ifc-elev-controls { padding: 5px 4px; background: rgba(255,255,255,.6); right: 8px; }
+}
+
+/* AR on a phone: the status line moves to the top of the camera view (it sat
+   on top of the move controls), the location read-out goes under it, and each
+   move group becomes a narrow column so the pad is one short row. */
+@media (max-width: 760px) {
+  #arStatusMessage { top: 8px; bottom: auto !important; font-size: .75rem; }
+  /* Above the move controls, clear of the (variable-height) status line. */
+  .ar-location-display {
+    top: auto; left: auto; right: 8px; bottom: 104px;
+    max-width: 62%; padding: 4px 8px; text-align: right;
+  }
+  .ar-minimap-wrap { bottom: 8px; }
+  .ar-move-controls {
+    bottom: 8px; padding: 6px; gap: 6px;
+    flex-wrap: nowrap; max-width: calc(100% - 160px);
+  }
+  .ar-move-group { flex-direction: column; flex-wrap: nowrap; gap: 4px; }
+  .ar-move-group .ar-move-title { flex-basis: auto; font-size: .52rem; }
+  .ar-move-group .ar-control-btn { width: 34px; height: 30px; font-size: .9rem; }
+  /* Settings panel opens under the status line. */
+  .ar-hud-panel { top: 76px; }
+}
+
+/* 3D viewer fills the screen on a phone instead of floating in a card. */
+@media (max-width: 560px) {
+  #ifcViewerModal { padding: 0; }
+  #ifcViewerModal .ifc-viewer-dialog {
+    width: 100%; max-width: none; height: 100dvh; max-height: none; border-radius: 0;
+    padding-top: calc(12px + env(safe-area-inset-top));
+    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+}
+
+/* ── Transfer: guided pairing up front, manual SDP under Advanced ── */
+.peer-steps { margin: 6px 0 10px 1.2em; font-size: .85rem; color: var(--muted); line-height: 1.45; }
+.peer-steps b { color: var(--text); }
+.peer-quick-actions button { flex: 1 1 140px; min-height: 44px; font-size: .95rem; }
+#peerTransferCard[data-role="rover"] .peer-base-only { display: none; }
+.peer-advanced { margin: 8px 0; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; }
+.peer-advanced > summary { cursor: pointer; font-size: .85rem; font-weight: 600; color: var(--muted); padding: 4px 0; }
+.peer-advanced[open] > summary { margin-bottom: 8px; }
+.peer-transfer-actions button { white-space: normal; }

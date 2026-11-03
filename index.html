@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Photo Vault</title>
   <meta name="theme-color" content="#f5f7fa" />
   <link rel="manifest" href="manifest.webmanifest" />
@@ -25,17 +25,17 @@
   <!-- proj4 (map projection / georeferencing) -->
   <script src="vendor/proj4.js"></script>
   <!-- web-ifc (IFC parsing) loaded dynamically as ES module in ifc-viewer.js -->
-  <link rel="stylesheet" href="styles.css?v=20261103-200000" />
+  <link rel="stylesheet" href="styles.css?v=20261103-210000" />
 </head>
 <body>
 
 <header>
-  <h1>📷 Photo Vault <span id="buildStamp" style="font-size:.55rem;font-weight:400;opacity:.7;vertical-align:middle;">build …</span></h1>
-  <div style="display:flex;gap:8px;align-items:center;">
-    <a class="map-nav-link" href="map.html?v=20261103-200000">🗺 Map summary</a>
-    <button id="openSettingsButton" class="secondary" hidden>⚙ Settings</button>
-    <button id="openPeerTransferViewTop" class="secondary">🔁 Transfer</button>
-    <button id="installButton" class="secondary" hidden>⬇ Install App</button>
+  <h1 class="app-title"><span class="app-title-text">📷 Photo Vault</span><span id="buildStamp" class="build-stamp">build …</span></h1>
+  <div class="header-actions">
+    <a class="map-nav-link" href="map.html?v=20261103-210000" title="Map summary" aria-label="Map summary">🗺<span class="btn-label"> Map summary</span></a>
+    <button id="openSettingsButton" class="secondary" hidden title="Settings" aria-label="Settings">⚙<span class="btn-label"> Settings</span></button>
+    <button id="openPeerTransferViewTop" class="secondary" title="Transfer photos between devices" aria-label="Transfer">🔁<span class="btn-label"> Transfer</span></button>
+    <button id="installButton" class="secondary" hidden title="Install app" aria-label="Install app">⬇<span class="btn-label"> Install</span></button>
   </div>
 </header>
 
@@ -67,26 +67,33 @@
       <span class="bridge-banner-desc" id="bridgeBannerDesc"></span>
     </div>
     <div class="bridge-banner-actions">
-      <button id="editBridgeButton" class="secondary">✎ Edit</button>
-      <button id="downloadBridgeZip" class="secondary">⬇ Download ZIP</button>
-      <button id="view3dButton" class="secondary">🎯 View 3D</button>
-      <button id="openPeerTransferView" class="secondary">🔁 Transfer view</button>
+      <button id="editBridgeButton" class="secondary" title="Edit bridge details, overlay and IFC">✎<span class="btn-label"> Edit</span></button>
+      <!-- Same action as the header's Transfer button; kept for scripts that
+           bind to it, hidden so the workspace shows it once. -->
+      <button id="openPeerTransferView" class="secondary" hidden>🔁 Transfer view</button>
     </div>
   </div>
 
   <!-- ── Camera/actions card ── -->
-  <section class="card">
+  <section class="card capture-card">
     <canvas id="snapshotCanvas" hidden></canvas>
-    <div class="actions-row">
-      <button id="newImageButton">📸 New image</button>
-      <button id="scanToggleBtn" class="secondary" disabled>▶ Start scan</button>
+    <!-- The two things done most in the field, sized for a thumb. -->
+    <div class="primary-actions">
+      <button id="newImageButton" class="btn-lg">📸 New image</button>
+      <button id="openArViewButton" class="secondary btn-lg">🔍 AR view</button>
+    </div>
+    <div class="actions-row secondary-actions">
+      <button id="view3dButton" class="secondary">🎯 3D model</button>
       <button id="sketchButton" class="secondary">✏ Sketch</button>
-      <label class="secondary" style="padding:7px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);font-size:.85rem;font-weight:600;cursor:pointer;">
+      <label class="secondary file-btn">
         📂 Import
         <input id="filePicker" type="file" accept="image/*" multiple hidden />
       </label>
-      <span id="geoText">Location: not acquired</span>
-      <span id="headingText">Direction: not acquired</span>
+      <button id="scanToggleBtn" class="secondary" disabled title="Available once the camera is running">▶ Start scan</button>
+    </div>
+    <div class="status-chips">
+      <span id="geoText" class="chip">Location: not acquired</span>
+      <span id="headingText" class="chip">Direction: not acquired</span>
     </div>
   </section>
 
@@ -102,19 +109,23 @@
     <button id="postCaptureDismissBtn" type="button" class="secondary" title="Dismiss">✕</button>
   </div>
 
-  <!-- ── Toolbar ── -->
-  <div class="actions-row" style="justify-content:flex-end">
-    <button id="wordReportButton" class="secondary" disabled>📄 Word Report</button>
-    <button id="taggedElementsButton" class="secondary" disabled>🧷 Tagged elements</button>
-    <button id="exportIfcButton" class="secondary" disabled title="Export compliant IFC property sets">🧊 Export compliant IFC</button>
-    <button id="clearAllButton" class="danger" disabled>🗑 Delete all</button>
-  </div>
+  <!-- ── Report & export: output actions grouped out of the capture flow,
+       with the destructive one separated at the bottom. ── -->
+  <details class="export-menu">
+    <summary>📤 Report &amp; export</summary>
+    <div class="export-menu-body">
+      <button id="wordReportButton" class="secondary" disabled title="Needs at least one photo">📄 Word report</button>
+      <button id="taggedElementsButton" class="secondary" disabled title="Needs elements tagged to photos">🧷 Tagged elements</button>
+      <button id="exportIfcButton" class="secondary" disabled title="Export compliant IFC property sets">🧊 Export compliant IFC</button>
+      <button id="downloadBridgeZip" class="secondary" title="Everything for this bridge: photos with metadata, overlay, report">⬇ Download ZIP</button>
+      <div class="export-menu-danger">
+        <button id="clearAllButton" class="danger" disabled>🗑 Delete all photos</button>
+      </div>
+    </div>
+  </details>
 
   <!-- ── Gallery ── -->
   <p id="emptyState" class="status-bar" hidden>No photos yet. Use New image or import images.</p>
-  <div class="actions-row gallery-actions-row">
-    <button id="openArViewButton" class="secondary">🔍 Augmented reality view</button>
-  </div>
   <div id="photoGrid" hidden></div>
 
   <!-- ── Pier scan sessions ── -->
@@ -297,17 +308,27 @@
       <button id="closePeerTransferView" type="button" class="secondary">✕ Close</button>
     </div>
     <div class="scan-panel-head">
-      <span class="scan-title">🔁 Base / Rover photo transfer</span>
-      <label class="peer-role-label" for="peerRoleSelect">This browser is:</label>
+      <label class="peer-role-label" for="peerRoleSelect">This device is:</label>
       <select id="peerRoleSelect" class="meta-input peer-role-select">
         <option value="base">Base (receiver)</option>
         <option value="rover">Rover (sender)</option>
       </select>
     </div>
-    <p class="scan-hint">Open this app in two browsers/windows. Base creates offer, Rover scans/applies offer and creates answer, then Base scans/applies answer. After connected, Rover can send photos.</p>
+    <!-- Guided pairing. Scanning a code applies it for this device's role. -->
+    <ol class="peer-steps">
+      <li><b>Base</b> (tablet, receives): tap <b>Start pairing</b>. A code appears.</li>
+      <li><b>Rover</b> (phone, sends): tap <b>Scan code</b> and point at the Base. The Rover then shows its own code.</li>
+      <li><b>Base</b>: tap <b>Scan code</b> and point at the Rover. Connected.</li>
+    </ol>
+    <div class="peer-transfer-actions peer-quick-actions">
+      <button id="peerQuickStartBtn" type="button" class="peer-base-only">▦ Start pairing</button>
+      <button id="peerQuickScanBtn" type="button" class="secondary">📷 Scan code</button>
+    </div>
+    <details class="peer-advanced">
+      <summary>Advanced: manual pairing &amp; reset</summary>
     <div class="peer-transfer-actions">
-      <button id="peerCreateOfferBtn" type="button">1) Create offer</button>
-      <button id="peerApplyOfferBtn" type="button" class="secondary">2) Apply offer + create answer</button>
+      <button id="peerCreateOfferBtn" type="button" class="secondary">1) Create offer</button>
+      <button id="peerApplyOfferBtn" type="button" class="secondary">2) Apply offer + answer</button>
       <button id="peerApplyAnswerBtn" type="button" class="secondary">3) Apply answer</button>
     </div>
     <div class="peer-sdp-grid">
@@ -324,13 +345,17 @@
       <button id="peerCopyLocalSdpBtn" type="button" class="secondary">📋 Copy local SDP</button>
       <button id="peerShowQrBtn" type="button" class="secondary">▦ Show local as QR</button>
       <button id="peerScanQrBtn" type="button" class="secondary">📷 Scan QR to remote</button>
-      <button id="peerSyncBridgeBtn" type="button" class="secondary" title="Send active bridge to rover so it opens automatically">📡 Sync bridge to rover</button>
       <button id="peerClearSessionBtn" type="button" class="secondary">♻ Reset transfer session</button>
-      <button id="peerClearCacheBtn" type="button" class="secondary" title="Force-reload the app if the UI looks outdated">🔄 Clear cache &amp; reload</button>
+      <!-- Same as Settings › Clear cache; kept here for scripts that bind it. -->
+      <button id="peerClearCacheBtn" type="button" class="secondary" hidden>🔄 Clear cache &amp; reload</button>
     </div>
+    </details>
     <div id="peerQrBox" class="peer-qr-box" hidden>
       <div id="peerQrCode" class="peer-qr-code" aria-label="Local SDP QR code"></div>
       <p id="peerQrHint" class="peer-qr-hint">Scan this QR from the other device to fill its Remote SDP box.</p>
+    </div>
+    <div class="peer-transfer-actions">
+      <button id="peerSyncBridgeBtn" type="button" class="secondary peer-base-only" title="Send active bridge to rover so it opens automatically">📡 Sync bridge to rover</button>
     </div>
     <div id="peerSendRow" class="peer-send-row">
       <button id="peerPickSavedBtn" type="button" class="secondary">🖼 Send from app photos</button>
@@ -392,7 +417,8 @@
       <button type="button" class="secondary ifc-view-btn" data-view="side" title="Side view">▥ Side</button>
     </div>
 
-    <div id="ifcViewerContainer" class="ifc-viewer-container" style="width:100%;height:500px;background:var(--surface);border-radius:8px;position:relative;border:1px solid #cbd5e1;">
+    <div id="ifcViewerContainer" class="ifc-viewer-container nav-collapsed">
+      <button id="ifcNavToggleBtn" type="button" class="ifc-nav-toggle" aria-pressed="false" title="Show the move / elevation buttons (drag still orbits, pinch zooms)">🕹 Controls</button>
       <div id="ifcViewerPlaceholder" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;color:var(--muted);">
         <p style="margin:0;">📤 Upload an IFC file to start</p>
         <p style="margin:5px 0 0;font-size:.85rem;opacity:.7;">Rotate: drag • Zoom: scroll • Click elements to select</p>
@@ -455,15 +481,16 @@
 <div id="arViewModal" class="ar-view-modal" hidden>
   <div class="ar-view-container">
     <div class="ar-view-header">
-      <span class="scan-title">🔍 AR Overlay View</span>
+      <span class="scan-title">🔍<span class="btn-label"> AR overlay</span></span>
       <div class="ar-view-controls-top">
-        <label class="ar-use-location-label">
+        <label class="ar-use-location-label" title="Use current location (live GPS)">
           <input id="arUseCurrentLocation" type="checkbox" />
-          <span>Use current location</span>
+          <span>📍 GPS</span>
         </label>
-        <button id="arCameraToggleBtn" class="secondary">📷 Camera: On</button>
-        <button id="arSelectLocationButton" class="secondary">📍 Select location</button>
-        <button id="closeArViewButton" type="button" class="secondary">✕ Close</button>
+        <button id="arCameraToggleBtn" class="secondary ar-icon-btn" title="Camera feed on/off">📷 On</button>
+        <button id="arSelectLocationButton" class="secondary ar-icon-btn" title="Pick your position on a map">🗺<span class="btn-label"> Pick location</span></button>
+        <button id="arSettingsToggleBtn" type="button" class="secondary ar-icon-btn" aria-expanded="false" aria-controls="arHudPanel" title="Opacity, camera FOV and ground datum">⚙</button>
+        <button id="closeArViewButton" type="button" class="secondary ar-icon-btn" title="Close AR view" aria-label="Close">✕</button>
       </div>
     </div>
     
@@ -486,7 +513,7 @@
         </div>
       </div>
       
-      <div class="ar-hud-panel">
+      <div id="arHudPanel" class="ar-hud-panel">
       <div class="ar-opacity-controls">
         <label for="arOpacitySlider" style="font-size:.8rem;color:var(--overlay-muted);margin-right:6px;">Model opacity</label>
         <input id="arOpacitySlider" type="range" min="0" max="100" value="60" style="width:120px;" />
@@ -540,7 +567,7 @@
       <div id="arStatusMessage" class="status-bar" style="position:absolute;bottom:8px;left:8px;right:8px;">AR loading...</div>
     </div>
     <!-- Debug readout lives BELOW the viewport so it never covers the scene. -->
-    <div id="arDebugHud" class="ar-debug-hud"></div>
+    <div id="arDebugHud" class="ar-debug-hud" title="Tap to collapse / expand"></div>
   </div>
 </div>
 
@@ -636,9 +663,9 @@
 <script src="vendor/cv.js?v=20260716-211500"></script>
 <script src="vendor/aruco.js?v=20260716-211500"></script>
 <script src="vendor/apriltag_36h11.js?v=20260716-211500"></script>
-<script src="crs-us.js?v=20261103-200000"></script>
-<script src="ifc-viewer.js?v=20261103-200000"></script>
-<script src="ifc-export.js?v=20261103-200000"></script>
-<script src="app.js?v=20261103-200000"></script>
+<script src="crs-us.js?v=20261103-210000"></script>
+<script src="ifc-viewer.js?v=20261103-210000"></script>
+<script src="ifc-export.js?v=20261103-210000"></script>
+<script src="app.js?v=20261103-210000"></script>
 </body>
 </html>

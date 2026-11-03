@@ -51,7 +51,7 @@ require('fs').mkdirSync(DIR, { recursive: true });
   await hide('#ifcViewerModal');
 
   // ── 4. AR entry button ────────────────────────────────────────────────────
-  await shot('.gallery-actions-row', '04-ar-button', () => {
+  await shot('.capture-card .primary-actions', '04-ar-button', () => {
     document.getElementById('appView').hidden=false;
     document.querySelectorAll('button[disabled]').forEach(x=>x.disabled=false);
   });
@@ -64,6 +64,8 @@ require('fs').mkdirSync(DIR, { recursive: true });
     document.getElementById('arAttitudeText').textContent='Eye 126.0 m (NAVD88) · heading 118° ESE · pitch -2°';
     document.getElementById('arStatusMessage').textContent='Model loaded: InfraBridge-Raleigh.ifc — 1,284 elements';
     const b=document.querySelector('.ar-view-body'); if(b) b.style.background='#0b0f16';
+    // The settings rows fold behind the ⚙ button since v215; open them for the shots.
+    const hp=document.getElementById('arHudPanel'); if(hp) hp.classList.add('is-open');
   });
   const only = async (keep) => p.evaluate((k) => {
     ['.ar-hud-panel','.ar-move-controls','.ar-minimap-wrap','.ar-location-display','#arStatusMessage','.ar-view-header']
