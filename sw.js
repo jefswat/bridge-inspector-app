@@ -1,9 +1,10 @@
-const CACHE_NAME = "photo-vault-v211";
+const CACHE_NAME = "photo-vault-v212";
 const ASSETS = [
   "./",
   "./index.html",
   "./app.js",
   "./ifc-viewer.js",
+  "./crs-us.js",
   "./ifc-export.js",
   "./report.js",
   "./basemap.js",
@@ -35,10 +36,16 @@ self.addEventListener("install", (e) => {
   self.skipWaiting();
 });
 
+// On-demand county/regional CRS bundle: kept in its own cache that survives app
+// updates, so a download made once (with signal) keeps working offline.
+// Bump together with IFCViewer.EXTRA_CRS_VERSION when crs-us-extra.js changes
+// (the page prefetches into "crs-extra-v" + that version).
+const CRS_EXTRA_CACHE = "crs-extra-v1";
+
 self.addEventListener("activate", (e) => {
   e.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
+      Promise.all(keys.filter((k) => k !== CACHE_NAME && k !== CRS_EXTRA_CACHE).map((k) => caches.delete(k)))
     )
   );
   self.clients.claim();
@@ -59,6 +66,19 @@ self.addEventListener("fetch", (e) => {
         const cached = await caches.match(e.request, { ignoreSearch: true });
         return cached || Response.error();
       })
+    );
+    return;
+  }
+  if (url.pathname.endsWith("/crs-us-extra.js")) {
+    e.respondWith(
+      (async () => {
+        const cache = await caches.open(CRS_EXTRA_CACHE);
+        const cached = await cache.match(e.request, { ignoreSearch: true });
+        if (cached) return cached;
+        const r = await fetch(e.request);
+        if (r.ok) cache.put(e.request, r.clone());
+        return r;
+      })()
     );
     return;
   }

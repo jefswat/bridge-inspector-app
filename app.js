@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v211";
-const BUILD_STAMP = "2026-07-31 01:45:00";
+const BUILD_VERSION = "v212";
+const BUILD_STAMP = "2026-11-03 18:00:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -2425,6 +2425,12 @@ function updateArEyeFromGeo(lat, lon, alt) {
   const g = ifcViewer.georef;
   const def = IFCViewer.CRS_DEFS[g.epsg];
   if (def && !window.proj4.defs(g.epsg)) window.proj4.defs(g.epsg, def);
+  if (!window.proj4.defs(g.epsg)) {
+    arGeoFailReason = ifcViewer.crsLoadError === "offline"
+      ? `coordinate system ${g.epsg} needs a one-time download - reconnect and reload the model`
+      : `unsupported coordinate system ${g.epsg}`;
+    return false;
+  }
   let E, N;
   try {
     const r = window.proj4("WGS84", g.epsg, [lon, lat]);
@@ -11945,14 +11951,15 @@ let arHudEl = null;
 function updateArDebugHud() {
   if (!arActive) { if (arHudEl) arHudEl.style.display = "none"; return; }
   if (!arHudEl) {
-    arHudEl = document.createElement("div");
-    arHudEl.id = "arDebugHud";
-    arHudEl.style.cssText =
-      "position:fixed;left:8px;top:8px;z-index:100000;padding:6px 8px;" +
-      "font:11px/1.35 monospace;color:#e2e8f0;background:rgba(2,6,23,0.72);" +
-      "border:1px solid rgba(148,163,184,0.4);border-radius:6px;white-space:pre;" +
-      "pointer-events:none;max-width:70vw;";
-    (arViewModal || document.body).appendChild(arHudEl);
+    // Static strip below the AR viewport (see index.html / .ar-debug-hud).
+    arHudEl = document.getElementById("arDebugHud");
+    if (!arHudEl) {
+      arHudEl = document.createElement("div");
+      arHudEl.id = "arDebugHud";
+      arHudEl.className = "ar-debug-hud";
+      const container = arViewModal && arViewModal.querySelector(".ar-view-container");
+      (container || arViewModal || document.body).appendChild(arHudEl);
+    }
   }
   arHudEl.style.display = "block";
   const azDeg = (arOrbitAz * 180 / Math.PI);
@@ -12161,6 +12168,38 @@ async function autoLoadBridgeIfc() {
 }
 
 async function registerServiceWorker() {
+  scheduleExtraCrsPrefetch();
   if (!("serviceWorker" in navigator)) return;
   try { await navigator.serviceWorker.register("sw.js"); } catch (e) { console.warn("SW:", e); }
+}
+
+// Background-download the county/regional coordinate-system bundle whenever
+// we're online, so a county-referenced IFC opened later in the field (no
+// signal) still georeferences. Stored straight into the same Cache Storage
+// bucket the service worker serves it from ("crs-extra-v<N>", which survives
+// app updates). No-op once cached.
+const CRS_EXTRA_VERSION = (typeof IFCViewer !== "undefined" && IFCViewer.EXTRA_CRS_VERSION) || "1";
+let extraCrsPrefetching = false;
+async function prefetchExtraCrs() {
+  if (extraCrsPrefetching || !("caches" in window) || navigator.onLine === false) return;
+  extraCrsPrefetching = true;
+  try {
+    const cache = await caches.open("crs-extra-v" + CRS_EXTRA_VERSION);
+    if (await cache.match("crs-us-extra.js", { ignoreSearch: true })) return;
+    await cache.add("crs-us-extra.js?v=" + CRS_EXTRA_VERSION);
+    console.log("[crs] extra coordinate systems prefetched for offline use");
+  } catch (e) {
+    console.warn("[crs] prefetch failed (will retry when online):", e);
+  } finally {
+    extraCrsPrefetching = false;
+  }
+}
+function scheduleExtraCrsPrefetch() {
+  // Wait until the app has settled so the download doesn't compete with startup.
+  const kick = () => (window.requestIdleCallback
+    ? requestIdleCallback(() => prefetchExtraCrs(), { timeout: 15000 })
+    : setTimeout(prefetchExtraCrs, 5000));
+  if (document.readyState === "complete") kick();
+  else window.addEventListener("load", kick, { once: true });
+  window.addEventListener("online", () => prefetchExtraCrs());
 }

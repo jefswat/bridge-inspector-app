@@ -1737,6 +1737,21 @@ select {
   justify-content: center;
 }
 
+/* AR debug readout: a fixed-height strip under the viewport (fixed height so
+   the per-frame text updates never resize the AR canvas). */
+.ar-debug-hud {
+  flex: 0 0 auto;
+  height: calc(8 * 1.35em + 12px);
+  padding: 6px 10px;
+  font: 11px/1.35 monospace;
+  color: var(--overlay-text, #f8fafc);
+  background: #020617;
+  border-top: 1px solid var(--overlay-border, #334155);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
+}
+
 #arCameraVideo {
   width: 100%;
   height: 100%;

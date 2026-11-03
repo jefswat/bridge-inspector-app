@@ -370,6 +370,9 @@ class IFCViewer {
       try { this.readLengthUnit(ifc, modelID); } catch (e) { console.warn('length unit read failed:', e); }
       console.log(`IFC scene unit: metre (web-ifc normalized); file declares: ${this.fileDeclaredLengthUnit || 'unspecified'}`);
 
+      // County / regional coordinate systems are downloaded on demand.
+      try { await this.ensureCrsForModel(ifc, modelID); } catch (e) { console.warn('CRS check failed:', e); }
+
       // Extract georeferencing (map coords) BEFORE fitCameraToObject bakes
       // recentering into the geometry, while meshes are still in web-ifc space.
       try {
@@ -451,7 +454,14 @@ class IFCViewer {
    * model uses a code not listed here, georeferencing center/footprint lat/lon
    * will be null but the raw easting/northing are still returned.
    */
+  // State-level US systems (State Plane NAD27/NAD83 in every realisation and
+  // unit, UTM, statewide + national) ship in crs-us.js, loaded before this file
+  // and precached by the service worker so they work with no signal. County,
+  // city, regional and world systems live in crs-us-extra.js: prefetched in the
+  // background when online, or fetched by loadExtraCrs() when a model needs one.
+  // The hand-written entries below take precedence.
   static CRS_DEFS = {
+    ...((typeof window !== 'undefined' && window.CRS_US_DEFS) || {}),
     // Nebraska low-distortion projection.
     'EPSG:7062': '+proj=tmerc +lat_0=40.25 +lon_0=-95.7333333333333 +k=1.000039 +x_0=5029210.05842011 +y_0=2011684.02336805 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs',
     // NAD83 / North Carolina (ftUS). A projection has to be used near the zone
@@ -473,6 +483,106 @@ class IFCViewer {
     // NAD83 / North Carolina (metres) - same zone, metric.
     'EPSG:32119': '+proj=lcc +lat_0=33.75 +lon_0=-79 +lat_1=36.1666666666667 +lat_2=34.3333333333333 +x_0=609601.22 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs',
   };
+
+  /** Normalised CRS name -> "AUTH:code" (from crs-us.js / crs-us-extra.js). */
+  static CRS_NAMES = { ...((typeof window !== 'undefined' && window.CRS_US_NAMES) || {}) };
+
+  static _extraCrsPromise = null;
+
+  /**
+   * Download the county / city / regional CRS bundle (once per session; the
+   * service worker keeps it for offline use afterwards). Resolves true when
+   * loaded, false if it could not be fetched (e.g. no signal).
+   */
+  static loadExtraCrs() {
+    if (window.CRS_US_EXTRA_DEFS) return Promise.resolve(true);
+    if (IFCViewer._extraCrsPromise) return IFCViewer._extraCrsPromise;
+    IFCViewer._extraCrsPromise = new Promise((resolve) => {
+      const s = document.createElement('script');
+      s.src = 'crs-us-extra.js?v=' + (IFCViewer.EXTRA_CRS_VERSION || '1');
+      s.onload = () => {
+        Object.assign(IFCViewer.CRS_DEFS, window.CRS_US_EXTRA_DEFS || {});
+        Object.assign(IFCViewer.CRS_NAMES, window.CRS_US_EXTRA_NAMES || {});
+        console.log(`[crs] extra coordinate systems loaded (${Object.keys(window.CRS_US_EXTRA_DEFS || {}).length})`);
+        resolve(!!window.CRS_US_EXTRA_DEFS);
+      };
+      s.onerror = () => {
+        console.warn('[crs] could not download crs-us-extra.js (offline?)');
+        IFCViewer._extraCrsPromise = null; // allow a retry later
+        resolve(false);
+      };
+      document.head.appendChild(s);
+    });
+    return IFCViewer._extraCrsPromise;
+  }
+
+  /** Keep in sync with the crs-extra cache name in sw.js. */
+  static EXTRA_CRS_VERSION = '1';
+
+  /**
+   * Make sure the model's IfcProjectedCRS has a proj4 definition, downloading
+   * the extra (county / regional) bundle if the core set doesn't cover it.
+   * Sets this.crsLoadError when the system is still unavailable.
+   */
+  async ensureCrsForModel(ifc, modelID) {
+    this.crsLoadError = null;
+    const WebIFC = window.WebIFC;
+    const val = (x) => (x && x.value !== undefined ? x.value : x);
+    let crs = null;
+    try {
+      const ids = ifc.GetLineIDsWithType(modelID, WebIFC.IFCPROJECTEDCRS);
+      if (ids && ids.size && ids.size() > 0) crs = ifc.GetLine(modelID, ids.get(0));
+    } catch (e) { /* none */ }
+    if (!crs) return;
+    const texts = [val(crs.Name), val(crs.Description), val(crs.MapZone)];
+    const key = IFCViewer.resolveCrsKey(...texts);
+    if (key && IFCViewer.CRS_DEFS[key]) return;
+    const ok = await IFCViewer.loadExtraCrs();
+    const key2 = IFCViewer.resolveCrsKey(...texts);
+    if (key2 && IFCViewer.CRS_DEFS[key2]) return;
+    this.crsLoadError = ok ? 'unsupported' : 'offline';
+    console.warn(`[crs] no definition for "${texts.filter(Boolean).join(' / ')}" (${this.crsLoadError})`);
+  }
+
+  /**
+   * Resolve an IfcProjectedCRS to a key in CRS_DEFS. Accepts "EPSG:26915",
+   * "ESRI:103600", "urn:ogc:def:crs:EPSG::26915", a bare code, or a CRS name
+   * such as "NAD83 / Minnesota South (ftUS)" or
+   * "NAD_1983_HARN_Adj_MN_Hennepin_Feet". ESRI codes mislabelled as EPSG
+   * (common in older exports) are also accepted.
+   */
+  static resolveCrsKey(...texts) {
+    const known = (k) => !!(IFCViewer.CRS_DEFS[k] || (window.proj4 && window.proj4.defs(k)));
+    const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    let firstCode = null;
+    for (const t of texts) {
+      const s = String(t || '').trim();
+      if (!s) continue;
+      const m = s.match(/\b(EPSG|ESRI)\b\s*[:\s]*(?:[\d.]*:)?\s*(\d{4,6})\b/i) || s.match(/^()(\d{4,6})$/);
+      if (m) {
+        const code = m[2];
+        const auth = (m[1] || 'EPSG').toUpperCase();
+        const cands = auth === 'ESRI' ? [`ESRI:${code}`, `EPSG:${code}`] : [`EPSG:${code}`, `ESRI:${code}`];
+        for (const k of cands) if (known(k)) return k;
+        if (!firstCode) firstCode = `${auth}:${code}`;
+      }
+      const byName = IFCViewer.CRS_NAMES[norm(s)];
+      if (byName) return byName;
+    }
+    return firstCode; // unknown code: kept so the UI can name it
+  }
+
+  /** Metres per native unit of a proj4 definition string (+units / +to_meter). */
+  static crsUnitMetres(def) {
+    if (!def) return 1;
+    const tm = def.match(/\+to_meter=([0-9.eE+-]+)/);
+    if (tm && isFinite(Number(tm[1])) && Number(tm[1]) > 0) return Number(tm[1]);
+    const u = (def.match(/\+units=([a-z-]+)/) || [])[1];
+    if (u === 'us-ft') return 1200 / 3937;
+    if (u === 'ft') return 0.3048;
+    if (u === 'km') return 1000;
+    return 1;
+  }
 
   /**
    * Register a proj4 CRS definition at runtime (e.g. fetched from epsg.io).
@@ -523,6 +633,51 @@ class IFCViewer {
     }
   }
 
+  /** Metres per unit for an IfcSIUnit / IfcConversionBasedUnit line, or null. */
+  lengthUnitMetres(ifc, modelID, line, depth = 0) {
+    const val = (x) => (x && x.value !== undefined ? x.value : x);
+    const clean = (x) => String(val(x) ?? '').replace(/[.]/g, '').toUpperCase();
+    const get = (ref) => {
+      const id = ref && ref.value !== undefined ? ref.value : ref;
+      if (typeof id === 'number') { try { return ifc.GetLine(modelID, id); } catch (e) { return null; } }
+      return (ref && typeof ref === 'object') ? ref : null;
+    };
+    if (!line || depth > 4) return null;
+    if (line.ConversionFactor) {
+      const mwu = get(line.ConversionFactor);
+      if (!mwu) return null;
+      const v = Number(val(mwu.ValueComponent));
+      const base = this.lengthUnitMetres(ifc, modelID, get(mwu.UnitComponent), depth + 1) || 1;
+      return isFinite(v) && v > 0 ? v * base : null;
+    }
+    if (clean(line.Name) === 'METRE') {
+      const pf = { EXA: 1e18, PETA: 1e15, TERA: 1e12, GIGA: 1e9, MEGA: 1e6, KILO: 1e3, HECTO: 1e2, DECA: 10,
+        DECI: 1e-1, CENTI: 1e-2, MILLI: 1e-3, MICRO: 1e-6, NANO: 1e-9 };
+      return pf[clean(line.Prefix)] || 1;
+    }
+    return null;
+  }
+
+  /** Metres per project length unit (from IfcUnitAssignment), default 1. */
+  projectLengthUnitMetres(ifc, modelID) {
+    const WebIFC = window.WebIFC;
+    const clean = (x) => String((x && x.value !== undefined ? x.value : x) ?? '').replace(/[.]/g, '').toUpperCase();
+    try {
+      const uaIds = ifc.GetLineIDsWithType(modelID, WebIFC.IFCUNITASSIGNMENT);
+      for (let a = 0; a < uaIds.size(); a++) {
+        const ua = ifc.GetLine(modelID, uaIds.get(a));
+        for (const u of (ua && ua.Units) || []) {
+          const id = u && u.value !== undefined ? u.value : u;
+          const line = typeof id === 'number' ? ifc.GetLine(modelID, id) : u;
+          if (!line || clean(line.UnitType) !== 'LENGTHUNIT') continue;
+          const f = this.lengthUnitMetres(ifc, modelID, line);
+          if (f) return f;
+        }
+      }
+    } catch (e) { /* default */ }
+    return 1;
+  }
+
   /**
    * Extract georeferencing from the IFC model and compute a WGS84 footprint.
    * Must run while meshes are still in web-ifc coordinated space (before the
@@ -559,9 +714,9 @@ class IFCViewer {
       }
     } catch (e) { /* no site, or no RefElevation on it */ }
 
-    const eastings  = Number(val(mc.Eastings)  ?? 0);
-    const northings = Number(val(mc.Northings) ?? 0);
-    const scale     = Number(val(mc.Scale)     ?? 1) || 1;
+    let eastings  = Number(val(mc.Eastings)  ?? 0);
+    let northings = Number(val(mc.Northings) ?? 0);
+    let scale     = Number(val(mc.Scale)     ?? 1) || 1;
     const absc      = Number(val(mc.XAxisAbscissa) ?? 1);
     const ordn      = Number(val(mc.XAxisOrdinate) ?? 0);
     // Rotation angle of the map grid relative to the model's X axis.
@@ -570,8 +725,55 @@ class IFCViewer {
     const sinT = ordn / norm;
 
     const crsName = crs ? String(val(crs.Name) || '') : '';
-    const epsgMatch = crsName.match(/EPSG:?\s*(\d+)/i);
-    const epsg = epsgMatch ? `EPSG:${epsgMatch[1]}` : null;
+    // "epsg" may also hold an ESRI code (county systems etc.).
+    const epsg = crs ? IFCViewer.resolveCrsKey(crsName, val(crs.Description), val(crs.MapZone)) : null;
+
+    // --- Unit reconciliation ---
+    // Map-conversion offsets should be in the CRS's own unit, and Scale should
+    // take the (metre) geometry into that unit. Exporters disagree on both:
+    //  - some write offsets in CRS units and declare no MapUnit, or the wrong
+    //    one (this repo's test models: ftUS offsets with MapUnit=METRE);
+    //  - some write offsets in a declared MapUnit that differs from the CRS
+    //    (MnDOT 9600: UTM metres CRS, offsets in FOOT).
+    // So offsets are used as written (unchanged behaviour) unless that lands
+    // implausibly far from the CRS's central meridian while converting via
+    // the declared MapUnit lands inside it.
+    const rawEastings = eastings, rawNorthings = northings, rawScale = scale;
+    const crsDef = epsg ? IFCViewer.CRS_DEFS[epsg] : null;
+    const crsUnitM = IFCViewer.crsUnitMetres(crsDef);
+    let mapUnitM = null;
+    try {
+      const mu = crs ? crs.MapUnit : null;
+      const muId = mu && mu.value !== undefined ? mu.value : mu;
+      if (typeof muId === 'number') mapUnitM = this.lengthUnitMetres(ifc, modelID, ifc.GetLine(modelID, muId));
+    } catch (e) { console.warn('MapUnit read failed:', e); }
+    if (crsDef && window.proj4 && mapUnitM && Math.abs(mapUnitM / crsUnitM - 1) > 1e-6) {
+      if (!window.proj4.defs(epsg)) window.proj4.defs(epsg, crsDef);
+      const plausible = (E, N) => {
+        try {
+          const [lon, lat] = window.proj4(epsg, 'WGS84', [E, N]);
+          if (!isFinite(lon) || !isFinite(lat) || Math.abs(lat) > 90) return false;
+          // Central meridian from the definition (+lon_0, or the UTM +zone).
+          const m0 = crsDef.match(/\+lon_0=([-0-9.eE]+)/);
+          const z = crsDef.match(/\+zone=(\d+)/);
+          const lon0 = m0 ? Number(m0[1]) : z ? Number(z[1]) * 6 - 183 : 0;
+          const dLon = Math.abs(((lon - lon0 + 540) % 360) - 180);
+          return dLon * Math.cos(lat * Math.PI / 180) <= 6; // within ~650 km of the meridian
+        } catch (e) { return false; }
+      };
+      const f = mapUnitM / crsUnitM;
+      if (!plausible(eastings, northings) && plausible(eastings * f, northings * f)) {
+        eastings *= f;
+        northings *= f;
+      }
+    }
+    // Scale: geometry is metres, so a non-metre CRS needs 1/crsUnitM. Files
+    // that already bake that in (Scale 3.2808 for a feet CRS) are left alone.
+    const unitRatio = 1 / crsUnitM;
+    if (Math.abs(unitRatio - 1) > 1e-6 && Math.abs(scale / unitRatio - 1) > 0.01) scale *= unitRatio;
+    if (eastings !== rawEastings || scale !== rawScale) {
+      console.log('[georef] unit reconciliation', { epsg, mapUnitM, crsUnitM, rawEastings, rawNorthings, eastings, northings, rawScale, scale });
+    }
 
     // --- Recover true world coords despite COORDINATE_TO_ORIGIN ---
     // Coordination matrix C maps true model coords -> rendered (coordinated)
