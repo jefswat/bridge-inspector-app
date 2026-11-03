@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v181";
-const BUILD_STAMP = "2026-07-31 01:45:00";
+const BUILD_VERSION = "v182";
+const BUILD_STAMP = "2026-11-03 12:00:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -2035,6 +2035,10 @@ function updateArEyeFromGeo(lat, lon, alt) {
   const g = ifcViewer.georef;
   const def = IFCViewer.CRS_DEFS[g.epsg];
   if (def && !window.proj4.defs(g.epsg)) window.proj4.defs(g.epsg, def);
+  if (!window.proj4.defs(g.epsg)) {
+    arGeoFailReason = `unsupported coordinate system ${g.epsg}`;
+    return false;
+  }
   let E, N;
   try {
     const r = window.proj4("WGS84", g.epsg, [lon, lat]);

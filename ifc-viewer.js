@@ -452,8 +452,37 @@ class IFCViewer {
    * will be null but the raw easting/northing are still returned.
    */
   static CRS_DEFS = {
-    'EPSG:7062': '+proj=tmerc +lat_0=40.25 +lon_0=-95.7333333333333 +k=1.000039 +x_0=5029210.05842011 +y_0=2011684.02336805 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs'
+    'EPSG:7062': '+proj=tmerc +lat_0=40.25 +lon_0=-95.7333333333333 +k=1.000039 +x_0=5029210.05842011 +y_0=2011684.02336805 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs',
+    ...(() => {
+      // UTM families, generated so any common UTM-georeferenced IFC works:
+      //   NAD83 / UTM zone 1N-23N         EPSG:26901-26923
+      //   NAD83(2011) / UTM zone 59N-60N, 1N-19N  EPSG:6328-6348 (zones 59,60,1..19)
+      //   WGS 84 / UTM zone 1N-60N        EPSG:32601-32660
+      //   WGS 84 / UTM zone 1S-60S        EPSG:32701-32760
+      const d = {};
+      const nad83 = (z) => `+proj=utm +zone=${z} +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs`;
+      for (let z = 1; z <= 23; z++) d[`EPSG:${26900 + z}`] = nad83(z);
+      d['EPSG:6328'] = nad83(59); d['EPSG:6329'] = nad83(60);
+      for (let z = 1; z <= 19; z++) d[`EPSG:${6329 + z}`] = nad83(z);
+      for (let z = 1; z <= 60; z++) {
+        d[`EPSG:${32600 + z}`] = `+proj=utm +zone=${z} +datum=WGS84 +units=m +no_defs +type=crs`;
+        d[`EPSG:${32700 + z}`] = `+proj=utm +zone=${z} +south +datum=WGS84 +units=m +no_defs +type=crs`;
+      }
+      return d;
+    })(),
   };
+
+  /** Metres per native unit of a proj4 definition string (+units / +to_meter). */
+  static crsUnitMetres(def) {
+    if (!def) return 1;
+    const tm = def.match(/\+to_meter=([0-9.eE+-]+)/);
+    if (tm && isFinite(Number(tm[1])) && Number(tm[1]) > 0) return Number(tm[1]);
+    const u = (def.match(/\+units=([a-z-]+)/) || [])[1];
+    if (u === 'us-ft') return 1200 / 3937;
+    if (u === 'ft') return 0.3048;
+    if (u === 'km') return 1000;
+    return 1;
+  }
 
   /**
    * Register a proj4 CRS definition at runtime (e.g. fetched from epsg.io).
@@ -504,6 +533,51 @@ class IFCViewer {
     }
   }
 
+  /** Metres per unit for an IfcSIUnit / IfcConversionBasedUnit line, or null. */
+  lengthUnitMetres(ifc, modelID, line, depth = 0) {
+    const val = (x) => (x && x.value !== undefined ? x.value : x);
+    const clean = (x) => String(val(x) ?? '').replace(/[.]/g, '').toUpperCase();
+    const get = (ref) => {
+      const id = ref && ref.value !== undefined ? ref.value : ref;
+      if (typeof id === 'number') { try { return ifc.GetLine(modelID, id); } catch (e) { return null; } }
+      return (ref && typeof ref === 'object') ? ref : null;
+    };
+    if (!line || depth > 4) return null;
+    if (line.ConversionFactor) {
+      const mwu = get(line.ConversionFactor);
+      if (!mwu) return null;
+      const v = Number(val(mwu.ValueComponent));
+      const base = this.lengthUnitMetres(ifc, modelID, get(mwu.UnitComponent), depth + 1) || 1;
+      return isFinite(v) && v > 0 ? v * base : null;
+    }
+    if (clean(line.Name) === 'METRE') {
+      const pf = { EXA: 1e18, PETA: 1e15, TERA: 1e12, GIGA: 1e9, MEGA: 1e6, KILO: 1e3, HECTO: 1e2, DECA: 10,
+        DECI: 1e-1, CENTI: 1e-2, MILLI: 1e-3, MICRO: 1e-6, NANO: 1e-9 };
+      return pf[clean(line.Prefix)] || 1;
+    }
+    return null;
+  }
+
+  /** Metres per project length unit (from IfcUnitAssignment), default 1. */
+  projectLengthUnitMetres(ifc, modelID) {
+    const WebIFC = window.WebIFC;
+    const clean = (x) => String((x && x.value !== undefined ? x.value : x) ?? '').replace(/[.]/g, '').toUpperCase();
+    try {
+      const uaIds = ifc.GetLineIDsWithType(modelID, WebIFC.IFCUNITASSIGNMENT);
+      for (let a = 0; a < uaIds.size(); a++) {
+        const ua = ifc.GetLine(modelID, uaIds.get(a));
+        for (const u of (ua && ua.Units) || []) {
+          const id = u && u.value !== undefined ? u.value : u;
+          const line = typeof id === 'number' ? ifc.GetLine(modelID, id) : u;
+          if (!line || clean(line.UnitType) !== 'LENGTHUNIT') continue;
+          const f = this.lengthUnitMetres(ifc, modelID, line);
+          if (f) return f;
+        }
+      }
+    } catch (e) { /* default */ }
+    return 1;
+  }
+
   /**
    * Extract georeferencing from the IFC model and compute a WGS84 footprint.
    * Must run while meshes are still in web-ifc coordinated space (before the
@@ -526,9 +600,9 @@ class IFCViewer {
 
     if (!mc) return null; // not georeferenced via map conversion
 
-    const eastings  = Number(val(mc.Eastings)  ?? 0);
-    const northings = Number(val(mc.Northings) ?? 0);
-    const scale     = Number(val(mc.Scale)     ?? 1) || 1;
+    let eastings  = Number(val(mc.Eastings)  ?? 0);
+    let northings = Number(val(mc.Northings) ?? 0);
+    let scale     = Number(val(mc.Scale)     ?? 1) || 1;
     const absc      = Number(val(mc.XAxisAbscissa) ?? 1);
     const ordn      = Number(val(mc.XAxisOrdinate) ?? 0);
     // Rotation angle of the map grid relative to the model's X axis.
@@ -539,6 +613,36 @@ class IFCViewer {
     const crsName = crs ? String(val(crs.Name) || '') : '';
     const epsgMatch = crsName.match(/EPSG:?\s*(\d+)/i);
     const epsg = epsgMatch ? `EPSG:${epsgMatch[1]}` : null;
+
+    // --- Unit normalisation ---
+    // Eastings/Northings are expressed in IfcProjectedCRS.MapUnit (default:
+    // the project length unit), which need not match the CRS's native unit
+    // (e.g. a UTM/metre CRS with offsets written in feet). Scene geometry is
+    // always metres (web-ifc normalises). Convert so that
+    //   E_crs = x_m * scale + eastings   (all in CRS native units).
+    const rawEastings = eastings, rawNorthings = northings, rawScale = scale;
+    let mapUnitM = this.projectLengthUnitMetres(ifc, modelID);
+    try {
+      const mu = crs ? crs.MapUnit : null;
+      const muId = mu && mu.value !== undefined ? mu.value : mu;
+      if (typeof muId === 'number') {
+        const f = this.lengthUnitMetres(ifc, modelID, ifc.GetLine(modelID, muId));
+        if (f) mapUnitM = f;
+      }
+    } catch (e) { console.warn('MapUnit read failed:', e); }
+    const crsUnitM = IFCViewer.crsUnitMetres(epsg ? IFCViewer.CRS_DEFS[epsg] : null);
+    const offsetToCrs = (mapUnitM || 1) / crsUnitM;
+    eastings  *= offsetToCrs;
+    northings *= offsetToCrs;
+    // Legacy files sometimes bake the metre->CRS-unit conversion into Scale
+    // (e.g. 3.2808 for a feet CRS). Only apply the conversion if not already.
+    const unitRatio = 1 / crsUnitM;
+    if (Math.abs(unitRatio - 1) > 1e-6 && Math.abs(scale / unitRatio - 1) > 0.01) {
+      scale *= unitRatio;
+    }
+    if (offsetToCrs !== 1 || scale !== rawScale) {
+      console.log('[georef] unit normalisation', { epsg, mapUnitM, crsUnitM, rawEastings, rawNorthings, eastings, northings, rawScale, scale });
+    }
 
     // --- Recover true world coords despite COORDINATE_TO_ORIGIN ---
     // Coordination matrix C maps true model coords -> rendered (coordinated)
