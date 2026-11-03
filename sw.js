@@ -1,4 +1,4 @@
-const CACHE_NAME = "photo-vault-v185";
+const CACHE_NAME = "photo-vault-v186";
 const ASSETS = [
   "./",
   "./index.html",
@@ -37,7 +37,8 @@ self.addEventListener("install", (e) => {
 
 // On-demand county/regional CRS bundle: kept in its own cache that survives app
 // updates, so a download made once (with signal) keeps working offline.
-// Bump together with IFCViewer.EXTRA_CRS_VERSION when crs-us-extra.js changes.
+// Bump together with IFCViewer.EXTRA_CRS_VERSION when crs-us-extra.js changes
+// (the page prefetches into "crs-extra-v" + that version).
 const CRS_EXTRA_CACHE = "crs-extra-v1";
 
 self.addEventListener("activate", (e) => {

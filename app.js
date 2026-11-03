@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v185";
-const BUILD_STAMP = "2026-11-03 15:00:00";
+const BUILD_VERSION = "v186";
+const BUILD_STAMP = "2026-11-03 16:00:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -10843,6 +10843,38 @@ async function autoLoadBridgeIfc() {
 }
 
 async function registerServiceWorker() {
+  scheduleExtraCrsPrefetch();
   if (!("serviceWorker" in navigator)) return;
   try { await navigator.serviceWorker.register("sw.js"); } catch (e) { console.warn("SW:", e); }
+}
+
+// Background-download the county/regional coordinate-system bundle whenever
+// we're online, so a county-referenced IFC opened later in the field (no
+// signal) still georeferences. Stored straight into the same Cache Storage
+// bucket the service worker serves it from ("crs-extra-v<N>", which survives
+// app updates). No-op once cached.
+const CRS_EXTRA_VERSION = (typeof IFCViewer !== "undefined" && IFCViewer.EXTRA_CRS_VERSION) || "1";
+let extraCrsPrefetching = false;
+async function prefetchExtraCrs() {
+  if (extraCrsPrefetching || !("caches" in window) || navigator.onLine === false) return;
+  extraCrsPrefetching = true;
+  try {
+    const cache = await caches.open("crs-extra-v" + CRS_EXTRA_VERSION);
+    if (await cache.match("crs-us-extra.js", { ignoreSearch: true })) return;
+    await cache.add("crs-us-extra.js?v=" + CRS_EXTRA_VERSION);
+    console.log("[crs] extra coordinate systems prefetched for offline use");
+  } catch (e) {
+    console.warn("[crs] prefetch failed (will retry when online):", e);
+  } finally {
+    extraCrsPrefetching = false;
+  }
+}
+function scheduleExtraCrsPrefetch() {
+  // Wait until the app has settled so the download doesn't compete with startup.
+  const kick = () => (window.requestIdleCallback
+    ? requestIdleCallback(() => prefetchExtraCrs(), { timeout: 15000 })
+    : setTimeout(prefetchExtraCrs, 5000));
+  if (document.readyState === "complete") kick();
+  else window.addEventListener("load", kick, { once: true });
+  window.addEventListener("online", () => prefetchExtraCrs());
 }
