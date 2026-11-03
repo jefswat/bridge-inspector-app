@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v184";
-const BUILD_STAMP = "2026-11-03 14:00:00";
+const BUILD_VERSION = "v185";
+const BUILD_STAMP = "2026-11-03 15:00:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -2036,7 +2036,9 @@ function updateArEyeFromGeo(lat, lon, alt) {
   const def = IFCViewer.CRS_DEFS[g.epsg];
   if (def && !window.proj4.defs(g.epsg)) window.proj4.defs(g.epsg, def);
   if (!window.proj4.defs(g.epsg)) {
-    arGeoFailReason = `unsupported coordinate system ${g.epsg}`;
+    arGeoFailReason = ifcViewer.crsLoadError === "offline"
+      ? `coordinate system ${g.epsg} needs a one-time download - reconnect and reload the model`
+      : `unsupported coordinate system ${g.epsg}`;
     return false;
   }
   let E, N;

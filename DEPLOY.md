@@ -124,5 +124,5 @@ unregister the service worker + hard refresh, then confirm the header build stam
 
 Make sure these are all present before pushing:
 `app.js`, `index.html`, `map.html`, `map.js`, `styles.css`, `sw.js`,
-`ifc-viewer.js`, `ifc-export.js`, `crs-us.js`, `basemap.js`, `report.js`, `manifest.webmanifest`,
+`ifc-viewer.js`, `ifc-export.js`, `crs-us.js`, `crs-us-extra.js`, `basemap.js`, `report.js`, `manifest.webmanifest`,
 `.nojekyll`

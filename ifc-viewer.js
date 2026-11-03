@@ -370,6 +370,9 @@ class IFCViewer {
       try { this.readLengthUnit(ifc, modelID); } catch (e) { console.warn('length unit read failed:', e); }
       console.log(`IFC scene unit: metre (web-ifc normalized); file declares: ${this.fileDeclaredLengthUnit || 'unspecified'}`);
 
+      // County / regional coordinate systems are downloaded on demand.
+      try { await this.ensureCrsForModel(ifc, modelID); } catch (e) { console.warn('CRS check failed:', e); }
+
       // Extract georeferencing (map coords) BEFORE fitCameraToObject bakes
       // recentering into the geometry, while meshes are still in web-ifc space.
       try {
@@ -451,16 +454,75 @@ class IFCViewer {
    * model uses a code not listed here, georeferencing center/footprint lat/lon
    * will be null but the raw easting/northing are still returned.
    */
-  // Every US-area projected CRS (EPSG + ESRI, incl. state plane, UTM, NAD27,
-  // MnDOT county, WISCRS, ...) is bundled in crs-us.js (loaded before this
-  // file and precached by the service worker, so it works with no signal).
+  // State-level US systems (State Plane NAD27/NAD83 in every realisation and
+  // unit, UTM, statewide + national) ship in crs-us.js, loaded before this file
+  // and precached by the service worker so they work with no signal. County,
+  // city, regional and world systems live in crs-us-extra.js and are fetched by
+  // loadExtraCrs() the first time a model needs one (then kept offline).
   static CRS_DEFS = {
     ...((typeof window !== 'undefined' && window.CRS_US_DEFS) || {}),
     'EPSG:7062': '+proj=tmerc +lat_0=40.25 +lon_0=-95.7333333333333 +k=1.000039 +x_0=5029210.05842011 +y_0=2011684.02336805 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs',
   };
 
-  /** Normalised CRS name -> "AUTH:code" (from crs-us.js). */
-  static CRS_NAMES = (typeof window !== 'undefined' && window.CRS_US_NAMES) || {};
+  /** Normalised CRS name -> "AUTH:code" (from crs-us.js / crs-us-extra.js). */
+  static CRS_NAMES = { ...((typeof window !== 'undefined' && window.CRS_US_NAMES) || {}) };
+
+  static _extraCrsPromise = null;
+
+  /**
+   * Download the county / city / regional CRS bundle (once per session; the
+   * service worker keeps it for offline use afterwards). Resolves true when
+   * loaded, false if it could not be fetched (e.g. no signal).
+   */
+  static loadExtraCrs() {
+    if (window.CRS_US_EXTRA_DEFS) return Promise.resolve(true);
+    if (IFCViewer._extraCrsPromise) return IFCViewer._extraCrsPromise;
+    IFCViewer._extraCrsPromise = new Promise((resolve) => {
+      const s = document.createElement('script');
+      s.src = 'crs-us-extra.js?v=' + (IFCViewer.EXTRA_CRS_VERSION || '1');
+      s.onload = () => {
+        Object.assign(IFCViewer.CRS_DEFS, window.CRS_US_EXTRA_DEFS || {});
+        Object.assign(IFCViewer.CRS_NAMES, window.CRS_US_EXTRA_NAMES || {});
+        console.log(`[crs] extra coordinate systems loaded (${Object.keys(window.CRS_US_EXTRA_DEFS || {}).length})`);
+        resolve(!!window.CRS_US_EXTRA_DEFS);
+      };
+      s.onerror = () => {
+        console.warn('[crs] could not download crs-us-extra.js (offline?)');
+        IFCViewer._extraCrsPromise = null; // allow a retry later
+        resolve(false);
+      };
+      document.head.appendChild(s);
+    });
+    return IFCViewer._extraCrsPromise;
+  }
+
+  /** Keep in sync with the crs-extra cache name in sw.js. */
+  static EXTRA_CRS_VERSION = '1';
+
+  /**
+   * Make sure the model's IfcProjectedCRS has a proj4 definition, downloading
+   * the extra (county / regional) bundle if the core set doesn't cover it.
+   * Sets this.crsLoadError when the system is still unavailable.
+   */
+  async ensureCrsForModel(ifc, modelID) {
+    this.crsLoadError = null;
+    const WebIFC = window.WebIFC;
+    const val = (x) => (x && x.value !== undefined ? x.value : x);
+    let crs = null;
+    try {
+      const ids = ifc.GetLineIDsWithType(modelID, WebIFC.IFCPROJECTEDCRS);
+      if (ids && ids.size && ids.size() > 0) crs = ifc.GetLine(modelID, ids.get(0));
+    } catch (e) { /* none */ }
+    if (!crs) return;
+    const texts = [val(crs.Name), val(crs.Description), val(crs.MapZone)];
+    const key = IFCViewer.resolveCrsKey(...texts);
+    if (key && IFCViewer.CRS_DEFS[key]) return;
+    const ok = await IFCViewer.loadExtraCrs();
+    const key2 = IFCViewer.resolveCrsKey(...texts);
+    if (key2 && IFCViewer.CRS_DEFS[key2]) return;
+    this.crsLoadError = ok ? 'unsupported' : 'offline';
+    console.warn(`[crs] no definition for "${texts.filter(Boolean).join(' / ')}" (${this.crsLoadError})`);
+  }
 
   /**
    * Resolve an IfcProjectedCRS to a key in CRS_DEFS. Accepts "EPSG:26915",
