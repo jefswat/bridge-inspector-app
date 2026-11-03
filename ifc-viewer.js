@@ -457,11 +457,31 @@ class IFCViewer {
   // State-level US systems (State Plane NAD27/NAD83 in every realisation and
   // unit, UTM, statewide + national) ship in crs-us.js, loaded before this file
   // and precached by the service worker so they work with no signal. County,
-  // city, regional and world systems live in crs-us-extra.js and are fetched by
-  // loadExtraCrs() the first time a model needs one (then kept offline).
+  // city, regional and world systems live in crs-us-extra.js: prefetched in the
+  // background when online, or fetched by loadExtraCrs() when a model needs one.
+  // The hand-written entries below take precedence.
   static CRS_DEFS = {
     ...((typeof window !== 'undefined' && window.CRS_US_DEFS) || {}),
+    // Nebraska low-distortion projection.
     'EPSG:7062': '+proj=tmerc +lat_0=40.25 +lon_0=-95.7333333333333 +k=1.000039 +x_0=5029210.05842011 +y_0=2011684.02336805 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs',
+    // NAD83 / North Carolina (ftUS). A projection has to be used near the zone
+    // it was designed for: 1500 km off its central meridian, EPSG:7062 carries
+    // about 3% scale error and 10 degrees of grid convergence, which would show
+    // up as a model both oversized and visibly rotated from north.
+    'EPSG:2264': '+proj=lcc +lat_0=33.75 +lon_0=-79 +lat_1=36.1666666666667 +lat_2=34.3333333333333 +x_0=609601.219202438 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs',
+    // NAD83 / New York Long Island (ftUS) and its metric twin. Manhattan
+    // sits essentially on the zone's central meridian, so convergence is
+    // 0.004 degrees and the scale factor 0.999997.
+    'EPSG:2263': '+proj=lcc +lat_1=41.0333333333333 +lat_2=40.6666666666667 +lat_0=40.1666666666667 +lon_0=-74 +x_0=300000 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs',
+    'EPSG:32118': '+proj=lcc +lat_1=41.0333333333333 +lat_2=40.6666666666667 +lat_0=40.1666666666667 +lon_0=-74 +x_0=300000 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs',
+    // NAD83 / Iowa South (ftUS) and its metric twin. The Des Moines metro
+    // is in the south zone: at 41.68 N it sits between the zone's standard
+    // parallels (40.617 and 41.783), where scale error is smallest. Iowa
+    // North would put it a degree below both of its parallels.
+    'EPSG:3418': '+proj=lcc +lat_0=40 +lon_0=-93.5 +lat_1=41.7833333333333 +lat_2=40.6166666666667 +x_0=500000.00001016 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs',
+    'EPSG:26976': '+proj=lcc +lat_0=40 +lon_0=-93.5 +lat_1=41.7833333333333 +lat_2=40.6166666666667 +x_0=500000 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs',
+    // NAD83 / North Carolina (metres) - same zone, metric.
+    'EPSG:32119': '+proj=lcc +lat_0=33.75 +lon_0=-79 +lat_1=36.1666666666667 +lat_2=34.3333333333333 +x_0=609601.22 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs',
   };
 
   /** Normalised CRS name -> "AUTH:code" (from crs-us.js / crs-us-extra.js). */
@@ -680,6 +700,27 @@ class IFCViewer {
 
     if (!mc) return null; // not georeferenced via map conversion
 
+    // IfcSite.RefElevation is the site's GROUND level. Worth having separately
+    // from the model's lowest geometry: a model containing piles, footings or
+    // drilled shafts has its lowest point well below grade, so using that as
+    // "the ground you stand on" would put the viewer underground.
+    this.siteRefElevM = null;
+    try {
+      const siteIds = ifc.GetLineIDsWithType(modelID, WebIFC.IFCSITE);
+      if (siteIds && siteIds.size && siteIds.size() > 0) {
+        const site = ifc.GetLine(modelID, siteIds.get(0));
+        // An unset RefElevation ($) comes back null, and Number(null) is 0 -
+        // which made a model with no authored ground level look like it stood
+        // at sea level, so every GPS altitude was rejected as a datum mismatch
+        // and the viewer was put ~200 m below a NAVD88 bridge. Unset means
+        // unknown. The value is in project length units (web-ifc converts
+        // geometry to metres, not attribute values).
+        const raw = val(site.RefElevation);
+        const re = (raw === null || raw === undefined || raw === '') ? NaN : Number(raw);
+        if (isFinite(re)) this.siteRefElevM = re * (this.projectLengthUnitMetres(ifc, modelID) || 1);
+      }
+    } catch (e) { /* no site, or no RefElevation on it */ }
+
     let eastings  = Number(val(mc.Eastings)  ?? 0);
     let northings = Number(val(mc.Northings) ?? 0);
     let scale     = Number(val(mc.Scale)     ?? 1) || 1;
@@ -694,34 +735,51 @@ class IFCViewer {
     // "epsg" may also hold an ESRI code (county systems etc.).
     const epsg = crs ? IFCViewer.resolveCrsKey(crsName, val(crs.Description), val(crs.MapZone)) : null;
 
-    // --- Unit normalisation ---
-    // Eastings/Northings are expressed in IfcProjectedCRS.MapUnit (default:
-    // the project length unit), which need not match the CRS's native unit
-    // (e.g. a UTM/metre CRS with offsets written in feet). Scene geometry is
-    // always metres (web-ifc normalises). Convert so that
-    //   E_crs = x_m * scale + eastings   (all in CRS native units).
+    // --- Unit reconciliation ---
+    // Map-conversion offsets should be in the CRS's own unit, and Scale should
+    // take the (metre) geometry into that unit. Exporters disagree on both:
+    //  - some write offsets in CRS units and declare no MapUnit, or the wrong
+    //    one (this repo's test models: ftUS offsets with MapUnit=METRE);
+    //  - some write offsets in a declared MapUnit that differs from the CRS
+    //    (MnDOT 9600: UTM metres CRS, offsets in FOOT).
+    // So offsets are used as written (unchanged behaviour) unless that lands
+    // implausibly far from the CRS's central meridian while converting via
+    // the declared MapUnit lands inside it.
     const rawEastings = eastings, rawNorthings = northings, rawScale = scale;
-    let mapUnitM = this.projectLengthUnitMetres(ifc, modelID);
+    const crsDef = epsg ? IFCViewer.CRS_DEFS[epsg] : null;
+    const crsUnitM = IFCViewer.crsUnitMetres(crsDef);
+    let mapUnitM = null;
     try {
       const mu = crs ? crs.MapUnit : null;
       const muId = mu && mu.value !== undefined ? mu.value : mu;
-      if (typeof muId === 'number') {
-        const f = this.lengthUnitMetres(ifc, modelID, ifc.GetLine(modelID, muId));
-        if (f) mapUnitM = f;
-      }
+      if (typeof muId === 'number') mapUnitM = this.lengthUnitMetres(ifc, modelID, ifc.GetLine(modelID, muId));
     } catch (e) { console.warn('MapUnit read failed:', e); }
-    const crsUnitM = IFCViewer.crsUnitMetres(epsg ? IFCViewer.CRS_DEFS[epsg] : null);
-    const offsetToCrs = (mapUnitM || 1) / crsUnitM;
-    eastings  *= offsetToCrs;
-    northings *= offsetToCrs;
-    // Legacy files sometimes bake the metre->CRS-unit conversion into Scale
-    // (e.g. 3.2808 for a feet CRS). Only apply the conversion if not already.
-    const unitRatio = 1 / crsUnitM;
-    if (Math.abs(unitRatio - 1) > 1e-6 && Math.abs(scale / unitRatio - 1) > 0.01) {
-      scale *= unitRatio;
+    if (crsDef && window.proj4 && mapUnitM && Math.abs(mapUnitM / crsUnitM - 1) > 1e-6) {
+      if (!window.proj4.defs(epsg)) window.proj4.defs(epsg, crsDef);
+      const plausible = (E, N) => {
+        try {
+          const [lon, lat] = window.proj4(epsg, 'WGS84', [E, N]);
+          if (!isFinite(lon) || !isFinite(lat) || Math.abs(lat) > 90) return false;
+          // Central meridian from the definition (+lon_0, or the UTM +zone).
+          const m0 = crsDef.match(/\+lon_0=([-0-9.eE]+)/);
+          const z = crsDef.match(/\+zone=(\d+)/);
+          const lon0 = m0 ? Number(m0[1]) : z ? Number(z[1]) * 6 - 183 : 0;
+          const dLon = Math.abs(((lon - lon0 + 540) % 360) - 180);
+          return dLon * Math.cos(lat * Math.PI / 180) <= 6; // within ~650 km of the meridian
+        } catch (e) { return false; }
+      };
+      const f = mapUnitM / crsUnitM;
+      if (!plausible(eastings, northings) && plausible(eastings * f, northings * f)) {
+        eastings *= f;
+        northings *= f;
+      }
     }
-    if (offsetToCrs !== 1 || scale !== rawScale) {
-      console.log('[georef] unit normalisation', { epsg, mapUnitM, crsUnitM, rawEastings, rawNorthings, eastings, northings, rawScale, scale });
+    // Scale: geometry is metres, so a non-metre CRS needs 1/crsUnitM. Files
+    // that already bake that in (Scale 3.2808 for a feet CRS) are left alone.
+    const unitRatio = 1 / crsUnitM;
+    if (Math.abs(unitRatio - 1) > 1e-6 && Math.abs(scale / unitRatio - 1) > 0.01) scale *= unitRatio;
+    if (eastings !== rawEastings || scale !== rawScale) {
+      console.log('[georef] unit reconciliation', { epsg, mapUnitM, crsUnitM, rawEastings, rawNorthings, eastings, northings, rawScale, scale });
     }
 
     // --- Recover true world coords despite COORDINATE_TO_ORIGIN ---
@@ -824,20 +882,25 @@ class IFCViewer {
     this.model.traverse((child) => {
       if (!child || !child.isMesh) return;
       let bucket = this._classifyProjectionBucket(child.userData?.elementType, child.userData?.elementName);
-      const box = new THREE.Box3().setFromObject(child);
-      if (!box || !Number.isFinite(box.min.x) || !Number.isFinite(box.max.x)) return;
-      const corners = [
-        [box.min.x, box.min.y, box.min.z], [box.max.x, box.min.y, box.min.z],
-        [box.min.x, box.max.y, box.min.z], [box.max.x, box.max.y, box.min.z],
-        [box.min.x, box.min.y, box.max.z], [box.max.x, box.min.y, box.max.z],
-        [box.min.x, box.max.y, box.max.z], [box.max.x, box.max.y, box.max.z],
-      ].map((a) => new THREE.Vector3(a[0], a[1], a[2]).applyMatrix4(Cinv));
+      // Plan footprint from the mesh's actual vertices, not its axis-aligned
+      // bounding box: on a bridge skewed to the map grid, a box turns every
+      // long diagonal member (barrier, tie, floor beam) into a fat square.
+      const pos = child.geometry && child.geometry.attributes && child.geometry.attributes.position;
+      if (!pos || !pos.count) return;
+      child.updateMatrixWorld(true);
+      const M = new THREE.Matrix4().multiplyMatrices(Cinv, child.matrixWorld);
+      const me = M.elements;
+      const planPts = [];
       let minE = Infinity, maxE = -Infinity, minN = Infinity, maxN = -Infinity;
       let minEl = Infinity, maxEl = -Infinity;
-      for (const t of corners) {
-        const e = t.x;
-        const n = -t.z;
-        const el = t.y;
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+        // M * (x,y,z,1): x = easting, -z = northing, y = elevation.
+        const e = me[0] * x + me[4] * y + me[8] * z + me[12];
+        const el = me[1] * x + me[5] * y + me[9] * z + me[13];
+        const n = -(me[2] * x + me[6] * y + me[10] * z + me[14]);
+        if (!Number.isFinite(e) || !Number.isFinite(n)) continue;
+        planPts.push([e, n]);
         if (e < minE) minE = e;
         if (e > maxE) maxE = e;
         if (n < minN) minN = n;
@@ -846,6 +909,9 @@ class IFCViewer {
         if (el > maxEl) maxEl = el;
       }
       if (!Number.isFinite(minE) || !Number.isFinite(maxE) || !Number.isFinite(minN) || !Number.isFinite(maxN)) return;
+      // Reduce to this mesh's hull now so per-element hulls stay cheap.
+      let meshHull = this._convexHull(planPts);
+      if (meshHull.length < 3) meshHull = [[minE, minN], [maxE, minN], [maxE, maxN], [minE, maxN]];
       // Fallback classification for generic IFC proxies: infer structure from elevation.
       if (bucket === "other" && Number.isFinite(minEl) && Number.isFinite(maxEl)) {
         const centerEl = (minEl + maxEl) / 2;
@@ -868,7 +934,7 @@ class IFCViewer {
         };
         groupMap.set(expressId, grp);
       }
-      grp.points.push([minE, minN], [maxE, minN], [maxE, maxN], [minE, maxN]);
+      for (const pt of meshHull) grp.points.push(pt);
       meshCounts.set(bucket, (meshCounts.get(bucket) || 0) + 1);
     });
 

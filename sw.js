@@ -1,4 +1,4 @@
-const CACHE_NAME = "photo-vault-v186";
+const CACHE_NAME = "photo-vault-v214";
 const ASSETS = [
   "./",
   "./index.html",
@@ -25,6 +25,7 @@ const ASSETS = [
   "./vendor/cv.js",
   "./vendor/aruco.js",
   "./vendor/apriltag_36h11.js",
+  "./vendor/three.min.js",
   "./vendor/proj4.js",
   "./vendor/web-ifc-api.js",
   "./vendor/web-ifc.wasm"

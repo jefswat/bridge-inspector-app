@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v186";
-const BUILD_STAMP = "2026-11-03 16:00:00";
+const BUILD_VERSION = "v214";
+const BUILD_STAMP = "2026-11-03 20:00:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -205,6 +205,7 @@ const ifcInspectionPsetCard = document.getElementById("ifcInspectionPsetCard");
 const ifcTaggedPhotos    = document.getElementById("ifcTaggedPhotos");
 const ifcSetPhotoLocationButton = document.getElementById("ifcSetPhotoLocationButton");
 const ifcLinkToPhotoButton = document.getElementById("ifcLinkToPhotoButton");
+const ifcSnapToMeButton = document.getElementById("ifcSnapToMeButton");
 const ifcClearSelectionButton = document.getElementById("ifcClearSelectionButton");
 const ifcConditionRatingInput = document.getElementById("ifcConditionRatingInput");
 const ifcApplyConditionPsetButton = document.getElementById("ifcApplyConditionPsetButton");
@@ -296,6 +297,17 @@ const arTurnLeftBtn        = document.getElementById("arTurnLeftBtn");
 const arTurnRightBtn       = document.getElementById("arTurnRightBtn");
 const arFwdBtn             = document.getElementById("arFwdBtn");
 const arBackBtn            = document.getElementById("arBackBtn");
+const arResetViewBtn       = document.getElementById("arResetViewBtn");
+const arMiniSatBtn         = document.getElementById("arMiniSatBtn");
+const arFovSlider          = document.getElementById("arFovSlider");
+const arFovValue           = document.getElementById("arFovValue");
+const arFovMeasureBtn      = document.getElementById("arFovMeasureBtn");
+const arFovResetBtn        = document.getElementById("arFovResetBtn");
+const arGeoidValue         = document.getElementById("arGeoidValue");
+const arGeoidSetBtn        = document.getElementById("arGeoidSetBtn");
+const arGeoidResetBtn      = document.getElementById("arGeoidResetBtn");
+const arGeoidLookupBtn     = document.getElementById("arGeoidLookupBtn");
+const arGeoidEnterBtn      = document.getElementById("arGeoidEnterBtn");
 const arStatusMessage      = document.getElementById("arStatusMessage");
 const arUseCurrentLocation = document.getElementById("arUseCurrentLocation");
 const arSelectLocationButton = document.getElementById("arSelectLocationButton");
@@ -326,7 +338,21 @@ let arPickerSelectedLng    = null;
 let arPanX                 = 0;  // manual pan in scene space (metres)
 let arPanY                 = 0;  // manual pan in scene space (metres)
 let arPivotOffsetM         = 0.6; // 0.6 metres behind the camera position
-let arDeviceOrientation    = { alpha: 0, beta: 0, gamma: 0 }; // from DeviceOrientationEvent
+let arDeviceOrientation    = { alpha: 0, beta: 0, gamma: 0, headingDeg: null, pitchDeg: 0 }; // from DeviceOrientationEvent
+let arLiveQuat             = null; // full device rotation in scene frame (live GPS mode)
+// Standing correction added to the compass heading, in radians. Persisted:
+// magnetometer error at a given site is repeatable, so re-shimming on every
+// visit would be busywork.
+const AR_HEADING_TRIM_KEY  = "arHeadingTrimDeg";
+let arHeadingTrimRad       = (() => {
+  const v = parseFloat(localStorage.getItem(AR_HEADING_TRIM_KEY));
+  return isFinite(v) ? v * Math.PI / 180 : 0;
+})();
+function arSaveHeadingTrim() {
+  try {
+    localStorage.setItem(AR_HEADING_TRIM_KEY, String(arHeadingTrimRad * 180 / Math.PI));
+  } catch (_) {}
+}
 let arPermissionGranted    = false;
 let arOrientAbsolute       = false; // true once an absolute/compass orientation source is active
 let arYawSmoothed          = null;  // low-pass filtered yaw (radians)
@@ -339,6 +365,10 @@ let arScreenAngleRad       = 0;     // screen-orientation offset (radians)
 const AR_DEFAULT_CAMERA_HFOV_DEG = 82;
 let arCameraHFovDeg        = (() => { const v = parseFloat(localStorage.getItem("arCameraHFovDeg")); return isFinite(v) && v > 20 && v < 160 ? v : AR_DEFAULT_CAMERA_HFOV_DEG; })();
 let arCameraFovSource      = "default 82\u00b0 (H)";
+let arCameraEffVFovDeg     = 0;   // vertical fov actually rendered, after crop
+let arCameraEffHFovDeg     = 0;   // horizontal equivalent, for the read-out
+let arCameraStreamSize     = "";  // native stream dimensions, for the read-out
+let arCameraZoom           = 1;   // zoom the track actually settled on
 let arGeoFailReason        = "";
 // Real-world AR is the goal: stand at the bridge and see the IFC on the real
 // structure. The old "test framing" put the eye at a model-relative standoff,
@@ -348,6 +378,30 @@ let arDemoFraming          = (localStorage.getItem("arDemoFraming") === "1");
 let arPoseMode             = "init";  // "geo" = live GPS/RTK anchor, "test" = manual true-scale placement, "demo" = tabletop, "none"
 let arEyeSeeded            = false;    // test mode: true once the eye has been placed, so Move/Turn/Elev persist frame-to-frame
 let arEyeHeightM           = 1.6;     // standing eye height above the reference elevation
+// How far the phone's altitude may sit from the model's base before it is
+// treated as a different vertical datum rather than a real height difference.
+// Comfortably larger than any bridge, smaller than a geoid separation.
+const AR_ALT_DATUM_TOLERANCE_M = 30;
+// Metres to ADD to the phone's reported altitude to reach the model's vertical
+// datum, i.e. -N where N is the geoid separation. Android's getAltitude()
+// returns height above the WGS84 ELLIPSOID, while survey elevations are
+// orthometric (NAVD88), and the two differ by roughly -29 m in Minnesota and
+// -8 to -53 m across the US. That is a fixed regional offset, not noise, so it
+// is calibrated once against a known ground elevation and stored. null means
+// uncalibrated, in which case the altitude is used as reported.
+const AR_GEOID_KEY = "arGeoidSepM";
+let arGeoidSepM = (() => {
+  const v = parseFloat(localStorage.getItem(AR_GEOID_KEY));
+  return isFinite(v) ? v : null;
+})();
+let arEyeElevSource        = "";      // which datum the standing elevation came from
+let arModelBaseM           = null;    // model's lowest point (metres), for the read-out
+let arEyeElevM             = null;    // resulting eye elevation (metres)
+let arAltDeltaM            = null;    // corrected altitude minus model base
+let arGroundSource         = "";      // where the ground reference came from
+// NOAA NGS geoid height service. Returns the separation N for a lat/lon, which
+// is what converts the phone's ellipsoidal height to an orthometric elevation.
+const AR_GEOID_API = "https://geodesy.noaa.gov/api/geoid/ght";
 let arElevOffsetM          = 0;       // manual elevation trim from the ELEVATION buttons
 // AR orbit controls (drag to rotate / wheel to zoom the test view)
 let arOrbitInitialized     = false;
@@ -377,6 +431,20 @@ let arModelBoundsXY        = null;  // {minx,maxx,miny,maxy} model footprint (sc
 let arModelFootprintXY     = null;  // convex-hull outline [{x,y}...] of the model footprint (scene X/Y) — fallback
 let arMiniView             = null;  // {minx,maxx,miny,maxy} square plan-view extent (E/N metres, or scene X/Y fallback)
 let arMiniGeoMode          = false; // true when the plan view is drawn in georeferenced E/N (matches Map summary)
+let arMiniZoom             = 1;     // plan-view pinch zoom; >1 is zoomed in
+// Plan-view dot geometry. The separation must exceed twice the grab radius or
+// the two hit areas overlap and a position drag can be read as a re-aim.
+const AR_MINI_GRAB_PX      = 22;
+const AR_MINI_DIR_DOT_PX   = 58;
+const arMiniPointers       = new Map(); // pointerId -> {x,y} for the plan-view pinch
+let arMiniPinchStartDist   = 0;
+let arMiniPinchStartZoom   = 1;
+// Smallest half-span the plan view opens at, in metres. Without a floor the
+// extent is 2.4x the model's own size, which for a small test object is a few
+// metres of ground - far too tight to place yourself against the imagery.
+const AR_MINI_MIN_HALF_M   = 40;
+const AR_MINI_ZOOM_MIN     = 0.15;  // ~13x wider than the default extent
+const AR_MINI_ZOOM_MAX     = 12;
 let arMiniGeoPolys         = null;  // [{key,pts:[{E,N}...]}] projection polygons in E/N (from bridge.ifcFootprint)
 let arMiniDragTarget       = null;  // 'pos' | 'dir' — which dot is being dragged
 let arMiniCtx              = null;
@@ -676,12 +744,25 @@ function closeSettingsModal() {
 
 // Ensure the viewer is constructed and initialized. Resolves true when ready.
 async function ensureIfcViewer() {
+  // Check the one dependency the viewer cannot start without, and say so
+  // plainly. It used to fail somewhere further in with a generic message, which
+  // made a missing library look like a broken model.
+  if (typeof THREE === "undefined") {
+    console.error("[ifc] THREE is not loaded - vendor/three.min.js failed to load");
+    setStatus("3D library did not load. Tap 🔄 Clear cache & reload in Settings.");
+    return false;
+  }
   if (!ifcViewer) ifcViewer = new IFCViewer();
   if (ifcViewer._initPromise) return ifcViewer._initPromise;
   if (ifcViewer.model || ifcViewer.scene) return true; // already initialized
   ifcViewer._initPromise = ifcViewer.init(ifcViewerContainer).then((success) => {
     if (!success) { console.error("Failed to initialize IFC viewer"); setStatus("Failed to initialize 3D viewer"); }
     return success;
+  }).catch((e) => {
+    console.error("[ifc] viewer init threw:", e);
+    setStatus("3D viewer failed to start: " + ((e && e.message) || e));
+    ifcViewer._initPromise = null;   // let a retry actually retry
+    return false;
   });
   return ifcViewer._initPromise;
 }
@@ -782,11 +863,15 @@ function openIfcForPhoto(record) {
 
   const aim = () => {
     if (hasLoc && typeof ifcViewer.positionCameraFromGeo === "function") {
-      const ok = ifcViewer.positionCameraFromGeo(loc.lat, loc.lng, record.heading, record.attitude, loc.alt);
+      // Correct the datum before aiming: the raw altitude is ellipsoidal on
+      // Android and would put the camera far below the structure.
+      const eyeAlt = correctedEyeElevM(loc.alt);
+      const warn = eyeElevWarning(eyeAlt);
+      const ok = ifcViewer.positionCameraFromGeo(loc.lat, loc.lng, record.heading, record.attitude, eyeAlt);
       setStatus(ok
         ? (isFinite(loc.alt)
             ? "3D camera set to the photo's GPS location, direction & elevation. Use ▲▼ Elev to fine-tune height. Click an element to tag it."
-            : "3D camera set to the photo's location & direction. Click an element to tag it.")
+            : "3D camera set to the photo's location & direction. Click an element to tag it.") + warn
         : "Model has no georeference matching this photo — showing default view.");
     } else if (!hasLoc) {
       setStatus("This photo has no location yet — set one to aim the 3D camera. You can still tag elements.");
@@ -1219,14 +1304,11 @@ function closeCaptureModal() {
 }
 
 async function clearCacheAndReloadFlow() {
-  if (!confirm("Clear app cache and reload?")) return;
-  if (confirm("Export active bridge ZIP before reload so you can re-import after update?")) {
-    if (activeBridgeId) {
-      await downloadBridgeZip(activeBridgeId);
-    } else {
-      setStatus("Open a bridge first if you want a ZIP export before reload.");
-    }
-  }
+  // Clearing the cache does not touch stored bridges, so this no longer offers
+  // a ZIP export first: that second confirm read as a download demand with no
+  // clear way to decline. Use the "Download ZIP" button on the bridges list if
+  // you do want a backup beforehand.
+  if (!confirm("Clear app cache and reload?\n\nYour bridges and photos are kept.")) return;
   try {
     const regs = await navigator.serviceWorker?.getRegistrations() || [];
     await Promise.all(regs.map((r) => r.unregister()));
@@ -1412,6 +1494,55 @@ function registerEvents() {
   if (ifcClearSelectionButton) ifcClearSelectionButton.addEventListener("click", () => clearIfcSelection());
   if (ifcApplyConditionPsetButton) ifcApplyConditionPsetButton.addEventListener("click", () => { void applyConditionPropertySetToSelection(); });
   if (ifcApplyInspectionPsetButton) ifcApplyInspectionPsetButton.addEventListener("click", () => { void addIfcInspectionPropertySet(); });
+  // Post-capture follow-up actions.
+  const postTag = document.getElementById("postCaptureTagBtn");
+  const postAr = document.getElementById("postCaptureArBtn");
+  const postDismiss = document.getElementById("postCaptureDismissBtn");
+  if (postDismiss) postDismiss.addEventListener("click", () => hidePostCaptureActions());
+  if (postTag) postTag.addEventListener("click", () => {
+    const rec = postCaptureRecord;
+    hidePostCaptureActions();
+    if (rec) openIfcForPhoto(rec);
+  });
+  if (postAr) postAr.addEventListener("click", () => {
+    hidePostCaptureActions();
+    openArViewModal();
+  });
+
+  // Put the 3D camera where the phone is, looking where the phone looks. The
+  // photo-driven aim already existed; this is the live equivalent, for walking
+  // the site with the model open rather than reviewing a shot after the fact.
+  if (ifcSnapToMeButton) ifcSnapToMeButton.addEventListener("click", async () => {
+    if (!ifcViewer || !ifcViewer.model) { setStatus("Load the bridge IFC first."); return; }
+    ifcSnapToMeButton.disabled = true;
+    const was = ifcSnapToMeButton.textContent;
+    ifcSnapToMeButton.textContent = "🧍 Locating…";
+    try {
+      // Take a fresh fix and a fresh heading rather than reusing whatever the
+      // last photo left behind - the whole point is where you are NOW.
+      const [loc, ori] = await Promise.all([
+        getFreshLocation(8000),
+        getFreshOrientation(2000),
+      ]);
+      const useLoc = loc || currentLocation;
+      if (!useLoc || !isFinite(useLoc.lat)) { setStatus("No GPS fix yet — stand outside and try again."); return; }
+      const heading = (ori && ori.heading != null) ? ori.heading : currentHeading;
+      const attitude = (ori && ori.attitude != null) ? ori.attitude : currentAttitude;
+      const eyeAlt = correctedEyeElevM(useLoc.alt);
+      const ok = ifcViewer.positionCameraFromGeo(useLoc.lat, useLoc.lng, heading, attitude, eyeAlt);
+      const elevNote = (eyeAlt != null) ? ` · eye ${(eyeAlt / 0.3048).toFixed(0)} ft` : "";
+      setStatus(ok
+        ? `3D view snapped to you: ${useLoc.lat.toFixed(5)}, ${useLoc.lng.toFixed(5)}${heading != null ? ` · heading ${Math.round(heading)}°` : ""}${elevNote}.${eyeElevWarning(eyeAlt)}`
+        : "Model has no georeference — cannot place the view from GPS.");
+    } catch (e) {
+      console.warn("[ifc] snap to me:", e);
+      setStatus("Snap to me failed: " + (e && e.message ? e.message : e));
+    } finally {
+      ifcSnapToMeButton.textContent = was;
+      ifcSnapToMeButton.disabled = false;
+    }
+  });
+
   if (ifcLinkToPhotoButton) ifcLinkToPhotoButton.addEventListener("click", async () => {
     if (!ifcSelectedElements.length) { setStatus("Select one or more elements in the 3D model first."); return; }
     if (!ifcLinkedPhotoId) {
@@ -1692,18 +1823,22 @@ function registerEvents() {
       arSelectedLocation = { lat: arPickerSelectedLat, lng: arPickerSelectedLng };
       arSelectedLocationIsManual = true;
       arSelectedLocationName = `${arPickerSelectedLat.toFixed(5)}, ${arPickerSelectedLng.toFixed(5)}`;
-      arUseCurrentLocation.checked = false;
+      // Picking a location by hand is an explicit choice of test mode, so this
+      // one does stick.
+      setArUseCurrentLocation(false);
       arEyeSeeded = false; // re-teleport the test eye to the newly picked spot
       closeArLocationPickerModal();
       setStatus(`AR location set to ${arSelectedLocationName}`);
     }
   });
   if (arUseCurrentLocation) arUseCurrentLocation.addEventListener("change", () => {
+    // Remember the choice so the next AR session opens the same way.
+    try { localStorage.setItem(AR_USE_GPS_KEY, arUseCurrentLocation.checked ? "1" : "0"); } catch (_) {}
     if (arUseCurrentLocation.checked) {
       setStatus("AR view will use live device GPS (best with an RTK fix).");
-      if (typeof acquireGeoAndHeading === "function" && !currentLocation) {
-        try { void acquireGeoAndHeading(); } catch (e) { console.warn("[ar] geo acquire:", e); }
-      }
+      // Always (re)start the watch. The old code only fetched when there was no
+      // location at all, so a stale fix from indoors was reused indefinitely.
+      startArGeoWatch();
     } else {
       // Switching to manual/test mode: keep wherever the eye currently is so the
       // view doesn't jump, then let the Move/Turn/Elev controls walk from there.
@@ -1730,6 +1865,144 @@ function registerEvents() {
   if (arTurnRightBtn) arTurnRightBtn.addEventListener("click", () => { arApplyLookYaw(-0.15); });
   if (arFwdBtn) arFwdBtn.addEventListener("click", () => arMoveForward(arMetersToUnits(2)));
   if (arBackBtn) arBackBtn.addEventListener("click", () => arMoveForward(-arMetersToUnits(2)));
+  if (arResetViewBtn) arResetViewBtn.addEventListener("click", () => resetArView());
+  const arTrimClearBtn = document.getElementById("arTrimClearBtn");
+  if (arTrimClearBtn) arTrimClearBtn.addEventListener("click", () => {
+    arHeadingTrimRad = 0;
+    try { localStorage.removeItem(AR_HEADING_TRIM_KEY); } catch (_) {}
+    setStatus("Heading trim cleared - back to the raw compass.");
+  });
+  const showGeoid = () => {
+    if (!arGeoidValue) return;
+    arGeoidValue.textContent = (arGeoidSepM == null || !isFinite(arGeoidSepM))
+      ? "uncalibrated"
+      : `${arGeoidSepM >= 0 ? "+" : ""}${(arGeoidSepM / 0.3048).toFixed(0)}ft`;
+  };
+  showGeoid();
+  if (arGeoidSetBtn) arGeoidSetBtn.addEventListener("click", () => {
+    const raw = (currentLocation && isFinite(currentLocation.alt)) ? currentLocation.alt : null;
+    if (raw == null) { setStatus("No GPS altitude yet - wait for a fix, then calibrate."); return; }
+    // Default to the model's own base: standing at the foot of the structure is
+    // the usual case, and it saves looking a number up.
+    // Only suggest the model's elevation when it came from IfcSite, which is an
+    // authored ground level. The lowest geometry is not: a model with piles or
+    // footings has its minimum well below grade, and offering that as "the
+    // ground you are standing on" would calibrate the datum underground.
+    const suggestFt = (arGroundSource === "IfcSite" && arModelBaseM != null && isFinite(arModelBaseM))
+      ? (arModelBaseM / 0.3048).toFixed(0) : "";
+    const answer = prompt(
+      `Phone reports ${(raw / 0.3048).toFixed(0)} ft here.\n\n` +
+      "Enter the TRUE elevation of the GROUND under your feet, in feet:",
+      suggestFt);
+    if (answer == null) return;
+    const trueFt = parseFloat(answer);
+    if (!isFinite(trueFt)) { setStatus("Elevation not recognised - calibration unchanged."); return; }
+    arGeoidSepM = trueFt * 0.3048 - raw;
+    try { localStorage.setItem(AR_GEOID_KEY, String(arGeoidSepM)); } catch (_) {}
+    arEyeSeeded = false;   // re-place the eye with the corrected datum
+    showGeoid();
+    setStatus(`Ground datum set: ${(arGeoidSepM / 0.3048).toFixed(1)} ft added to reported altitude.`);
+  });
+  const applyGeoidOffset = (offsetM, how) => {
+    arGeoidSepM = offsetM;
+    try { localStorage.setItem(AR_GEOID_KEY, String(offsetM)); } catch (_) {}
+    arEyeSeeded = false;   // re-place the eye with the corrected datum
+    showGeoid();
+    setStatus(`Ground datum ${how}: ${(offsetM / 0.3048).toFixed(1)} ft added to reported altitude.`);
+  };
+  if (arGeoidLookupBtn) arGeoidLookupBtn.addEventListener("click", async () => {
+    const loc = currentLocation || arSelectedLocation;
+    if (!loc || !isFinite(loc.lat)) { setStatus("No position yet - wait for a fix."); return; }
+    arGeoidLookupBtn.disabled = true;
+    const was = arGeoidLookupBtn.textContent;
+    arGeoidLookupBtn.textContent = "🌐 …";
+    const r = await fetchGeoidSeparationM(loc.lat, loc.lng != null ? loc.lng : loc.lon);
+    arGeoidLookupBtn.textContent = was;
+    arGeoidLookupBtn.disabled = false;
+    if (!r.ok) { setStatus(`Geoid lookup failed: ${r.reason}. Use N… to enter it by hand.`); return; }
+    applyGeoidOffset(r.offsetM, `from NOAA${r.model ? " " + r.model : ""} (N=${r.separationM.toFixed(2)} m)`);
+  });
+  if (arGeoidEnterBtn) arGeoidEnterBtn.addEventListener("click", () => {
+    const cur = (arGeoidSepM != null && isFinite(arGeoidSepM)) ? (-arGeoidSepM).toFixed(2) : "";
+    const answer = prompt(
+      "Geoid separation N, in METRES (negative across the continental US).\n\n" +
+      "Orthometric elevation H = h - N, so the app adds -N to the reported altitude.",
+      cur);
+    if (answer == null) return;
+    const n = parseFloat(answer);
+    if (!isFinite(n)) { setStatus("Separation not recognised - unchanged."); return; }
+    applyGeoidOffset(-n, `set from N=${n.toFixed(2)} m`);
+  });
+  if (arGeoidResetBtn) arGeoidResetBtn.addEventListener("click", () => {
+    arGeoidSepM = null;
+    try { localStorage.removeItem(AR_GEOID_KEY); } catch (_) {}
+    arEyeSeeded = false;
+    showGeoid();
+    setStatus("Ground datum offset cleared - using the phone's altitude as reported.");
+  });
+  if (arFovSlider) {
+    const showFov = () => {
+      if (!arFovValue) return;
+      // Show the spec value being trimmed plus what is actually rendered after
+      // the cover-crop, since those differ and only the second one matters.
+      const eff = arCameraEffHFovDeg ? ` (${arCameraEffHFovDeg.toFixed(0)}° on screen)` : "";
+      // Zoom is called out when it is not 1x: a value below 1 means the device
+      // handed over the ultrawide, which no FOV setting can compensate for.
+      const zoom = (isFinite(arCameraZoom) && Math.abs(arCameraZoom - 1) > 0.01)
+        ? ` · ${arCameraZoom.toFixed(2)}x` : "";
+      // Where the number came from matters: a "manual" value saved before the
+      // feed was pinned to 1x was trimmed against the ultrawide and is junk.
+      const src = arCameraFovSource ? ` · ${arCameraFovSource}` : "";
+      arFovValue.textContent = `${arCameraHFovDeg.toFixed(1)}°${eff}${zoom}${src}`;
+    };
+    arFovSlider.value = String(arCameraHFovDeg);
+    showFov();
+    arFovSlider.addEventListener("input", () => {
+      const v = parseFloat(arFovSlider.value);
+      if (!isFinite(v)) return;
+      arCameraHFovDeg = v;
+      arCameraFovSource = "manual";
+      try { localStorage.setItem("arCameraHFovDeg", String(v)); } catch (_) {}
+      updateArCameraFov();
+      showFov();
+    });
+    if (arFovResetBtn) arFovResetBtn.addEventListener("click", () => {
+      try { localStorage.removeItem("arCameraHFovDeg"); } catch (_) {}
+      arCameraHFovDeg = AR_DEFAULT_CAMERA_HFOV_DEG;
+      arCameraFovSource = `default ${AR_DEFAULT_CAMERA_HFOV_DEG}° (H)`;
+      arFovSlider.value = String(arCameraHFovDeg);
+      updateArCameraFov();
+      showFov();
+      setStatus(`Camera FOV reset to the ${AR_DEFAULT_CAMERA_HFOV_DEG}° main-lens default.`);
+    });
+    if (arFovMeasureBtn) arFovMeasureBtn.addEventListener("click", async () => {
+      arFovMeasureBtn.disabled = true;
+      const was = arFovMeasureBtn.textContent;
+      arFovMeasureBtn.textContent = "📐 …";
+      const r = await probeArCameraFovViaWebXR();
+      arFovMeasureBtn.textContent = was;
+      arFovMeasureBtn.disabled = false;
+      if (!r.ok) { setStatus(`FOV measure failed: ${r.reason}`); return; }
+      // Stored as the sensor's long-axis angle, the convention the rest of the
+      // FOV maths expects; it re-derives the on-screen value from the stream.
+      arCameraHFovDeg = Math.max(20, Math.min(160, r.longAxisDeg));
+      arCameraFovSource = "WebXR measured";
+      try { localStorage.setItem("arCameraHFovDeg", String(arCameraHFovDeg)); } catch (_) {}
+      arFovSlider.value = String(arCameraHFovDeg);
+      updateArCameraFov();
+      showFov();
+      setStatus(`Measured camera FOV: ${r.hfov.toFixed(1)}° H x ${r.vfov.toFixed(1)}° V (WebXR).`);
+    });
+  }
+  if (arMiniSatBtn) {
+    const syncSatBtn = () => arMiniSatBtn.classList.toggle("is-on", arMiniSatelliteEnabled());
+    syncSatBtn();
+    arMiniSatBtn.addEventListener("click", () => {
+      localStorage.setItem(AR_MINI_SAT_KEY, arMiniSatelliteEnabled() ? "0" : "1");
+      syncSatBtn();
+      drawArMiniMap();
+    });
+  }
 }
 
 
@@ -1762,18 +2035,18 @@ async function openArViewModal() {
   if (!arSelectedLocationIsManual) {
     const bridgeLoc = activeBridgeLocation();
     const fp = b.ifcFootprint;
+    // Seed the fallback location used by test mode. This does NOT decide the
+    // GPS mode: that is restored from the saved preference further down, and
+    // clearing the checkbox here would have quietly overridden it.
     if (currentLocation && isFinite(currentLocation.lat) && isFinite(currentLocation.lng)) {
       arSelectedLocation = offsetLocationNorth(currentLocation.lat, currentLocation.lng, 4.572);
       arSelectedLocationIsManual = false;
-      if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
     } else if (bridgeLoc && isFinite(bridgeLoc.lat) && isFinite(bridgeLoc.lng)) {
       arSelectedLocation = { lat: bridgeLoc.lat, lng: bridgeLoc.lng };
       arSelectedLocationIsManual = false;
-      if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
     } else if (fp && fp.center && isFinite(fp.center.lat) && isFinite(fp.center.lon)) {
       arSelectedLocation = { lat: fp.center.lat, lng: fp.center.lon };
       arSelectedLocationIsManual = false;
-      if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
     }
   }
   if (ifcViewerModal && !ifcViewerModal.hidden) closeIfcViewerModal();
@@ -1837,10 +2110,16 @@ async function openArViewModal() {
   // over the relative "deviceorientation" event to avoid drift.
   try { window.addEventListener("deviceorientationabsolute", onDeviceOrientation); } catch (_) {}
   
-  // Default to the stable, true-scale TEST mode (no GPS) so the overlay is
-  // usable without an RTK fix. The user ticks "Use current location" to switch
-  // to live GPS/RTK anchoring when they have a good fix.
-  if (arUseCurrentLocation) arUseCurrentLocation.checked = false;
+  // Restore the last choice rather than forcing test mode every open. First run
+  // still defaults to the stable, true-scale TEST mode (no GPS), which is usable
+  // without an RTK fix; ticking "Use current location" now sticks.
+  setArUseCurrentLocation(arUseGpsPreference(), { persist: false });
+
+  // Start the fix warming up regardless of that checkbox: a cold receiver can
+  // take tens of seconds outdoors, and it should not only begin counting from
+  // the moment the box is ticked.
+  arLastFixAtMs = 0;
+  startArGeoWatch();
 
   // Reset AR view for this session and enable first-person controls.
   arOrbitInitialized = false;
@@ -1855,6 +2134,9 @@ async function openArViewModal() {
   arMiniGeoMode = false;
   arMiniGeoPolys = null;
   arMiniDragTarget = null;
+  arMiniZoom = 1;
+  arMiniPointers.clear();
+  arMiniPinchStartDist = 0;
   arPointers.clear();
   arPinchLastDist = 0;
   arEyePos = null;
@@ -1876,6 +2158,7 @@ function closeArViewModal() {
   arViewModal.hidden = true;
   arActive = false;
   stopArCameraFeed();
+  stopArGeoWatch();
   window.removeEventListener("deviceorientation", onDeviceOrientation);
   try { window.removeEventListener("deviceorientationabsolute", onDeviceOrientation); } catch (_) {}
   if (arRenderLoopId) clearTimeout(arRenderLoopId);
@@ -1887,24 +2170,43 @@ async function startArCameraFeed() {
     arStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }
     });
-    // AR must render at the camera's native 1x, so force zoom to its minimum
-    // (the capture-modal zoom control does not apply to the AR feed).
+    // AR must render at the main lens's native 1x. This used to ask for the
+    // track's MINIMUM zoom, which is wrong on any phone that presents its rear
+    // cameras as one logical multi-camera: the range starts below 1 (0.5 on
+    // recent Pixels) and the minimum is the ULTRAWIDE. That silently swapped an
+    // ~82 degree lens for a ~123 degree one while the renderer kept drawing at
+    // 82, so the overlay came out far too large and swung much too fast.
+    // Target exactly 1.0, clamped into whatever range the device offers.
     try {
       const t = arStream.getVideoTracks && arStream.getVideoTracks()[0];
       const caps = t && t.getCapabilities ? t.getCapabilities() : null;
-      if (caps && caps.zoom && typeof caps.zoom.min === "number") {
-        t.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] }).catch(() => {});
+      if (caps && caps.zoom && typeof caps.zoom.min === "number"
+          && typeof caps.zoom.max === "number") {
+        const target = Math.min(caps.zoom.max, Math.max(caps.zoom.min, 1));
+        try {
+          await t.applyConstraints({ advanced: [{ zoom: target }] });
+        } catch (_) { /* device refused; read back whatever it kept */ }
       }
+      // Read back what actually applied - a device may clamp or ignore it - and
+      // fold it into the FOV, since zoom narrows the angle you can see.
+      const st = (t && t.getSettings) ? t.getSettings() : null;
+      const z = st && isFinite(st.zoom) ? st.zoom : 1;
+      arCameraZoom = (z > 0) ? z : 1;
       // Best-effort FOV detection; falls back to the 82-degree default.
       const det = detectArCameraHFovDeg(t);
       if (det) { arCameraHFovDeg = det.deg; arCameraFovSource = det.source; }
-      else { arCameraFovSource = `default ${AR_DEFAULT_CAMERA_HFOV_DEG}\u00b0 (H, no API)`; }
+      else if (arCameraFovSource !== "WebXR measured" && arCameraFovSource !== "manual") {
+        arCameraFovSource = `default ${AR_DEFAULT_CAMERA_HFOV_DEG}\u00b0 (H, no API)`;
+      }
       updateArCameraFov();
     } catch (e) { console.warn("[ar] feed setup:", e); }
     if (arCameraVideo) {
       arCameraVideo.srcObject = arStream;
       arCameraVideo.onloadedmetadata = () => {
         arCameraVideo.play().catch((e) => console.log("AR video play:", e));
+        // videoWidth/Height are 0 until now, and the FOV maths needs the
+        // stream's real shape to know what the cover-crop is throwing away.
+        updateArCameraFov();
       };
     }
   } catch (error) {
@@ -1976,21 +2278,109 @@ function ensureArModelClone() {
 
 // Convert the configured HORIZONTAL fov to the VERTICAL fov three.js needs,
 // using the camera's current aspect ratio, then apply it.
+/**
+ * Match the render camera to what the video feed actually SHOWS.
+ *
+ * Two things have to line up or the overlay slides against the world as you
+ * pan - which looks like bad tracking even when the pose is perfect.
+ *
+ * 1. The spec FOV describes the sensor's long axis, so converting it to a
+ *    vertical FOV needs the VIDEO's aspect ratio, not the screen's. A 4:3
+ *    stream shown in a tall panel are different shapes.
+ * 2. #arCameraVideo is object-fit: cover, so the feed is cropped to fill the
+ *    panel. Whatever is cropped away is FOV you can no longer see, and the
+ *    render camera must lose it too.
+ */
 function updateArCameraFov() {
   if (!arRendererCamera) return;
-  const aspect = arRendererCamera.aspect && isFinite(arRendererCamera.aspect) ? arRendererCamera.aspect : 1;
-  const specFov = (arCameraHFovDeg || AR_DEFAULT_CAMERA_HFOV_DEG) * Math.PI / 180;
-  // A phone's quoted FOV refers to the sensor's LONG axis. In portrait the long
-  // axis is the screen's vertical, so the spec value IS the vertical fov; in
-  // landscape it is the horizontal fov and must be converted.
-  let vfov;
-  if (aspect <= 1) {
-    vfov = specFov;                                                   // portrait
-  } else {
-    vfov = 2 * Math.atan(Math.tan(specFov / 2) / Math.max(0.0001, aspect)); // landscape
-  }
-  arRendererCamera.fov = Math.max(1, Math.min(179, vfov * 180 / Math.PI));
+  const aDisp = (arRendererCamera.aspect && isFinite(arRendererCamera.aspect))
+    ? arRendererCamera.aspect : 1;
+  let specFov = (arCameraHFovDeg || AR_DEFAULT_CAMERA_HFOV_DEG) * Math.PI / 180;
+
+  // Zoom narrows what the lens shows. Normally pinned to 1x, but a device may
+  // clamp or refuse that, and then the render angle has to follow.
+  const z = (isFinite(arCameraZoom) && arCameraZoom > 0) ? arCameraZoom : 1;
+  if (z !== 1) specFov = 2 * Math.atan(Math.tan(specFov / 2) / z);
+
+  // Native stream shape. Falls back to the display shape before metadata loads.
+  const vw = (arCameraVideo && arCameraVideo.videoWidth) || 0;
+  const vh = (arCameraVideo && arCameraVideo.videoHeight) || 0;
+  const aVid = (vw > 0 && vh > 0) ? (vw / vh) : aDisp;
+
+  // Spec FOV is across the sensor's long axis: vertical for a portrait stream,
+  // horizontal for a landscape one.
+  const vFovNative = (aVid <= 1)
+    ? specFov
+    : 2 * Math.atan(Math.tan(specFov / 2) / Math.max(0.0001, aVid));
+
+  // object-fit: cover crops the axis that overflows. Only a display WIDER than
+  // the stream crops height, and only cropped height changes the vertical FOV.
+  const vFovVisible = (aDisp > aVid)
+    ? 2 * Math.atan(Math.tan(vFovNative / 2) * (aVid / aDisp))
+    : vFovNative;
+
+  arRendererCamera.fov = Math.max(1, Math.min(179, vFovVisible * 180 / Math.PI));
   arRendererCamera.updateProjectionMatrix();
+  // Kept for the read-out: the horizontal angle actually on screen.
+  arCameraEffVFovDeg = arRendererCamera.fov;
+  arCameraEffHFovDeg = 2 * Math.atan(Math.tan(vFovVisible / 2) * aDisp) * 180 / Math.PI;
+  arCameraStreamSize = (vw && vh) ? `${vw}x${vh}` : "";
+}
+
+/**
+ * Measure the real camera FOV via WebXR.
+ *
+ * getUserMedia exposes no field of view or focal length - getSettings() and
+ * getCapabilities() simply have no such member - which is why the rest of this
+ * file falls back to a spec-sheet guess. WebXR does expose it: an immersive-ar
+ * session hands back XRView.projectionMatrix, built from the device's real
+ * camera intrinsics, and the FOV drops straight out of two of its terms.
+ *
+ * The session is opened, one frame is read, and it is closed again. Requires a
+ * user gesture, and on Android needs ARCore (Google Play Services for AR).
+ *
+ * Caveat: this is the FOV of the XR view, which need not exactly equal the
+ * getUserMedia stream's - the two can pick different sensor crops. It is a far
+ * better starting point than a spec sheet, but the slider still exists to trim.
+ */
+async function probeArCameraFovViaWebXR() {
+  if (!navigator.xr || !navigator.xr.isSessionSupported) {
+    return { ok: false, reason: "WebXR not available" };
+  }
+  let supported = false;
+  try { supported = await navigator.xr.isSessionSupported("immersive-ar"); } catch (_) {}
+  if (!supported) return { ok: false, reason: "immersive-ar unsupported (ARCore missing?)" };
+
+  let session = null;
+  try {
+    session = await navigator.xr.requestSession("immersive-ar");
+    const refSpace = await session.requestReferenceSpace("viewer");
+    const proj = await new Promise((resolve) => {
+      let tries = 0;
+      const onFrame = (t, frame) => {
+        const pose = frame.getViewerPose(refSpace);
+        const view = pose && pose.views && pose.views[0];
+        if (view && view.projectionMatrix) { resolve(view.projectionMatrix); return; }
+        // Tracking can take a moment to produce a pose; give it a second.
+        if (++tries > 60) { resolve(null); return; }
+        session.requestAnimationFrame(onFrame);
+      };
+      session.requestAnimationFrame(onFrame);
+    });
+    if (!proj) return { ok: false, reason: "no viewer pose" };
+    // Column-major perspective matrix:
+    //   m[0] = 1 / (aspect * tan(vfov/2)),  m[5] = 1 / tan(vfov/2)
+    const vfov = 2 * Math.atan(1 / proj[5]) * 180 / Math.PI;
+    const hfov = 2 * Math.atan(1 / proj[0]) * 180 / Math.PI;
+    if (!isFinite(vfov) || !isFinite(hfov) || vfov <= 1 || hfov <= 1) {
+      return { ok: false, reason: "implausible projection" };
+    }
+    return { ok: true, vfov, hfov, longAxisDeg: Math.max(vfov, hfov) };
+  } catch (e) {
+    return { ok: false, reason: (e && e.message) || String(e) };
+  } finally {
+    if (session) { try { await session.end(); } catch (_) {} }
+  }
 }
 
 // Best-effort: try to read a real horizontal FOV from the live AR track. No
@@ -2047,14 +2437,61 @@ function updateArEyeFromGeo(lat, lon, alt) {
     E = r[0]; N = r[1];
   } catch (e) { console.warn("[ar] proj4 failed:", e); arGeoFailReason = "proj4 transform failed"; return false; }
   if (!isFinite(E) || !isFinite(N)) { arGeoFailReason = "projection produced NaN"; return false; }
-  // Stand on the ground: prefer GPS altitude, else the model's LOWEST point
-  // (pier/abutment base). Using the model's mid-height put the eye floating
-  // inside the structure.
-  const groundElev = (alt != null && isFinite(alt))
-    ? alt
-    : (ifcViewer.modelElevMinM != null ? ifcViewer.modelElevMinM
-      : (ifcViewer.modelElevCenterM != null ? ifcViewer.modelElevCenterM : 0));
-  const p = arENToScene(E + arPanX, N + arPanY, groundElev + arMetersToUnits(arEyeHeightM + arElevOffsetM));
+  // Stand on the ground. GPS altitude is the obvious datum but the least
+  // trustworthy number the phone produces: Android reports height above the
+  // WGS84 ellipsoid while a model's vertical datum is usually orthometric, and
+  // the geoid separation is around -33 m in the upper Midwest. A model whose
+  // base is at elevation 0 against a phone reporting ~318 m puts the eye a
+  // whole 318 m above the structure, which is why it can render far below you.
+  //
+  // So sanity-check the altitude against the model's own base and fall back to
+  // standing on that base when they disagree. Being wrong about which surface
+  // you stand on costs a metre or two; a datum mismatch costs hundreds.
+  // Ground reference, best source first. IfcSite.RefElevation is the authored
+  // ground level; the model's lowest geometry is only a stand-in for it, and a
+  // wrong one as soon as the model contains piles or footings below grade.
+  const modelBase = (ifcViewer.siteRefElevM != null && isFinite(ifcViewer.siteRefElevM))
+    ? ifcViewer.siteRefElevM
+    : ((ifcViewer.modelElevMinM != null && isFinite(ifcViewer.modelElevMinM))
+      ? ifcViewer.modelElevMinM
+      : ((ifcViewer.modelElevCenterM != null && isFinite(ifcViewer.modelElevCenterM))
+        ? ifcViewer.modelElevCenterM : null));
+  arGroundSource = (ifcViewer.siteRefElevM != null && isFinite(ifcViewer.siteRefElevM))
+    ? "IfcSite" : "lowest geometry";
+  // standEye: whether the reference elevation is the GROUND you are standing on,
+  // in which case the standing eye height is added. A GPS altitude is already
+  // the receiver's own position - the phone in your hand, or a pole-mounted
+  // antenna - so adding 1.6 m on top of it double-counts your height and sinks
+  // the model by that much.
+  // Lift the reported altitude onto the model's vertical datum before anything
+  // else looks at it, so the sanity check below judges a like-for-like number.
+  const geoidApplied = (alt != null && isFinite(alt)
+    && arGeoidSepM != null && isFinite(arGeoidSepM));
+  if (geoidApplied) alt = alt + arGeoidSepM;
+  arAltDeltaM = (alt != null && isFinite(alt) && modelBase != null)
+    ? (alt - modelBase) : null;
+
+  let groundElev, standEye;
+  if (alt != null && isFinite(alt) && modelBase != null
+      && Math.abs(alt - modelBase) > AR_ALT_DATUM_TOLERANCE_M) {
+    groundElev = modelBase; standEye = true;
+    arEyeElevSource = `model base (GPS alt ${Math.round(alt - modelBase)}m off)`;
+  } else if (alt != null && isFinite(alt)) {
+    groundElev = alt; standEye = false;
+    arEyeElevSource = geoidApplied
+      ? `GPS alt ${arGeoidSepM >= 0 ? "+" : ""}${arGeoidSepM.toFixed(1)}m geoid`
+      : "GPS altitude";
+  } else if (modelBase != null) {
+    groundElev = modelBase; standEye = true;
+    arEyeElevSource = "model base";
+  } else {
+    groundElev = 0; standEye = true;
+    arEyeElevSource = "datum 0";
+  }
+  arModelBaseM = modelBase;
+  const eyeRiseM = (standEye ? arEyeHeightM : 0) + arElevOffsetM;
+  arEyeElevM = groundElev + eyeRiseM;
+  const p = arENToScene(E + arPanX, N + arPanY, groundElev + arMetersToUnits(eyeRiseM));
   if (!p || !isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) { arGeoFailReason = "scene transform NaN"; return false; }
   if (!arEyePos) arEyePos = new THREE.Vector3();
   arEyePos.copy(p);
@@ -2066,6 +2503,20 @@ function applyArViewCamera() {
   // True AR: camera stays at YOUR fixed eye position; dragging only rotates the
   // view direction (yaw/pitch) about that eye — like turning your head.
   if (!arRendererCamera || !arEyePos) return;
+
+  // Live GPS: drive the camera from the full device rotation, so the overlay
+  // rolls with the handset and stays correct in landscape. The yaw/pitch path
+  // below cannot express roll — it rebuilds the orientation from two angles
+  // with a fixed world up — so it is kept only for the manual/test controls.
+  if (arLiveQuat && arHasOrientation && arLiveGpsActive()) {
+    arRendererCamera.near = Math.max(arOrbitRadius / 2000, 0.05);
+    arRendererCamera.far = arOrbitRadius * 50 + 2000;
+    arRendererCamera.position.copy(arEyePos);
+    arRendererCamera.quaternion.set(arLiveQuat.x, arLiveQuat.y, arLiveQuat.z, arLiveQuat.w);
+    arRendererCamera.updateProjectionMatrix();
+    return;
+  }
+
   const el = Math.max(-1.4, Math.min(1.4, arOrbitEl));
   const az = arOrbitAz;
   const dir = new THREE.Vector3(
@@ -2161,6 +2612,66 @@ function frameArModelForTest() {
   return true;
 }
 
+/**
+ * Clear every manual adjustment to the AR viewpoint and re-anchor.
+ *
+ * Drops the accumulated pan, elevation offset, turn, pinch/zoom and drag state,
+ * and re-places the eye from the current location. Afterwards the view is the
+ * raw sensor orientation: point the phone somewhere and that is what you see,
+ * in test mode as well as live GPS.
+ *
+ * Two things are deliberately NOT done here.
+ *
+ * arOrbitInitialized stays set. Clearing it re-runs the default standoff
+ * framing, which stands you off along the model's shorter horizontal axis --
+ * and for a model as wide as it is deep (a test cube) that tie resolves the
+ * same way every time, so every reset swung the view to face north regardless
+ * of where you were pointing. Reset clears adjustments; it does not re-frame.
+ *
+ * arOrientAbsolute stays set too: once an absolute (true-north) source has been
+ * seen, re-arming it would let a relative event latch an arbitrary origin and
+ * make the heading worse, not better.
+ */
+function resetArView() {
+  arPanX = 0;
+  arPanY = 0;
+  arElevOffsetM = 0;
+  arOrbitDragging = false;
+  arEyeSeeded = false;          // re-place the eye from the location, in place
+  // Zero the test-mode look offset and keep it zero: "anchored" with no offset
+  // means the view follows the phone exactly, which is what clearing the
+  // adjustments should leave you with. Re-anchoring instead would recapture an
+  // offset that swings the view back onto the model.
+  arTestYawOffset = 0;
+  arTestPitchOffset = 0;
+  arTestLookAnchored = true;
+  // The test-mode branch in onDeviceOrientation only runs with an aim set, so
+  // keep one; its value no longer matters now the offsets are zero.
+  if (arTestAimAz == null) arTestAimAz = 0;
+  if (arTestAimEl == null) arTestAimEl = 0;
+  arMiniDragTarget = null;
+  // The heading trim is a site calibration, not a view adjustment, so it is
+  // deliberately kept: clearing it here would throw away a shim every time you
+  // straightened anything else out.
+  arMiniZoom = 1;               // plan view back to its default extent
+  arMiniPointers.clear();
+  arMiniPinchStartDist = 0;
+  arPointers.clear();
+  arPinchLastDist = 0;
+  // Apply the current sensor reading immediately rather than waiting for the
+  // next event, so the reset is visible even if the stream is slow or absent.
+  if (arYawSmoothed != null && isFinite(arYawSmoothed)) arOrbitAz = arYawSmoothed;
+  if (arPitchSmoothed != null && isFinite(arPitchSmoothed)) {
+    arOrbitEl = Math.max(-1.4, Math.min(1.4, arPitchSmoothed));
+  }
+  if (arStatusMessage) {
+    arStatusMessage.textContent = arHasOrientation
+      ? "View reset - adjustments cleared, view follows the phone."
+      : "View reset - adjustments cleared.";
+  }
+  applyArViewCamera();
+}
+
 // Ground-plane forward/right unit vectors for the current heading (world Z-up).
 function arGroundVectors() {
   const az = arOrbitAz;
@@ -2191,7 +2702,16 @@ function setupArOrbitControls() {
     arMiniMap.style.touchAction = "none";
     arMiniMap.addEventListener("pointerdown", onArMiniPointerDown);
     arMiniMap.addEventListener("pointermove", onArMiniPointerMove);
-    window.addEventListener("pointerup", () => { arMiniDragging = false; arMiniDragTarget = null; });
+    // Double-tap the plan view to return to the default extent, since pinching
+    // back to exactly 1.0 by hand is fiddly on a 240px canvas.
+    arMiniMap.addEventListener("dblclick", () => { arMiniZoom = 1; drawArMiniMap(); });
+    const endArMiniPointer = (e) => {
+      arMiniEndPinch(e);
+      arMiniDragging = false;
+      arMiniDragTarget = null;
+    };
+    window.addEventListener("pointerup", endArMiniPointer);
+    window.addEventListener("pointercancel", endArMiniPointer);
   }
 }
 
@@ -2267,8 +2787,22 @@ function onArOrbitWheel(e) {
 // shape/orientation match exactly. Fallback mode uses a scene-XY convex hull.
 // In both modes the "world" axes are (x=east/right, y=north/up); arMiniView is
 // {minx,maxx,miny,maxy} in those units.
+// The plan view's extent is the base extent scaled by the pinch zoom. Memoised
+// because arModelToMini calls this per point, and the polygons are dense.
+let arMiniExtentCache = null;
+let arMiniExtentKey = "";
 function arMiniExtent() {
-  return arMiniView || arModelBoundsXY;
+  const base = arMiniView || arModelBoundsXY;
+  if (!base) return null;
+  const z = (isFinite(arMiniZoom) && arMiniZoom > 0) ? arMiniZoom : 1;
+  if (z === 1) return base;
+  const key = base.minx + "," + base.maxx + "," + base.miny + "," + base.maxy + "," + z;
+  if (key === arMiniExtentKey && arMiniExtentCache) return arMiniExtentCache;
+  const cx = (base.minx + base.maxx) / 2, cy = (base.miny + base.maxy) / 2;
+  const hx = (base.maxx - base.minx) / 2 / z, hy = (base.maxy - base.miny) / 2 / z;
+  arMiniExtentCache = { minx: cx - hx, maxx: cx + hx, miny: cy - hy, maxy: cy + hy };
+  arMiniExtentKey = key;
+  return arMiniExtentCache;
 }
 
 function arGeoReady() {
@@ -2303,8 +2837,17 @@ function arTestPhoneLookActive() {
   return arHasOrientation && !arLiveGpsActive();
 }
 function arApplyLookYaw(delta) {
-  if (arTestPhoneLookActive()) arTestYawOffset += delta;
-  else arOrbitAz += delta;
+  if (arTestPhoneLookActive()) { arTestYawOffset += delta; return; }
+  // Live GPS: the sensor rewrites the heading every event, so nudging the
+  // absolute angle achieved nothing - the shim vanished before it was drawn.
+  // Fold it into the standing trim instead, which the sensor path respects.
+  if (arHasOrientation) {
+    arHeadingTrimRad += delta;
+    arOrbitAz += delta;          // show it immediately, before the next event
+    arSaveHeadingTrim();
+    return;
+  }
+  arOrbitAz += delta;
 }
 function arApplyLookPitch(delta) {
   if (arTestPhoneLookActive()) arTestPitchOffset += delta;
@@ -2357,13 +2900,52 @@ function buildArMiniGeoData() {
   for (const pr of projs) if (pr && Array.isArray(pr.footprint)) pushPoly(pr.key || "other", pr.footprint);
   if (Array.isArray(src.footprint)) pushPoly("__outline", src.footprint);
   if (allPts.length < 3) return null;
+  // Frame on the BULK of the model, not its total extent. A single stray
+  // element far from everything else - sample models routinely have one -
+  // drags a min/max extent toward itself, which pushes the structure you
+  // actually care about off into a corner and reads as the model being
+  // mis-placed when it is centred correctly. Trimming the outer few percent
+  // of points frames what is really there; the geometry is unchanged and
+  // still drawn in full, it just no longer decides the framing.
+  // Reject outliers by median absolute deviation rather than by percentile.
+  // A percentile trim assumes strays are a fixed fraction of the points; they
+  // are not - one stray element can carry any number of vertices, and trimming
+  // enough to remove it would start eating real geometry. MAD keys off how far
+  // a point sits from the middle in units of the model's own spread, so a lone
+  // element 40 m from everything is excluded whether it has three vertices or
+  // three thousand, while a genuinely long bridge is kept whole.
+  const median = (arr) => {
+    const a = arr.slice().sort((x, y) => x - y);
+    const m = a.length >> 1;
+    return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+  };
+  const Es = allPts.map((p) => p.E), Ns = allPts.map((p) => p.N);
+  const mE = median(Es), mN = median(Ns);
+  const madE = median(Es.map((v) => Math.abs(v - mE))) * 1.4826;
+  const madN = median(Ns.map((v) => Math.abs(v - mN))) * 1.4826;
+  const K = 4;
+  const keep = allPts.filter((p) =>
+    (!(madE > 0) || Math.abs(p.E - mE) <= K * madE) &&
+    (!(madN > 0) || Math.abs(p.N - mN) <= K * madN));
+  // If the filter would throw away most of the model the spread is genuine,
+  // not an outlier, so frame everything rather than crop the structure.
+  const framePts = (keep.length >= Math.max(3, allPts.length * 0.5)) ? keep : allPts;
   let minE = Infinity, maxE = -Infinity, minN = Infinity, maxN = -Infinity;
-  for (const p of allPts) {
+  for (const p of framePts) {
     if (p.E < minE) minE = p.E; if (p.E > maxE) maxE = p.E;
     if (p.N < minN) minN = p.N; if (p.N > maxN) maxN = p.N;
   }
   const cE = (minE + maxE) / 2, cN = (minN + maxN) / 2;
-  const half = Math.max(maxE - minE, maxN - minN, 1) / 2 * 2.4; // bridge ~40% of map
+  // 2.4x the model puts a bridge at ~40% of the map. Floor it at a fixed ground
+  // span so a small model does not open zoomed into a few metres of grass.
+  // georef.scale converts model metres into the CRS's units (US survey feet for
+  // EPSG:7062), so the floor is a real distance rather than a raw coordinate.
+  const g = ifcViewer && ifcViewer.georef;
+  const uPerM = (g && isFinite(g.scale) && g.scale > 0) ? g.scale : 1;
+  const half = Math.max(
+    Math.max(maxE - minE, maxN - minN, 1) / 2 * 2.4,
+    AR_MINI_MIN_HALF_M * uPerM,
+  );
   return { polys, view: { minx: cE - half, maxx: cE + half, miny: cN - half, maxy: cN + half } };
 }
 
@@ -2425,29 +3007,71 @@ function arDirDotMini() {
   const b = arMiniExtent();
   const W = arMiniMap.width, pad = 14;
   const worldPerPx = (b.maxx - b.minx) / Math.max(1, W - 2 * pad);
-  const dist = worldPerPx * 42; // ~42 px in front of the eye
+  // Far enough in front that the two grab radii cannot overlap: the separation
+  // exceeds 2 * AR_MINI_GRAB_PX, leaving a dead band between them.
+  const dist = worldPerPx * AR_MINI_DIR_DOT_PX;
   const h = arHeadingWorld();
   return arModelToMini(eye.x + h.x * dist, eye.y + h.y * dist);
+}
+
+// Distance between the two active plan-view pointers, for the pinch gesture.
+function arMiniPinchDist() {
+  const pts = [...arMiniPointers.values()];
+  if (pts.length < 2) return 0;
+  return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+}
+
+function arMiniEndPinch(e) {
+  if (e && e.pointerId != null) arMiniPointers.delete(e.pointerId);
+  else arMiniPointers.clear();
+  if (arMiniPointers.size < 2) arMiniPinchStartDist = 0;
 }
 
 function onArMiniPointerDown(e) {
   if (!arMiniMap || !arEyePos) return;
   const { cx, cy } = arMiniEventXY(e);
-  // Choose the nearer dot (position vs direction) within grab radius.
+  arMiniPointers.set(e.pointerId, { x: cx, y: cy });
+  if (arMiniPointers.size >= 2) {
+    // Second finger down: this is a zoom, not a drag. Abandon any dot grab so
+    // pinching cannot drag your position across the map at the same time.
+    arMiniDragging = false;
+    arMiniDragTarget = null;
+    arMiniPinchStartDist = arMiniPinchDist();
+    arMiniPinchStartZoom = arMiniZoom;
+    try { arMiniMap.setPointerCapture(e.pointerId); } catch (_) {}
+    return;
+  }
+  // Position takes priority inside its own grab radius, and only a clear grab
+  // of the green dot re-aims. Picking whichever dot was merely NEARER made the
+  // heading-side edge of the position dot count as a direction grab - the dots
+  // sit close together and arMiniApply runs on pointerdown - so trying to move
+  // yourself would swing the view instead.
   const eye = arEyeWorld();
   const pe = eye ? arModelToMini(eye.x, eye.y) : null;
   const pd = arDirDotMini();
   const dEye = pe ? Math.hypot(cx - pe.cx, cy - pe.cy) : Infinity;
   const dDir = pd ? Math.hypot(cx - pd.cx, cy - pd.cy) : Infinity;
-  arMiniDragTarget = (dDir < dEye && dDir < 26) ? "dir" : "pos";
+  if (dEye <= AR_MINI_GRAB_PX) arMiniDragTarget = "pos";
+  else if (dDir <= AR_MINI_GRAB_PX) arMiniDragTarget = "dir";
+  else arMiniDragTarget = "pos";   // empty map: move, never re-aim
   arMiniDragging = true;
   arMiniApply(cx, cy);
   try { arMiniMap.setPointerCapture(e.pointerId); } catch (_) {}
 }
 
 function onArMiniPointerMove(e) {
-  if (!arMiniDragging) return;
   const { cx, cy } = arMiniEventXY(e);
+  if (arMiniPointers.has(e.pointerId)) arMiniPointers.set(e.pointerId, { x: cx, y: cy });
+  if (arMiniPointers.size >= 2) {
+    const d = arMiniPinchDist();
+    if (arMiniPinchStartDist > 4 && d > 4) {
+      const next = arMiniPinchStartZoom * (d / arMiniPinchStartDist);
+      arMiniZoom = Math.max(AR_MINI_ZOOM_MIN, Math.min(AR_MINI_ZOOM_MAX, next));
+      drawArMiniMap();
+    }
+    return;
+  }
+  if (!arMiniDragging) return;
   arMiniApply(cx, cy);
 }
 
@@ -2464,13 +3088,29 @@ function arMiniApply(cx, cy) {
   const w = arMiniToModel(cx, cy);
   if (!w) return;
   if (arMiniDragTarget === "dir") {
-    // Point the look direction toward the dragged spot.
+    // Point the look direction toward the dragged spot. Only this branch may
+    // touch the view angle; moving the position dot leaves it alone entirely.
     if (arMiniGeoMode) {
       const eyeEN = arSceneToEN(arEyePos);
       const target = arENToScene(w.x, w.y, eyeEN.mY);
       arOrbitAz = Math.atan2(target.y - arEyePos.y, target.x - arEyePos.x);
     } else {
       arOrbitAz = Math.atan2(w.y - arEyePos.y, w.x - arEyePos.x);
+    }
+    // Make the new aim survive the next orientation event, which would
+    // otherwise recompute the heading and undo the drag before it is drawn.
+    // Test mode carries a relative offset; live GPS carries the standing trim.
+    if (arYawSmoothed != null && isFinite(arYawSmoothed)) {
+      if (!arLiveGpsActive()) {
+        arTestYawOffset = arOrbitAz - arYawSmoothed;
+        arTestLookAnchored = true;
+        if (arTestAimAz == null) arTestAimAz = arOrbitAz;
+      } else {
+        // arYawSmoothed already includes the old trim, so the correction is the
+        // difference between where you dragged to and where the phone points.
+        arHeadingTrimRad += arOrbitAz - arYawSmoothed;
+        arSaveHeadingTrim();
+      }
     }
   } else {
     // Move the eye (keep current elevation).
@@ -2532,6 +3172,166 @@ function computeArFootprintHull() {
   return hull.length >= 3 ? hull : null;
 }
 
+// ── Plan-view satellite basemap ──────────────────────────────────────────────
+// Esri World Imagery drawn straight into the mini-map canvas. The mini-map is
+// not a Leaflet map, so the tiles are fetched and blitted by hand: each tile's
+// lat/lon corners go back through the model's CRS into the same E/N space the
+// plan view is drawn in, which keeps the imagery registered to the footprint.
+// Only available in georeferenced mode - without a CRS there is nothing to tie
+// the imagery to.
+
+const AR_MINI_SAT_KEY = "arMiniSatellite";
+const AR_MINI_TILE_MAX_Z = 19;   // Esri World Imagery native maximum
+const AR_MINI_TILE_BUDGET = 36;  // per frame; drops zoom rather than fetch more
+const AR_MINI_TILE_CACHE_MAX = 320;
+const arMiniTileCache = new Map(); // "z/x/y" -> { img, ok } | { failed: true }
+
+function arMiniSatelliteEnabled() {
+  return localStorage.getItem(AR_MINI_SAT_KEY) !== "0";
+}
+
+function arMiniTileUrl(z, x, y) {
+  const tpl = (typeof ESRI_IMAGERY_URL === "string")
+    ? ESRI_IMAGERY_URL
+    : "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
+  return tpl.replace("{z}", z).replace("{x}", x).replace("{y}", y);
+}
+
+// Slippy-map tile maths (Web Mercator).
+function arLonToTileX(lon, z) { return (lon + 180) / 360 * Math.pow(2, z); }
+function arLatToTileY(lat, z) {
+  const r = lat * Math.PI / 180;
+  return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * Math.pow(2, z);
+}
+function arTileXToLon(x, z) { return x / Math.pow(2, z) * 360 - 180; }
+function arTileYToLat(y, z) {
+  const n = Math.PI - 2 * Math.PI * y / Math.pow(2, z);
+  return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+}
+
+function arMiniENToLatLon(E, N) {
+  const g = ifcViewer && ifcViewer.georef;
+  if (!g || !g.epsg || !window.proj4) return null;
+  const def = IFCViewer.CRS_DEFS[g.epsg];
+  if (def && !window.proj4.defs(g.epsg)) window.proj4.defs(g.epsg, def);
+  try {
+    const r = window.proj4(g.epsg, "WGS84", [E, N]);
+    return isFinite(r[0]) && isFinite(r[1]) ? { lon: r[0], lat: r[1] } : null;
+  } catch (_) { return null; }
+}
+
+function arMiniLatLonToEN(lat, lon) {
+  const g = ifcViewer && ifcViewer.georef;
+  if (!g || !g.epsg || !window.proj4) return null;
+  try {
+    const r = window.proj4("WGS84", g.epsg, [lon, lat]);
+    return isFinite(r[0]) && isFinite(r[1]) ? { E: r[0], N: r[1] } : null;
+  } catch (_) { return null; }
+}
+
+// Fetch-once tile lookup. Returns a decoded image, or null while it loads or
+// if it failed (offline in the field is expected, so a failure is remembered
+// rather than retried every frame).
+function arMiniTile(z, x, y) {
+  const key = z + "/" + x + "/" + y;
+  const hit = arMiniTileCache.get(key);
+  if (hit) return hit.failed ? null : (hit.ok ? hit.img : null);
+  // Bound the cache: walking a site all day at several zooms would otherwise
+  // hold every tile ever seen. Map preserves insertion order, so this drops the
+  // oldest, which are the ones furthest from where you are now.
+  if (arMiniTileCache.size >= AR_MINI_TILE_CACHE_MAX) {
+    let drop = AR_MINI_TILE_CACHE_MAX / 4;
+    for (const k of arMiniTileCache.keys()) {
+      if (drop-- <= 0) break;
+      arMiniTileCache.delete(k);
+    }
+  }
+  const img = new Image();
+  const entry = { img, ok: false };
+  arMiniTileCache.set(key, entry);
+  img.crossOrigin = "anonymous";       // keeps the canvas untainted
+  img.onload = () => { entry.ok = true; };
+  img.onerror = () => { arMiniTileCache.set(key, { failed: true }); };
+  img.src = arMiniTileUrl(z, x, y);
+  return null;
+}
+
+/**
+ * Draw the satellite basemap behind the plan view. Returns true if any imagery
+ * was painted, so the caller can skip its scrim when there is nothing under it.
+ */
+function drawArMiniSatellite(ctx, W, H) {
+  if (!arMiniSatelliteEnabled() || !arMiniGeoMode || !arGeoReady()) return false;
+  const b = arMiniExtent();
+  if (!b) return false;
+
+  // Extent corners -> lat/lon. All four, since the CRS grid need not be aligned
+  // with north (EPSG:7062 is a transverse Mercator with real convergence).
+  const corners = [
+    arMiniENToLatLon(b.minx, b.miny), arMiniENToLatLon(b.maxx, b.miny),
+    arMiniENToLatLon(b.minx, b.maxy), arMiniENToLatLon(b.maxx, b.maxy),
+  ];
+  if (corners.some((c) => !c)) return false;
+  const lats = corners.map((c) => c.lat), lons = corners.map((c) => c.lon);
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const minLon = Math.min(...lons), maxLon = Math.max(...lons);
+  const midLat = (minLat + maxLat) / 2;
+
+  // Pick the zoom whose tile resolution is closest to the canvas resolution,
+  // then step down if that would need more tiles than the frame budget allows.
+  const groundWidthM = (maxLon - minLon) * 111320 * Math.cos(midLat * Math.PI / 180);
+  const mPerPx = groundWidthM / Math.max(1, W);
+  let z = Math.floor(Math.log2(156543.03392 * Math.cos(midLat * Math.PI / 180) / Math.max(1e-6, mPerPx)));
+  z = Math.max(1, Math.min(AR_MINI_TILE_MAX_Z, z));
+  let x0, x1, y0, y1;
+  for (; z >= 1; z--) {
+    x0 = Math.floor(arLonToTileX(minLon, z)); x1 = Math.floor(arLonToTileX(maxLon, z));
+    y0 = Math.floor(arLatToTileY(maxLat, z)); y1 = Math.floor(arLatToTileY(minLat, z));
+    if ((x1 - x0 + 1) * (y1 - y0 + 1) <= AR_MINI_TILE_BUDGET) break;
+  }
+  if (z < 1) return false;
+
+  const pad = 14;
+  let painted = false;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(pad, pad, W - 2 * pad, H - 2 * pad);
+  ctx.clip();
+  for (let tx = x0; tx <= x1; tx++) {
+    for (let ty = y0; ty <= y1; ty++) {
+      const img = arMiniTile(z, tx, ty);
+      if (!img) continue;
+      // Tile corners -> E/N -> canvas, as a full affine transform rather than an
+      // axis-aligned rect. Web Mercator is north-up but a projected CRS grid is
+      // not: at this site EPSG:7062 has ~1.6 degrees of convergence, which tilts
+      // each tile edge by ~11px at z17 and would leave the imagery visibly
+      // rotated against the footprint. Measured shear/scale error across a tile
+      // is 0.013px, so the affine map is exact enough to ignore the curvature.
+      const nw = arMiniLatLonToEN(arTileYToLat(ty, z), arTileXToLon(tx, z));
+      const ne = arMiniLatLonToEN(arTileYToLat(ty, z), arTileXToLon(tx + 1, z));
+      const sw = arMiniLatLonToEN(arTileYToLat(ty + 1, z), arTileXToLon(tx, z));
+      if (!nw || !ne || !sw) continue;
+      const pNW = arModelToMini(nw.E, nw.N);
+      const pNE = arModelToMini(ne.E, ne.N);
+      const pSW = arModelToMini(sw.E, sw.N);
+      const iw = img.naturalWidth || 256, ih = img.naturalHeight || 256;
+      if (!(Math.hypot(pNE.cx - pNW.cx, pNE.cy - pNW.cy) > 0.5)) continue;
+      ctx.save();
+      ctx.transform(
+        (pNE.cx - pNW.cx) / iw, (pNE.cy - pNW.cy) / iw,
+        (pSW.cx - pNW.cx) / ih, (pSW.cy - pNW.cy) / ih,
+        pNW.cx, pNW.cy,
+      );
+      // Half a tile-pixel of overdraw closes the hairline seam between tiles.
+      ctx.drawImage(img, 0, 0, iw + 0.5, ih + 0.5);
+      ctx.restore();
+      painted = true;
+    }
+  }
+  ctx.restore();
+  return painted;
+}
+
 function drawArMiniMap() {
   if (!arMiniCtx || !arMiniExtent() || !arEyePos) return;
   const ctx = arMiniCtx;
@@ -2539,6 +3339,13 @@ function drawArMiniMap() {
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = "rgba(2,6,23,0.72)";
   ctx.fillRect(0, 0, W, H);
+  // Satellite underlay, then a scrim so the footprint and dots stay readable
+  // against bright imagery (snow, concrete, sun glare off water).
+  const hasImagery = drawArMiniSatellite(ctx, W, H);
+  if (hasImagery) {
+    ctx.fillStyle = "rgba(2,6,23,0.28)";
+    ctx.fillRect(0, 0, W, H);
+  }
   ctx.strokeStyle = "rgba(148,163,184,0.35)";
   ctx.lineWidth = 1;
   ctx.strokeRect(0.5, 0.5, W - 1, H - 1);
@@ -2575,6 +3382,18 @@ function drawArMiniMap() {
   ctx.fillStyle = "#94a3b8";
   ctx.font = "10px sans-serif";
   ctx.fillText("N", W / 2 - 3, 12);
+
+  // Imagery credit. Required by the Esri basemap terms, and the Leaflet maps
+  // already carry it via the layer attribution; the canvas has to draw its own.
+  if (hasImagery) {
+    ctx.font = "8px sans-serif";
+    const credit = "Imagery © Esri";
+    const cw = ctx.measureText(credit).width;
+    ctx.fillStyle = "rgba(2,6,23,0.55)";
+    ctx.fillRect(W - cw - 8, H - 12, cw + 6, 11);
+    ctx.fillStyle = "rgba(226,232,240,0.85)";
+    ctx.fillText(credit, W - cw - 5, H - 4);
+  }
 
   // ── Two dots: position (orange) + direction (green) ──
   const eye = arEyeWorld();
@@ -2670,6 +3489,32 @@ function positionArCameraFromGeo(lat, lon, heading, attitude, altitude) {
   return true;
 }
 
+// Wrap an angle difference into -PI..PI.
+function shortestAngle(d) {
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return d;
+}
+
+/**
+ * Smoothing factor as a function of how far the angle moved this event.
+ *
+ * Below AR_SETTLE_RAD the motion is treated as sensor noise and damped hard;
+ * above it the factor climbs so a real pan is tracked without lag. Magnetometer
+ * noise on a phone is a couple of degrees, so the knee sits just above that.
+ */
+const AR_SETTLE_RAD = 2.5 * Math.PI / 180;   // below this, assume it is noise
+const AR_TRACK_RAD  = 12 * Math.PI / 180;    // above this, fully responsive
+const AR_ALPHA_MIN  = 0.06;
+const AR_ALPHA_MAX  = 0.55;
+function arAdaptiveAlpha(stepRad) {
+  if (!isFinite(stepRad)) return AR_ALPHA_MAX;
+  if (stepRad <= AR_SETTLE_RAD) return AR_ALPHA_MIN;
+  if (stepRad >= AR_TRACK_RAD) return AR_ALPHA_MAX;
+  const t = (stepRad - AR_SETTLE_RAD) / (AR_TRACK_RAD - AR_SETTLE_RAD);
+  return AR_ALPHA_MIN + t * (AR_ALPHA_MAX - AR_ALPHA_MIN);
+}
+
 // Shortest-arc exponential smoothing for angles (radians).
 function smoothAngle(prev, target, a) {
   if (prev == null || !isFinite(prev)) return target;
@@ -2679,9 +3524,80 @@ function smoothAngle(prev, target, a) {
   return prev + a * d;
 }
 
+// ── Orientation maths ────────────────────────────────────────────────────────
+// Plain {x,y,z,w} quaternions rather than THREE's: this runs on every sensor
+// event, and keeping it independent of the 3D library means a failed CDN load
+// of three.js cannot take the compass down with it.
+
+function arQMul(a, b) {
+  return {
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+  };
+}
+
+// Rotate a vector by a quaternion: v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v)
+function arQRotate(q, v) {
+  const tx = 2 * (q.y * v.z - q.z * v.y);
+  const ty = 2 * (q.z * v.x - q.x * v.z);
+  const tz = 2 * (q.x * v.y - q.y * v.x);
+  return {
+    x: v.x + q.w * tx + q.y * tz - q.z * ty,
+    y: v.y + q.w * ty + q.z * tx - q.x * tz,
+    z: v.z + q.w * tz + q.x * ty - q.y * tx,
+  };
+}
+
+// -90 degrees about X. The W3C frame describes the device lying flat with the
+// screen up; this tips it to "camera looking out of the back".
+const AR_Q_FLIP = { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 };
+// +90 degrees about X: Y-up device world -> the Z-up scene frame that
+// arOrbitAz/El live in (+X easting, +Y northing, +Z elevation).
+const AR_Q_YUP_TO_SCENE = { x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 };
+
+/**
+ * Device orientation angles -> world quaternion in the Y-up frame the W3C
+ * DeviceOrientation spec defines: R = Rz(alpha) Rx(beta) Ry(gamma), which is
+ * three.js Euler order 'YXZ' with (beta, alpha, -gamma).
+ *
+ * All angles in degrees. screenAngleDeg is screen.orientation.angle, applied
+ * about the view axis so turning the handset rolls the picture instead of
+ * steering the view.
+ */
+function arDeviceQuaternion(alphaDeg, betaDeg, gammaDeg, screenAngleDeg) {
+  const d2r = Math.PI / 180;
+  const x = (betaDeg || 0) * d2r, y = (alphaDeg || 0) * d2r, z = -(gammaDeg || 0) * d2r;
+  const c1 = Math.cos(x / 2), c2 = Math.cos(y / 2), c3 = Math.cos(z / 2);
+  const s1 = Math.sin(x / 2), s2 = Math.sin(y / 2), s3 = Math.sin(z / 2);
+  // 'YXZ' composition, matching THREE.Quaternion.setFromEuler.
+  let q = {
+    x: s1 * c2 * c3 + c1 * s2 * s3,
+    y: c1 * s2 * c3 - s1 * c2 * s3,
+    z: c1 * c2 * s3 - s1 * s2 * c3,
+    w: c1 * c2 * c3 + s1 * s2 * s3,
+  };
+  q = arQMul(q, AR_Q_FLIP);
+  const half = -(screenAngleDeg || 0) * d2r / 2;
+  q = arQMul(q, { x: 0, y: 0, z: Math.sin(half), w: Math.cos(half) });
+  return q;
+}
+
+// Rotate a Y-up device-world quaternion into the Z-up scene frame.
+function arYupToSceneQuat(q) {
+  return arQMul(AR_Q_YUP_TO_SCENE, q);
+}
+
 function onDeviceOrientation(event) {
   const alpha = event.alpha, beta = event.beta, gamma = event.gamma;
-  arDeviceOrientation = { alpha: alpha || 0, beta: beta || 0, gamma: gamma || 0 };
+  // headingDeg/pitchDeg are filled in below, once the absolute source is known;
+  // seed them so a read-out that lands between events cannot show undefined.
+  arDeviceOrientation = {
+    alpha: alpha || 0, beta: beta || 0, gamma: gamma || 0,
+    headingDeg: arDeviceOrientation ? arDeviceOrientation.headingDeg : null,
+    pitchDeg: (beta || 0) - 90,
+  };
   if (alpha == null && beta == null) return;
 
   // Prefer an absolute (true-north) source. Once we have one, ignore relative
@@ -2700,23 +3616,70 @@ function onDeviceOrientation(event) {
   } catch (_) { scrAngle = 0; }
   arScreenAngleRad = (scrAngle || 0) * Math.PI / 180;
 
-  // Absolute compass heading. iOS exposes webkitCompassHeading (clockwise from
-  // north); Android's absolute alpha is CCW. Keep the existing +alpha (CCW)
-  // convention so the plan view — which already tracks correctly — is unchanged.
-  let rawAz;
-  if (typeof event.webkitCompassHeading === "number" && !isNaN(event.webkitCompassHeading)) {
-    rawAz = (-event.webkitCompassHeading) * Math.PI / 180;
-  } else {
-    rawAz = (alpha || 0) * Math.PI / 180;
-  }
-  rawAz -= arScreenAngleRad;
-  const rawEl = ((beta || 0) - 90) * Math.PI / 180;
+  // Absolute yaw reference. iOS exposes webkitCompassHeading (clockwise from
+  // north) while its alpha is relative; Android's absolute alpha is CCW from
+  // north, i.e. alpha ~= 360 - heading. Feeding the compass bearing back in as
+  // an alpha keeps one composition path for both.
+  const hasCompass = typeof event.webkitCompassHeading === "number" && !isNaN(event.webkitCompassHeading);
+  const alphaUse = hasCompass ? (360 - event.webkitCompassHeading) : (alpha || 0);
+
+  // Compose the full device rotation instead of reading yaw and pitch off alpha
+  // and beta separately. That shortcut is singular at beta = 90 - the phone
+  // held upright, which is exactly how you hold it to look at a bridge - where
+  // alpha and gamma turn about the same axis, so any roll of the handset leaks
+  // straight into the heading and swings the overlay by up to a quarter turn.
+  // The quaternion also carries the screen rotation properly, so landscape
+  // rolls the image rather than steering the view.
+  const q = arDeviceQuaternion(alphaUse, beta || 0, gamma || 0, scrAngle || 0);
+  // Heading trim, applied as a rotation about the scene's up axis to the whole
+  // device rotation - so the camera, the plan view and the read-out all agree,
+  // and the phone still drives the view relative to it. The compass on Android
+  // is referenced to MAGNETIC north through the fused rotation vector, and any
+  // ferrous mass nearby drags it, so a standing correction is needed that
+  // survives the next sensor event rather than being overwritten by it.
+  const half = arHeadingTrimRad / 2;
+  arLiveQuat = arQMul({ x: 0, y: 0, z: Math.sin(half), w: Math.cos(half) },
+                      arYupToSceneQuat(q));
+
+  // Forward vector, converted from the Y-up device world into the Z-up scene
+  // frame (X=easting, Y=northing, Z=elevation) that arOrbitAz/El are measured
+  // in. Keeping these in sync leaves the plan view, Move/Turn and drag controls
+  // working off the same numbers as before.
+  // Forward straight out of the scene-frame rotation (+X east, +Y north, +Z up),
+  // so it already carries the trim.
+  const fwd = arQRotate(arLiveQuat, { x: 0, y: 0, z: -1 });
+  const rawAz = Math.atan2(fwd.y, fwd.x);
+  const rawEl = Math.atan2(fwd.z, Math.hypot(fwd.x, fwd.y));
+
+  // Read-out values. Raw alpha is NOT a compass heading on iOS (it is relative
+  // to an arbitrary origin there), so derive the true bearing the same way the
+  // math above does, and report pitch relative to level rather than raw beta.
+  arDeviceOrientation.headingDeg = hasCompass
+    ? event.webkitCompassHeading
+    : (arOrientAbsolute ? ((360 - (alpha || 0)) % 360 + 360) % 360 : null);
+  arDeviceOrientation.pitchDeg = (beta || 0) - 90;
+  // Which branch produced the heading, and the screen rotation applied to it.
+  // Both are shown in the read-out: a non-zero screen angle (landscape) or an
+  // "alpha-rel" source will each throw the overlay off by a quarter turn or
+  // more, and there is no way to tell which from the rendered view alone.
+  arDeviceOrientation.source = hasCompass ? "compass" : (isAbs ? "alpha-abs" : "alpha-rel");
+  arDeviceOrientation.screenAngleDeg = scrAngle || 0;
 
   // Low-pass smoothing removes the frame-to-frame jitter and the gimbal spikes
   // that appear when the phone is tilted up (beta near 90) to view the bridge.
-  arYawSmoothed = smoothAngle(arYawSmoothed, rawAz, 0.25);
+  // Adaptive low-pass. A fixed factor forces a bad trade: light enough to keep
+  // up with a pan leaves the heading visibly jittering when you hold still,
+  // which is exactly when you are trying to read it to set a trim. Scale the
+  // factor by how fast the angle is actually moving, so holding still settles
+  // hard while a deliberate pan still tracks without lag.
+  const yawStep = (arYawSmoothed == null || !isFinite(arYawSmoothed))
+    ? Math.PI : Math.abs(shortestAngle(rawAz - arYawSmoothed));
+  arYawSmoothed = smoothAngle(arYawSmoothed, rawAz, arAdaptiveAlpha(yawStep));
+  const pitchStep = (arPitchSmoothed == null || !isFinite(arPitchSmoothed))
+    ? Math.PI : Math.abs(rawEl - arPitchSmoothed);
   arPitchSmoothed = (arPitchSmoothed == null || !isFinite(arPitchSmoothed))
-    ? rawEl : (arPitchSmoothed + 0.25 * (rawEl - arPitchSmoothed));
+    ? rawEl
+    : (arPitchSmoothed + arAdaptiveAlpha(pitchStep) * (rawEl - arPitchSmoothed));
   // Drive the look from the phone in BOTH modes:
   //  - live GPS/RTK: the phone yaw/pitch map directly to the world (real AR).
   //  - test mode: the phone drives the look as a RELATIVE offset anchored so
@@ -2779,21 +3742,64 @@ function updateArRender() {
     alt = null;
   }
   
-  const heading = Math.round(arDeviceOrientation.alpha);
-  const pitch = Math.round(arDeviceOrientation.beta);
+  const headingDeg = arDeviceOrientation.headingDeg;
+  const pitch = Math.round(arDeviceOrientation.pitchDeg || 0);
   const roll = Math.round(arDeviceOrientation.gamma);
 
   // Update display text
   if (arLocationText) {
-    arLocationText.textContent = isFinite(lat) ? `📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}` : "📍 test framing (no location)";
+    const usingGps = !!(arUseCurrentLocation && arUseCurrentLocation.checked);
+    if (isFinite(lat)) {
+      // Accuracy and age only mean anything for a live fix; a manually picked
+      // location has neither.
+      let suffix = "";
+      if (usingGps && currentLocation) {
+        const acc = isFinite(currentLocation.accuracy) ? ` ±${currentLocation.accuracy}m` : "";
+        const age = arLastFixAtMs ? ` · ${Math.round((Date.now() - arLastFixAtMs) / 1000)}s ago` : "";
+        suffix = acc + age;
+      }
+      // Elevation line: the model's own base next to where the eye was put, and
+      // which datum won. Reading "base 0 ft" here is the fastest way to tell an
+      // IFC that was never given an elevation from one that was.
+      const ft = (m) => (m / 0.3048).toFixed(0);
+      // The delta between the (corrected) GPS altitude and the model base is
+      // the tell for an uncalibrated vertical datum: a large steady value is a
+      // geoid separation, not a real height difference.
+      const dz = (usingGps && arAltDeltaM != null && Math.abs(arAltDeltaM) > 3)
+        ? ` · GPS ${arAltDeltaM > 0 ? "+" : ""}${ft(arAltDeltaM)}ft vs base`
+        : "";
+      const elev = (arModelBaseM != null && arEyeElevM != null)
+        ? ` | ⛰ base ${ft(arModelBaseM)}ft · eye ${ft(arEyeElevM)}ft · ${arEyeElevSource}${dz}`
+        : "";
+      arLocationText.textContent = `📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}${suffix}${elev}`;
+    } else if (usingGps) {
+      // Ticked but no fix yet: say which, so a denied permission is not mistaken
+      // for a slow lock.
+      arLocationText.textContent = arGeoWatchErr
+        ? `📍 GPS: ${arGeoWatchErr}`
+        : "📍 GPS: acquiring…";
+    } else {
+      const warming = arGeoWatchErr
+        ? `GPS: ${arGeoWatchErr}`
+        : (currentLocation ? "GPS ready - tick 'Use current location'" : "GPS: acquiring…");
+      arLocationText.textContent = `📍 test framing · ${warming}`;
+    }
   }
   if (arAttitudeText) {
-    arAttitudeText.textContent = `Heading: ${heading}° | Pitch: ${pitch}° | Roll: ${roll}°`;
+    const h = (headingDeg == null || !isFinite(headingDeg)) ? "--" : Math.round(headingDeg);
+    const src = arDeviceOrientation.source || "none";
+    const scr = Math.round(arDeviceOrientation.screenAngleDeg || 0);
+    const view = Math.round(((arOrbitAz * 180 / Math.PI) % 360 + 360) % 360);
+    const trimDeg = arHeadingTrimRad * 180 / Math.PI;
+    const trim = Math.abs(trimDeg) > 0.5
+      ? ` | trim ${trimDeg > 0 ? "+" : ""}${trimDeg.toFixed(0)}°` : "";
+    arAttitudeText.textContent =
+      `Heading: ${h}° | Pitch: ${pitch}° | Roll: ${roll}° | src: ${src} | scr: ${scr}° | view az: ${view}°${trim}`;
   }
-  
+
   // Render IFC to canvas
   if (ifcViewer && ifcViewer.model) {
-    renderIfcToArCanvas(lat, lon, heading, pitch, alt);
+    renderIfcToArCanvas(lat, lon, alt);
   } else if (arStatusMessage) {
     arStatusMessage.textContent = "Load the 3D model first, then reopen AR view.";
   }
@@ -2810,7 +3816,10 @@ function renderArScene() {
   ifcViewer.scene.background = prevBg;
 }
 
-function renderIfcToArCanvas(lat, lon, heading, pitch, alt) {
+// The look direction comes from arOrbitAz/arOrbitEl (set in
+// onDeviceOrientation), not from the sensor read-out, so no heading/pitch
+// arguments are taken here.
+function renderIfcToArCanvas(lat, lon, alt) {
   if (!ifcViewer || !ifcViewer.scene || !arRenderer) return;
   // Ensure model bounds / plan-view data exist (also seeds a fallback eye).
   const framed = frameArModelForTest();
@@ -4067,6 +5076,152 @@ function startAprilTagPreviewLoop() {
   }, APRIL_PREVIEW_INTERVAL_MS);
 }
 
+// Whether the AR view anchors to live GPS, remembered across sessions. Opening
+// AR used to force this off every time, so a field session meant re-ticking it
+// on every open. Defaults to off for a first run, matching the old behaviour.
+const AR_USE_GPS_KEY = "arUseCurrentLocation";
+
+function arUseGpsPreference() {
+  return localStorage.getItem(AR_USE_GPS_KEY) === "1";
+}
+
+// Single place that moves the checkbox, so the stored preference can never
+// drift from what is on screen.
+function setArUseCurrentLocation(on, opts) {
+  const persist = !opts || opts.persist !== false;
+  if (arUseCurrentLocation) arUseCurrentLocation.checked = !!on;
+  if (persist) {
+    try { localStorage.setItem(AR_USE_GPS_KEY, on ? "1" : "0"); } catch (_) {}
+  }
+}
+
+/**
+ * Fetch the geoid separation N at a position from NOAA NGS.
+ *
+ * N is the height of the geoid above the ellipsoid, so an orthometric
+ * elevation is H = h - N, and the offset this app stores (added to the
+ * reported altitude) is therefore -N.
+ *
+ * Online only, and US coverage only - the service is NGS's. Where it is not
+ * available the separation can be typed in by hand instead; it is a regional
+ * constant, so looking it up once from any geoid calculator works equally well.
+ */
+async function fetchGeoidSeparationM(lat, lon) {
+  if (!isFinite(lat) || !isFinite(lon)) return { ok: false, reason: "no position" };
+  try {
+    const url = `${AR_GEOID_API}?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`;
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
+    const j = await res.json();
+    // The service has used more than one key for this over time; accept any of
+    // the plausible spellings rather than depending on one.
+    const n = [j.geoidHeight, j.geoid_height, j.height, j.N]
+      .map((v) => Number(v))
+      .find((v) => isFinite(v));
+    if (n == null) return { ok: false, reason: "no geoid height in response" };
+    return { ok: true, separationM: n, offsetM: -n, model: j.geoidModel || j.model || "" };
+  } catch (e) {
+    return { ok: false, reason: (e && e.message) || "network error" };
+  }
+}
+
+/**
+ * Bring a phone-reported altitude onto the model's vertical datum, and give an
+ * eye elevation to stand at when there is no usable altitude.
+ *
+ * The AR path has done this since the datum work; the 3D viewer's
+ * positionCameraFromGeo took the raw altitude, so a photo-aimed or snapped 3D
+ * view landed the same ~95 ft below the model that the AR overlay used to.
+ * Same correction, one place, used by both.
+ *
+ * Returns metres on the model's datum, or null if nothing sensible is known.
+ */
+function groundReferenceElevM() {
+  if (!ifcViewer) return null;
+  if (ifcViewer.siteRefElevM != null && isFinite(ifcViewer.siteRefElevM)) return ifcViewer.siteRefElevM;
+  if (ifcViewer.modelElevMinM != null && isFinite(ifcViewer.modelElevMinM)) return ifcViewer.modelElevMinM;
+  return null;
+}
+
+/**
+ * Note for the status line when the eye elevation looks like an uncorrected
+ * vertical datum rather than a real height.
+ *
+ * The tolerance that rejects a bad altitude has to sit above any plausible
+ * real height difference, and a geoid separation can fall just under it - in
+ * the upper Midwest it is about 29 m against a 30 m tolerance. Rather than
+ * tighten the threshold and start rejecting genuine heights on tall
+ * structures, say what is happening and point at the fix.
+ */
+function eyeElevWarning(eyeAltM) {
+  const base = groundReferenceElevM();
+  if (eyeAltM == null || base == null) return "";
+  const d = eyeAltM - base;
+  if (Math.abs(d) <= 10) return "";
+  const ft = (d / 0.3048).toFixed(0);
+  const calibrated = (arGeoidSepM != null && isFinite(arGeoidSepM));
+  return calibrated
+    ? ` ⚠ ${ft} ft from model ground — check the ground datum.`
+    : ` ⚠ ${ft} ft from model ground — set Ground datum in the AR view to correct it.`;
+}
+
+function correctedEyeElevM(altRaw) {
+  const base = groundReferenceElevM();
+  let alt = (altRaw != null && isFinite(altRaw)) ? altRaw : null;
+  // Geoid separation first, so the sanity check below compares like with like.
+  if (alt != null && arGeoidSepM != null && isFinite(arGeoidSepM)) alt += arGeoidSepM;
+  if (alt != null && base != null && Math.abs(alt - base) > AR_ALT_DATUM_TOLERANCE_M) {
+    // Still wildly off: the altitude is on a different datum, so stand on the
+    // model's own ground rather than trust it.
+    return base + arEyeHeightM;
+  }
+  if (alt != null) return alt;
+  // No altitude at all: stand on the ground, not at the model's mid-height,
+  // which is what the viewer falls back to on its own and leaves you floating.
+  return (base != null) ? base + arEyeHeightM : null;
+}
+
+// ── AR live GPS watch ─────────────────────────────────────────────────────────
+// The rest of the app takes one-shot fixes (getCurrentPosition) at the moment a
+// photo is taken. That is wrong for AR: the overlay is anchored to where you are
+// standing right now, and a fix taken indoors minutes ago never improves however
+// long you stand outside. While the AR view is open we keep a watch running so
+// the position converges as the receiver warms up, and stop it on close so it
+// does not sit there draining the battery.
+
+let arGeoWatchId  = null;
+let arLastFixAtMs = 0;
+let arGeoWatchErr = "";
+
+function startArGeoWatch() {
+  if (arGeoWatchId != null) return;
+  if (!navigator.geolocation) { arGeoWatchErr = "geolocation not supported"; return; }
+  arGeoWatchErr = "";
+  try {
+    arGeoWatchId = navigator.geolocation.watchPosition(
+      (p) => {
+        currentLocation = coordsToLoc(p);
+        arLastFixAtMs = Date.now();
+        arGeoWatchErr = "";
+      },
+      (err) => {
+        // Keep watching: a timeout early on is normal while the receiver is
+        // still acquiring, and the watch will still deliver once it locks.
+        arGeoWatchErr = (err && err.message) ? err.message : "location unavailable";
+      },
+      { enableHighAccuracy: true, timeout: 30000, maximumAge: 0 },
+    );
+  } catch (e) {
+    arGeoWatchErr = String((e && e.message) || e);
+  }
+}
+
+function stopArGeoWatch() {
+  if (arGeoWatchId == null) return;
+  try { navigator.geolocation.clearWatch(arGeoWatchId); } catch (_) {}
+  arGeoWatchId = null;
+}
+
 // ── Location + Heading + Attitude ─────────────────────────────────────────────
 function acquireGeoAndHeading() {
   geoText.textContent = "Location: acquiring\u2026";
@@ -4229,6 +5384,7 @@ async function capturePhoto() {
     setStatus("⚠ Depth mode on but server not connected (state: " + wsState + "). Photo saved without depth.");
   }
 
+  let savedRecord = null;
   try {
     // Refresh location + orientation at the instant of capture so each photo
     // gets its own fresh GPS fix and camera angle.
@@ -4244,7 +5400,7 @@ async function capturePhoto() {
       if (freshOri.attitude != null) currentAttitude = freshOri.attitude;
       headingText.textContent = orientationSummary();
     }
-    await savePhoto(mainBlob, thermalBlob, getCaptureComment(), captureLoc, currentHeading, facingMode, depthBlob, plyText, normalizeTags(captureTags), {
+    savedRecord = await savePhoto(mainBlob, thermalBlob, getCaptureComment(), captureLoc, currentHeading, facingMode, depthBlob, plyText, normalizeTags(captureTags), {
       attitude: currentAttitude,
       aprilTags: aprilTagResult.ids,
       aprilTagDetections: aprilTagResult.detections.map((d) => ({ id: d.id, cornersNormalized: d.cornersNormalized, hammingDistance: d.hammingDistance })),
@@ -4257,6 +5413,7 @@ async function capturePhoto() {
   }
   clearCaptureDraft();
   closeCaptureModal();
+  if (savedRecord) showPostCaptureActions(savedRecord);
   if (depthModeEnabled && !depthBlob) {
     setStatus(`⚠ Photo saved (+ stereo) but DEPTH FAILED — depth server not connected. Run start_servers.bat, then re-check Depth mode.`);
   } else {
@@ -4345,6 +5502,36 @@ async function savePhoto(blob, thermalBlob = null, comment = "", location = null
   const record = { id: createId(), bridgeId: activeBridgeId, createdAt: new Date().toISOString(), comment, location, heading, facing, blob, thermalBlob, depthBlob, plyText, tags: normalizeTags(tags), ...(extra || {}) };
   await runTransaction("readwrite", (store) => store.put(record));
   await renderSavedPhotos();
+  // Returned so callers can offer follow-up actions on the photo just taken -
+  // tagging it to model elements, for instance - without re-querying for it.
+  return record;
+}
+
+// ── Post-capture follow-up ────────────────────────────────────────────────────
+// Offer to tag the photo just taken straight away. Reaching element tagging
+// otherwise means going back to the gallery, opening the photo's Map &
+// navigation and tapping View in 3D - three steps for something you almost
+// always want in the moment, standing in front of the element.
+
+let postCaptureRecord = null;
+let postCaptureTimer = null;
+
+function showPostCaptureActions(record) {
+  const bar = document.getElementById("postCaptureActions");
+  if (!bar || !record) return;
+  postCaptureRecord = record;
+  bar.hidden = false;
+  // Auto-dismiss: this is an offer, not a task list, and it should not sit
+  // there competing with the next shot.
+  if (postCaptureTimer) clearTimeout(postCaptureTimer);
+  postCaptureTimer = setTimeout(hidePostCaptureActions, 30000);
+}
+
+function hidePostCaptureActions() {
+  const bar = document.getElementById("postCaptureActions");
+  if (bar) bar.hidden = true;
+  if (postCaptureTimer) { clearTimeout(postCaptureTimer); postCaptureTimer = null; }
+  postCaptureRecord = null;
 }
 
 // ── Guided pier scan (photogrammetry burst) ───────────────────────────────────
@@ -10103,6 +11290,61 @@ let gridRectifyRecord = null;
 let gridRectifyImg = null;       // full-res HTMLImageElement of the source photo
 let gridRectifyPoints = null;    // [{x,y}] in image pixel coords, length N*N (row-major)
 let gridRectifyN = 10;           // grid nodes per side
+// Real cell size ON THE SURFACE, in millimetres. Drives the output's aspect
+// ratio and its mm-per-pixel scale. Defaults to a square cell, which is the
+// common case and matches the previous implicit assumption.
+let gridRectifyCellWmm = 100;
+let gridRectifyCellHmm = 100;
+// Full fan angle of the laser grid, in degrees, across the whole pattern. 0
+// means "assume the dots are evenly spaced on the surface".
+//
+// This matters because a grid laser emits rays at equal ANGLE, not equal
+// spacing. Where those rays land on a flat surface the spacing grows as
+// tan(theta), so the outer dots sit further apart than the inner ones even
+// with the laser perfectly square to the wall. Warping that pattern to an
+// evenly spaced grid therefore squeezes the edges of the image inward -
+// a systematic error that no amount of careful dot-dragging can remove,
+// because the assumption is wrong rather than the input.
+//
+// Given the fan angle the true relative positions are known analytically, so
+// the destination grid can be built with tan spacing and the error disappears.
+let gridRectifyFanDeg = 0;
+function gridRectifyReadCellSize() {
+  const w = parseFloat((document.getElementById("gridRectifyCellW") || {}).value);
+  const h = parseFloat((document.getElementById("gridRectifyCellH") || {}).value);
+  const f = parseFloat((document.getElementById("gridRectifyFan") || {}).value);
+  if (isFinite(w) && w > 0) gridRectifyCellWmm = w;
+  if (isFinite(h) && h > 0) gridRectifyCellHmm = h;
+  gridRectifyFanDeg = (isFinite(f) && f > 0 && f < 179) ? f : 0;
+}
+
+/**
+ * Normalised 0..1 positions of the destination grid lines along one axis.
+ *
+ * Uniform when no fan angle is known. With one, positions follow tan(theta)
+ * across the fan, which is where an equal-angle projector actually puts its
+ * dots on a flat surface square to it.
+ */
+function gridRectifyAxisPositions(n, fanDeg) {
+  const out = new Array(n);
+  if (!(fanDeg > 0)) {
+    for (let i = 0; i < n; i++) out[i] = i / (n - 1);
+    return out;
+  }
+  const half = (fanDeg / 2) * Math.PI / 180;
+  const t0 = Math.tan(-half), t1 = Math.tan(half);
+  for (let i = 0; i < n; i++) {
+    const th = -half + (i / (n - 1)) * (2 * half);
+    out[i] = (Math.tan(th) - t0) / (t1 - t0);
+  }
+  return out;
+}
+// Columns:rows of real extent. The grid is square in COUNT, so the aspect is
+// just the ratio of the cell dimensions.
+function gridRectifyAspect() {
+  const a = gridRectifyCellWmm / gridRectifyCellHmm;
+  return (isFinite(a) && a > 0) ? a : 1;
+}
 let gridRectifyCanvas = null;
 let gridRectifyCtx = null;
 let gridRectifyScale = 1;        // displayed-canvas px per image px
@@ -10282,14 +11524,31 @@ async function rectifyAndSaveGrid() {
     sCtx.drawImage(gridRectifyImg, 0, 0);
     const srcData = sCtx.getImageData(0, 0, srcW, srcH).data;
 
-    // Output size = bounding box of the grid, capped to a sane max resolution.
+    // Output SHAPE comes from the real grid, not from the grid's bounding box
+    // in the photo. The bounding box is the projected, foreshortened outline,
+    // so sizing the output from it stretches the result by however oblique the
+    // shot happened to be - a square target came out visibly non-square, which
+    // defeats the point of rectifying. The grid's true aspect (columns:rows of
+    // real spacing) is what the output must match.
+    gridRectifyReadCellSize();
+    const aspect = gridRectifyAspect();
+    // Resolution: keep roughly the source's sampling density, taken from the
+    // longer projected side so detail is not thrown away.
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const p of pts) { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; }
-    let outW = Math.round(maxX - minX), outH = Math.round(maxY - minY);
+    const projW = Math.max(1, maxX - minX), projH = Math.max(1, maxY - minY);
     const MAXDIM = 2000;
-    const capScale = Math.min(1, MAXDIM / Math.max(outW, outH));
-    outW = Math.max(2, Math.round(outW * capScale));
-    outH = Math.max(2, Math.round(outH * capScale));
+    let outW, outH;
+    if (aspect >= 1) {
+      outW = Math.min(MAXDIM, Math.round(Math.max(projW, projH * aspect)));
+      outH = Math.max(2, Math.round(outW / aspect));
+    } else {
+      outH = Math.min(MAXDIM, Math.round(Math.max(projH, projW / aspect)));
+      outW = Math.max(2, Math.round(outH * aspect));
+    }
+    if (outH > MAXDIM) { outH = MAXDIM; outW = Math.max(2, Math.round(outH * aspect)); }
+    if (outW > MAXDIM) { outW = MAXDIM; outH = Math.max(2, Math.round(outW / aspect)); }
+    outW = Math.max(2, outW); outH = Math.max(2, outH);
 
     const oCanvas = document.createElement("canvas");
     oCanvas.width = outW; oCanvas.height = outH;
@@ -10297,7 +11556,43 @@ async function rectifyAndSaveGrid() {
     const outImg = oCtx.createImageData(outW, outH);
     const out = outImg.data;
 
-    const cellW = outW / (N - 1), cellH = outH / (N - 1);
+
+    /**
+     * Homography taking the unit square to a grid cell's source quad, cached
+     * per cell since every pixel in the cell reuses it.
+     *
+     * Closed form for unit-square -> quad: with the corners numbered
+     * p00 (0,0), p10 (1,0), p11 (1,1), p01 (0,1),
+     *   x = (a*u + b*v + c) / (g*u + h*v + 1)
+     *   y = (d*u + e*v + f) / (g*u + h*v + 1)
+     * A degenerate (collinear) cell falls back to the affine case, g = h = 0,
+     * which is what the projective form reduces to anyway.
+     */
+    const cellH_cache = new Map();
+    const gridCellHomography = (i, j) => {
+      const key = j * N + i;
+      const hit = cellH_cache.get(key);
+      if (hit) return hit;
+      const p00 = pts[gridIdx(i, j)], p10 = pts[gridIdx(i + 1, j)];
+      const p01 = pts[gridIdx(i, j + 1)], p11 = pts[gridIdx(i + 1, j + 1)];
+      const x0 = p00.x, y0 = p00.y, x1 = p10.x, y1 = p10.y;
+      const x2 = p11.x, y2 = p11.y, x3 = p01.x, y3 = p01.y;
+      const dx1 = x1 - x2, dx2 = x3 - x2, sX = x0 - x1 + x2 - x3;
+      const dy1 = y1 - y2, dy2 = y3 - y2, sY = y0 - y1 + y2 - y3;
+      const den = dx1 * dy2 - dy1 * dx2;
+      let g = 0, h = 0;
+      if (Math.abs(den) > 1e-12) {
+        g = (sX * dy2 - sY * dx2) / den;
+        h = (dx1 * sY - dy1 * sX) / den;
+      }
+      const H = {
+        a: x1 - x0 + g * x1, b: x3 - x0 + h * x3, c: x0,
+        d: y1 - y0 + g * y1, e: y3 - y0 + h * y3, f: y0,
+        g, h,
+      };
+      cellH_cache.set(key, H);
+      return H;
+    };
 
     const sampleBilinear = (fx, fy) => {
       if (fx < 0) fx = 0; else if (fx > srcW - 1) fx = srcW - 1;
@@ -10316,19 +11611,40 @@ async function rectifyAndSaveGrid() {
       return out4;
     };
 
+    // Destination grid-line positions. Uniform, or tan-spaced when the laser's
+    // fan angle is known. Precompute the cell each output pixel falls in, so
+    // the non-uniform case costs no more per pixel than the uniform one.
+    const axX = gridRectifyAxisPositions(N, gridRectifyFanDeg);
+    const axY = gridRectifyAxisPositions(N, gridRectifyFanDeg);
+    const buildLut = (len, ax) => {
+      const cell = new Int32Array(len), frac = new Float32Array(len);
+      let k = 0;
+      for (let d = 0; d < len; d++) {
+        const t = (d + 0.5) / len;
+        while (k < N - 2 && t >= ax[k + 1]) k++;
+        const span = Math.max(1e-9, ax[k + 1] - ax[k]);
+        cell[d] = k;
+        frac[d] = (t - ax[k]) / span;
+      }
+      return { cell, frac };
+    };
+    const lutX = buildLut(outW, axX), lutY = buildLut(outH, axY);
+
     for (let dy = 0; dy < outH; dy++) {
-      // cell row
-      let jf = dy / cellH;
-      let j = Math.floor(jf); if (j > N - 2) j = N - 2; if (j < 0) j = 0;
-      const v = jf - j;
+      const j = lutY.cell[dy];
+      const v = lutY.frac[dy];
       for (let dx = 0; dx < outW; dx++) {
-        let ifc = dx / cellW;
-        let i = Math.floor(ifc); if (i > N - 2) i = N - 2; if (i < 0) i = 0;
-        const u = ifc - i;
-        const p00 = pts[gridIdx(i, j)], p10 = pts[gridIdx(i + 1, j)];
-        const p01 = pts[gridIdx(i, j + 1)], p11 = pts[gridIdx(i + 1, j + 1)];
-        const sx = (1 - u) * (1 - v) * p00.x + u * (1 - v) * p10.x + (1 - u) * v * p01.x + u * v * p11.x;
-        const sy = (1 - u) * (1 - v) * p00.y + u * (1 - v) * p10.y + (1 - u) * v * p01.y + u * v * p11.y;
+        const i = lutX.cell[dx];
+        const u = lutX.frac[dx];
+        // Per-cell PROJECTIVE map, not bilinear. A flat surface photographed
+        // obliquely maps to the image by a homography, and bilinear
+        // interpolation inside a cell is only an approximation to it - straight
+        // lines crossing a cell come out bowed, which is exactly the residual
+        // distortion that makes a rectified shot look "nearly right".
+        const H = gridCellHomography(i, j);
+        const den = H.g * u + H.h * v + 1;
+        const sx = (H.a * u + H.b * v + H.c) / den;
+        const sy = (H.d * u + H.e * v + H.f) / den;
         const px = sampleBilinear(sx, sy);
         const o = (dy * outW + dx) * 4;
         out[o] = px[0]; out[o + 1] = px[1]; out[o + 2] = px[2]; out[o + 3] = 255;
@@ -10340,11 +11656,20 @@ async function rectifyAndSaveGrid() {
     const outBlob = await new Promise((res) => oCanvas.toBlob(res, "image/jpeg", 0.95));
     const srcRec = gridRectifyRecord;
     const baseComment = (srcRec.comment || "").trim();
-    const comment = (baseComment ? baseComment + " · " : "") + "grid-rectified";
+    // With the real cell size known the output has a true scale, which is what
+    // makes a rectified shot measurable rather than merely straight.
+    const mmPerPxX = (gridRectifyCellWmm * (N - 1)) / outW;
+    const mmPerPxY = (gridRectifyCellHmm * (N - 1)) / outH;
+    const comment = (baseComment ? baseComment + " · " : "") + "grid-rectified"
+      + ` · ${mmPerPxX.toFixed(3)} mm/px`;
     await savePhoto(outBlob, null, comment, srcRec.location || null, srcRec.heading ?? null, srcRec.facing ?? null, null, null, srcRec.tags || null, {
       gridRectified: true,
       sourcePhotoId: srcRec.id,
       gridRectifyN: N,
+      cellWidthMm: gridRectifyCellWmm,
+      cellHeightMm: gridRectifyCellHmm,
+      mmPerPxX,
+      mmPerPxY,
     });
     setS("Saved rectified photo.");
     setStatus("Grid-rectified photo saved to this bridge.");
