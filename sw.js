@@ -1,9 +1,10 @@
-const CACHE_NAME = "photo-vault-v183";
+const CACHE_NAME = "photo-vault-v184";
 const ASSETS = [
   "./",
   "./index.html",
   "./app.js",
   "./ifc-viewer.js",
+  "./crs-us.js",
   "./ifc-export.js",
   "./report.js",
   "./basemap.js",

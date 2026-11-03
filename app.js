@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v183";
-const BUILD_STAMP = "2026-11-03 13:00:00";
+const BUILD_VERSION = "v184";
+const BUILD_STAMP = "2026-11-03 14:00:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";

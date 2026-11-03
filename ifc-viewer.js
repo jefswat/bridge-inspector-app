@@ -451,26 +451,44 @@ class IFCViewer {
    * model uses a code not listed here, georeferencing center/footprint lat/lon
    * will be null but the raw easting/northing are still returned.
    */
+  // Every US-area projected CRS (EPSG + ESRI, incl. state plane, UTM, NAD27,
+  // MnDOT county, WISCRS, ...) is bundled in crs-us.js (loaded before this
+  // file and precached by the service worker, so it works with no signal).
   static CRS_DEFS = {
+    ...((typeof window !== 'undefined' && window.CRS_US_DEFS) || {}),
     'EPSG:7062': '+proj=tmerc +lat_0=40.25 +lon_0=-95.7333333333333 +k=1.000039 +x_0=5029210.05842011 +y_0=2011684.02336805 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=us-ft +no_defs +type=crs',
-    ...(() => {
-      // UTM families, generated so any common UTM-georeferenced IFC works:
-      //   NAD83 / UTM zone 1N-23N         EPSG:26901-26923
-      //   NAD83(2011) / UTM zone 59N-60N, 1N-19N  EPSG:6328-6348 (zones 59,60,1..19)
-      //   WGS 84 / UTM zone 1N-60N        EPSG:32601-32660
-      //   WGS 84 / UTM zone 1S-60S        EPSG:32701-32760
-      const d = {};
-      const nad83 = (z) => `+proj=utm +zone=${z} +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs`;
-      for (let z = 1; z <= 23; z++) d[`EPSG:${26900 + z}`] = nad83(z);
-      d['EPSG:6328'] = nad83(59); d['EPSG:6329'] = nad83(60);
-      for (let z = 1; z <= 19; z++) d[`EPSG:${6329 + z}`] = nad83(z);
-      for (let z = 1; z <= 60; z++) {
-        d[`EPSG:${32600 + z}`] = `+proj=utm +zone=${z} +datum=WGS84 +units=m +no_defs +type=crs`;
-        d[`EPSG:${32700 + z}`] = `+proj=utm +zone=${z} +south +datum=WGS84 +units=m +no_defs +type=crs`;
-      }
-      return d;
-    })(),
   };
+
+  /** Normalised CRS name -> "AUTH:code" (from crs-us.js). */
+  static CRS_NAMES = (typeof window !== 'undefined' && window.CRS_US_NAMES) || {};
+
+  /**
+   * Resolve an IfcProjectedCRS to a key in CRS_DEFS. Accepts "EPSG:26915",
+   * "ESRI:103600", "urn:ogc:def:crs:EPSG::26915", a bare code, or a CRS name
+   * such as "NAD83 / Minnesota South (ftUS)" or
+   * "NAD_1983_HARN_Adj_MN_Hennepin_Feet". ESRI codes mislabelled as EPSG
+   * (common in older exports) are also accepted.
+   */
+  static resolveCrsKey(...texts) {
+    const known = (k) => !!(IFCViewer.CRS_DEFS[k] || (window.proj4 && window.proj4.defs(k)));
+    const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    let firstCode = null;
+    for (const t of texts) {
+      const s = String(t || '').trim();
+      if (!s) continue;
+      const m = s.match(/\b(EPSG|ESRI)\b\s*[:\s]*(?:[\d.]*:)?\s*(\d{4,6})\b/i) || s.match(/^()(\d{4,6})$/);
+      if (m) {
+        const code = m[2];
+        const auth = (m[1] || 'EPSG').toUpperCase();
+        const cands = auth === 'ESRI' ? [`ESRI:${code}`, `EPSG:${code}`] : [`EPSG:${code}`, `ESRI:${code}`];
+        for (const k of cands) if (known(k)) return k;
+        if (!firstCode) firstCode = `${auth}:${code}`;
+      }
+      const byName = IFCViewer.CRS_NAMES[norm(s)];
+      if (byName) return byName;
+    }
+    return firstCode; // unknown code: kept so the UI can name it
+  }
 
   /** Metres per native unit of a proj4 definition string (+units / +to_meter). */
   static crsUnitMetres(def) {
@@ -611,8 +629,8 @@ class IFCViewer {
     const sinT = ordn / norm;
 
     const crsName = crs ? String(val(crs.Name) || '') : '';
-    const epsgMatch = crsName.match(/EPSG:?\s*(\d+)/i);
-    const epsg = epsgMatch ? `EPSG:${epsgMatch[1]}` : null;
+    // "epsg" may also hold an ESRI code (county systems etc.).
+    const epsg = crs ? IFCViewer.resolveCrsKey(crsName, val(crs.Description), val(crs.MapZone)) : null;
 
     // --- Unit normalisation ---
     // Eastings/Northings are expressed in IfcProjectedCRS.MapUnit (default:
