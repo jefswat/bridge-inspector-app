@@ -2248,3 +2248,5 @@ select {
 /* The button this device is most likely to need is the highlighted one. */
 #peerTransferCard[data-role="rover"] #peerQuickStartBtn { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
 #peerTransferCard[data-role="rover"] #peerQuickScanBtn { background: var(--accent); color: #fff; border-color: var(--accent); }
+.storage-status { margin-top: 6px; }
+.storage-status.storage-warn { color: var(--warn); }

@@ -1203,7 +1203,9 @@ story += [
         "<b>Send undelivered</b> - everything in this bridge the tablet has not "
         "confirmed: photos taken while the link was down, ones that failed, and "
         "ones edited since they were sent. With auto-send on this runs by itself "
-        "when the link comes back.",
+        "when the link comes back. The first time a bridge is linked, the phone "
+        "asks before sending photos it already had, so a day\u2019s history is "
+        "not pushed across unasked.",
         "<b>More sending options</b> - pick particular stored photos, or send "
         "image files that were never captured in the app.",
         "<b>Select photos to send</b> - send files from the device that were never "

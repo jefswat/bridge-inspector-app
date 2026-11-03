@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v217";
-const BUILD_STAMP = "2026-11-03 23:00:00";
+const BUILD_VERSION = "v218";
+const BUILD_STAMP = "2026-11-03 23:30:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -672,6 +672,7 @@ async function init() {
   applyIfcViewerContextUI();
   setIfcConditionAssignView(false);
   await registerServiceWorker();
+  void requestPersistentStorage();
   if (apriltagPreviewStatus && !aprilTagDetectorReady()) {
     apriltagPreviewStatus.textContent = "AprilTag 36h11: detector library not loaded.";
   }
@@ -1322,7 +1323,7 @@ async function clearCacheAndReloadFlow() {
 
 // ── Events ────────────────────────────────────────────────────────────────────
 function registerEvents() {
-  if (openSettingsButton) openSettingsButton.addEventListener("click", () => openSettingsModal());
+  if (openSettingsButton) openSettingsButton.addEventListener("click", () => { openSettingsModal(); void requestPersistentStorage(); });
   if (closeSettingsButton) closeSettingsButton.addEventListener("click", () => closeSettingsModal());
   if (settingsModal) settingsModal.addEventListener("click", (e) => {
     if (e.target === settingsModal) closeSettingsModal();
@@ -1811,7 +1812,7 @@ function registerEvents() {
   });
   if (peerPickSavedBtn) peerPickSavedBtn.addEventListener("click", () => { void openPeerSavedPickerModal(); });
   const peerSendUnsentBtn = document.getElementById("peerSendUnsentBtn");
-  if (peerSendUnsentBtn) peerSendUnsentBtn.addEventListener("click", () => { void peerSendUndelivered(); });
+  if (peerSendUnsentBtn) peerSendUnsentBtn.addEventListener("click", () => { void peerSendUndelivered(null); });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && peerState.dc && peerState.dc.readyState === "open") void acquirePeerWakeLock();
   });
@@ -4507,20 +4508,20 @@ function attachPeerDataChannel(dc) {
     setStatus("Transfer link connected.");
     void acquirePeerWakeLock();
     // Base immediately tells the rover which bridge is active so rover auto-opens it
-    if (peerState.role === "base" && activeBridgeId) {
-      const b = activeBridge();
+    peerState.linkOpenedAt = new Date().toISOString();
+    if (peerState.role === "base") {
+      const b = activeBridgeId ? activeBridge() : null;
       if (b) {
         sendPeerBridgeSync(dc, b);
         appendPeerLog(`Sent bridge sync: "${b.title || b.id}" to rover.`);
+      } else {
+        // No bridge open here: still tell the rover the link is ready, so it
+        // knows the sync step is over and can catch up.
+        dc.send(JSON.stringify({ t: "hello" }));
       }
     }
-    if (peerState.role === "rover") {
-      peerState.dropped = false;
-      void reportUndeliveredPhotos().then((list) => {
-        // With auto-send on, catch the base up straight away after a reconnect.
-        if (list && list.length && peerState.autoSend) void peerSendUndelivered();
-      });
-    }
+    // The Rover catches up only after the Base's bridge-sync / hello arrives:
+    // starting on open raced the sync, which could switch bridges mid-send.
     peerState.dropped = false;
     setPeerHeaderAlert(false);
   };
@@ -4597,6 +4598,10 @@ async function sendPeerBridgeAssets(msg) {
 
 // Rover receives bridge info from base and opens/creates the matching bridge.
 async function handlePeerBridgeSync(msg) {
+  try { await applyPeerBridgeSync(msg); } finally { void roverCatchUp(); }
+}
+
+async function applyPeerBridgeSync(msg) {
   if (peerState.role !== "rover") return; // base doesn't need to act on this
   const { id, title, description, createdAt } = msg;
   if (!id) return;
@@ -4653,6 +4658,10 @@ async function handlePeerMessage(data) {
       await handlePeerBridgeSync(msg);
       return;
     }
+    if (msg.t === "hello") {
+      void roverCatchUp();
+      return;
+    }
     if (msg.t === "bridge-need") {
       // Sends happen on the transmit queue; don't hold up the receive queue.
       void sendPeerBridgeAssets(msg);
@@ -4683,6 +4692,7 @@ async function handlePeerMessage(data) {
         size,
         createdAt: msg.createdAt || new Date().toISOString(),
         bridgeId: typeof msg.bridgeId === "string" ? msg.bridgeId : null,
+        bridgeTitle: typeof msg.bridgeTitle === "string" ? msg.bridgeTitle.slice(0, 200) : null,
         recId: typeof msg.recId === "string" ? msg.recId : null,
         meta: (msg.meta && typeof msg.meta === "object") ? msg.meta : null,
         chunks: [],
@@ -4756,7 +4766,24 @@ async function finalizeIncomingFile(fileId) {
   // that bridge; otherwise the one open here.
   let targetBridgeId = (incoming.bridgeId && bridges.some((b) => b.id === incoming.bridgeId))
     ? incoming.bridgeId
-    : (activeBridgeId || (bridges[0]?.id || null));
+    : null;
+  if (!targetBridgeId && incoming.bridgeId && /^[\w-]{6,64}$/.test(incoming.bridgeId)) {
+    // A bridge the rover has and this device doesn't: create it under the same
+    // id, rather than dropping the photo into whatever bridge is open here.
+    const nb = {
+      id: incoming.bridgeId,
+      title: incoming.bridgeTitle || "Bridge from rover",
+      description: "Created when photos arrived from the rover.",
+      createdAt: new Date().toISOString(),
+      kml: null,
+      reportConfig: null,
+    };
+    await putBridgeRec(nb);
+    bridges.push(nb);
+    targetBridgeId = nb.id;
+    appendPeerLog(`Created bridge "${nb.title}" for incoming photos.`);
+  }
+  if (!targetBridgeId) targetBridgeId = activeBridgeId || (bridges[0]?.id || null);
   if (!targetBridgeId) {
     const b = {
       id: createId(),
@@ -5013,11 +5040,49 @@ async function reportUndeliveredPhotos() {
   return list;
 }
 
-async function peerSendUndelivered() {
+// After linking (and after the Base's bridge-sync), bring the Base up to date.
+// The first time a bridge is linked, photos that already existed in it are not
+// sent without asking: that could be a whole day's history.
+async function roverCatchUp() {
+  if (peerState.role !== "rover" || peerState.catchingUp) return;
+  const dc = peerState.dc;
+  if (!dc || dc.readyState !== "open") return;
+  const b = activeBridge();
+  if (!b) return;
+  peerState.catchingUp = true;
+  try {
+    const linkStart = peerState.linkOpenedAt || new Date().toISOString();
+    if (!b.peerLinkedAt) {
+      const older = (await undeliveredPhotos(b.id)).filter((r) => !r.peerDeliveredAt && String(r.createdAt) < linkStart);
+      if (older.length) {
+        const yes = confirm(
+          `"${b.title || "This bridge"}" already has ${older.length} photo${older.length === 1 ? "" : "s"} taken before linking.\n\n`
+          + "OK: send them to the tablet now.\nCancel: only send photos taken from now on (you can still send the rest later with Send undelivered).");
+        if (!yes) b.peerSendFrom = linkStart;
+      }
+      b.peerLinkedAt = linkStart;
+      await putBridgeRec(b);
+      const i = bridges.findIndex((x) => x.id === b.id);
+      if (i >= 0) bridges[i] = b;
+    }
+    await reportUndeliveredPhotos();
+    if (peerState.autoSend) {
+      // Photos before a declined cut-off wait for the button; anything already
+      // delivered once and edited since is always caught up.
+      const list = (await undeliveredPhotos(b.id)).filter((r) =>
+        r.peerDeliveredAt || !b.peerSendFrom || String(r.createdAt) >= b.peerSendFrom);
+      if (list.length) await peerSendUndelivered(list);
+    }
+  } finally {
+    peerState.catchingUp = false;
+  }
+}
+
+async function peerSendUndelivered(onlyThese) {
   if (peerState.role !== "rover") { setStatus("Switch to Rover role to send photos."); return; }
   const dc = peerState.dc;
   if (!dc || dc.readyState !== "open") { setStatus("Connect the transfer link first."); return; }
-  const list = await undeliveredPhotos(activeBridgeId);
+  const list = Array.isArray(onlyThese) ? onlyThese : await undeliveredPhotos(activeBridgeId);
   if (!list.length) { setStatus("Every photo in this bridge has been delivered."); return; }
   let ok = 0, failed = 0;
   for (const rec of list) {
@@ -5093,6 +5158,7 @@ async function sendBlobNow(blob, name, mime, dc, createdAt, opts = {}) {
     t: "file-start", id, name: name || "photo.jpg", mime: mime || "image/jpeg", size: blob.size, hash, createdAt: when,
     kind: opts.kind || "photo",
     bridgeId: opts.bridgeId || activeBridgeId || null,
+    bridgeTitle: ((bridges.find((x) => x.id === (opts.bridgeId || activeBridgeId)) || {}).title) || null,
     recId: opts.recId || null,
     meta: opts.meta || null,
   }));
@@ -12762,6 +12828,37 @@ async function autoLoadBridgeIfc() {
     console.warn("Auto-load of saved IFC failed:", e);
   }
   return false;
+}
+
+// Ask the browser to keep this app's data (photos, bridges, models) even when
+// the device is short of space. Without it, "best-effort" storage can be
+// evicted. Chrome grants it silently for installed / frequently used apps;
+// Firefox asks once. The Settings card shows the result.
+async function requestPersistentStorage() {
+  const el = document.getElementById("storagePersistStatus");
+  try {
+    if (!navigator.storage || !navigator.storage.persist) {
+      if (el) el.textContent = "Storage protection: not supported by this browser.";
+      return false;
+    }
+    let ok = await navigator.storage.persisted();
+    if (!ok) ok = await navigator.storage.persist();
+    let usage = "";
+    try {
+      const est = await navigator.storage.estimate();
+      if (est && est.usage != null) usage = ` · ${Math.round(est.usage / 1048576)} MB used`;
+    } catch (_) {}
+    if (el) {
+      el.textContent = ok
+        ? `🔒 Storage protected: the browser will not clear photos to free space${usage}.`
+        : `⚠ Storage not protected: the browser may clear data if the device runs out of space${usage}. Installing the app (Add to Home screen) usually fixes this.`;
+      el.classList.toggle("storage-warn", !ok);
+    }
+    return ok;
+  } catch (e) {
+    console.warn("storage.persist:", e);
+    return false;
+  }
 }
 
 async function registerServiceWorker() {
