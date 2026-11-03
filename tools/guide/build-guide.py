@@ -1168,38 +1168,41 @@ story += [
     steps([
         "Both devices: open <b>Transfer</b> and set the role - tablet to Base, "
         "phone to Rover.",
-        "<b>Tablet (Base):</b> tap <b>1) Create offer</b>, then "
-        "<b>Show local as QR</b>.",
-        "<b>Phone (Rover):</b> tap <b>Scan QR to remote</b> and read the "
-        "tablet\u2019s code, then <b>2) Apply offer + create answer</b>, then "
-        "<b>Show local as QR</b>.",
-        "<b>Tablet (Base):</b> tap <b>Scan QR to remote</b>, read the phone\u2019s "
-        "code, then <b>3) Apply answer</b>.",
-        "Watch the status line settle on <b>Transfer link: connected</b>.",
+        "<b>Tablet (Base):</b> tap <b>Start pairing</b>. A code appears.",
+        "<b>Phone (Rover):</b> tap <b>Scan code</b> and point it at the "
+        "tablet. The phone then shows its own code.",
+        "<b>Tablet (Base):</b> tap <b>Scan code</b> and point it at the phone.",
+        "Watch the status line settle on <b>Transfer link: connected</b>, and the "
+        "Transfer button in the header gain a green dot.",
     ]),
-    shot("20-transfer-steps", "The three pairing steps, in order. Each device only "
-         "uses the ones for its role."),
+    shot("20-transfer-steps", "Start pairing and Scan code. A scanned code is "
+         "applied for the device\u2019s role, so there is nothing else to press."),
     shot("22-transfer-state", "Connected. The log pane underneath records every "
          "state change and every file, which is where to look when it does not."),
     Paragraph(
-        "If a camera will not read the code, <b>Copy local SDP</b> and paste it "
-        "into the other device\u2019s <b>Remote SDP</b> box by any means you like. "
-        "<b>Reset transfer session</b> tears everything down so you can start the "
-        "sequence again, which is usually quicker than debugging a half-open link.",
+        "If a camera will not read the code, open <b>Advanced</b>: <b>Copy local "
+        "SDP</b> and paste it into the other device\u2019s <b>Remote SDP</b> box by "
+        "any means you like, then use the numbered buttons. <b>Reset transfer "
+        "session</b> tears everything down so you can start again, which is "
+        "usually quicker than debugging a half-open link.",
         Body),
     Paragraph("Sending photos", H2),
     Paragraph(
         "The moment the link opens, the Base sends the active bridge across and the "
-        "Rover opens it - creating it locally first if the phone has never seen it. "
-        "Both devices are then filing into the same bridge. <b>Sync bridge to "
-        "rover</b> re-sends it if the lead switches bridges.", Body),
+        "Rover opens it - creating it locally first if the phone has never seen it, "
+        "and taking the bridge\u2019s IFC model and KML overlay if it lacks them, so "
+        "AR works on the phone straight away. If the phone is already working in a "
+        "different bridge it asks before switching. <b>Sync bridge to rover</b> "
+        "re-sends it if the lead switches bridges.", Body),
     Paragraph("On the phone, the sending device:", Body),
     bullets([
         "<b>Auto-send new captures</b> - the setting that makes the workflow work. "
         "Every photo goes across as it is saved, with no extra tap. The choice is "
         "remembered between sessions.",
-        "<b>Send from app photos</b> - pick from what is already stored, for "
-        "catching the tablet up on a backlog.",
+        "<b>Send undelivered</b> - everything in this bridge the tablet has not "
+        "confirmed: photos taken while the link was down, or ones that failed. "
+        "Shows the count when the link opens.",
+        "<b>Send from app photos</b> - pick particular stored photos.",
         "<b>Select photos to send</b> - send files from the device that were never "
         "captured in the app.",
     ]),
@@ -1207,35 +1210,23 @@ story += [
          "role."),
     Paragraph(
         "Files are chunked with backpressure handling, so a big photo will not "
-        "swamp the channel, and each one is hashed - re-sending the same image to "
-        "the same bridge is skipped rather than duplicated.", Body),
-    callout("Only the image crosses the link",
-            "This is the one thing to plan around. The transfer carries the image "
-            "bytes and the capture time - <b>not</b> the GPS location, the heading, "
-            "the tags, or the AprilTag detections. A received photo lands on the "
-            "tablet with no position, no tags, and a placeholder comment of "
-            "\u201cTransferred from rover: \u2026\u201d. So a report generated on "
-            "the tablet will have no location maps and no "
-            "\u201clooking North\u201d captions for transferred photos unless the "
-            "note taker fills them in.",
+        "swamp the channel. The tablet checks every file against its checksum and "
+        "confirms it back; only then does the phone count it as delivered. A photo "
+        "the tablet already has is not stored twice.", Body),
+    callout("The whole record crosses the link",
+            "Each photo carries its capture time, GPS location, heading, attitude, "
+            "tags, comment and AprilTag detections, and is filed under the bridge it "
+            "was taken in - even if the tablet has a different bridge open. A report "
+            "generated on the tablet gets location maps and \u201clooking North\u201d "
+            "captions for transferred photos. Annotations, sketches and depth/thermal "
+            "images still travel only by <b>Download ZIP</b> / <b>Import ZIP</b>.",
+            "note"),
+    callout("Keep the screens on",
+            "While linked, the app holds the screen awake. If a screen does turn off "
+            "the link drops and the devices have to be paired again; the header dot "
+            "goes out and the status line says so. Nothing taken in the meantime is "
+            "lost: it waits under <b>Send undelivered</b>.",
             "warn"),
-    Paragraph("So decide which device holds the record", H2),
-    Paragraph(
-        "Two workable patterns, and it is worth picking one before you start rather "
-        "than discovering the difference at the end of the day:", Body),
-    bullets([
-        "<b>Tablet writes the report.</b> The note taker is going to be typing "
-        "anyway - so they type the comment, which becomes the defect caption "
-        "verbatim, and set the tags, which decide the sections. Accept that "
-        "transferred photos carry no GPS. This is the faster pattern and it is what "
-        "the live link is for.",
-        "<b>Phone holds the record.</b> Use the tablet as a live second screen for "
-        "review only, and at the end of the day move the whole bridge across with "
-        "<b>Download ZIP</b> on the phone and <b>Import ZIP</b> on the tablet. That "
-        "path is lossless - locations, headings, tags, comments, AprilTags, "
-        "annotations and overlays all come with it - and it is the one to use when "
-        "the report needs location maps.",
-    ]),
     callout("It works with no signal",
             "The link is peer-to-peer. It tries a public STUN server while "
             "gathering candidates, but gives up after eight seconds and proceeds "
