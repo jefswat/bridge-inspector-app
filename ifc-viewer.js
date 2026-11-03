@@ -875,20 +875,25 @@ class IFCViewer {
     this.model.traverse((child) => {
       if (!child || !child.isMesh) return;
       let bucket = this._classifyProjectionBucket(child.userData?.elementType, child.userData?.elementName);
-      const box = new THREE.Box3().setFromObject(child);
-      if (!box || !Number.isFinite(box.min.x) || !Number.isFinite(box.max.x)) return;
-      const corners = [
-        [box.min.x, box.min.y, box.min.z], [box.max.x, box.min.y, box.min.z],
-        [box.min.x, box.max.y, box.min.z], [box.max.x, box.max.y, box.min.z],
-        [box.min.x, box.min.y, box.max.z], [box.max.x, box.min.y, box.max.z],
-        [box.min.x, box.max.y, box.max.z], [box.max.x, box.max.y, box.max.z],
-      ].map((a) => new THREE.Vector3(a[0], a[1], a[2]).applyMatrix4(Cinv));
+      // Plan footprint from the mesh's actual vertices, not its axis-aligned
+      // bounding box: on a bridge skewed to the map grid, a box turns every
+      // long diagonal member (barrier, tie, floor beam) into a fat square.
+      const pos = child.geometry && child.geometry.attributes && child.geometry.attributes.position;
+      if (!pos || !pos.count) return;
+      child.updateMatrixWorld(true);
+      const M = new THREE.Matrix4().multiplyMatrices(Cinv, child.matrixWorld);
+      const me = M.elements;
+      const planPts = [];
       let minE = Infinity, maxE = -Infinity, minN = Infinity, maxN = -Infinity;
       let minEl = Infinity, maxEl = -Infinity;
-      for (const t of corners) {
-        const e = t.x;
-        const n = -t.z;
-        const el = t.y;
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+        // M * (x,y,z,1): x = easting, -z = northing, y = elevation.
+        const e = me[0] * x + me[4] * y + me[8] * z + me[12];
+        const el = me[1] * x + me[5] * y + me[9] * z + me[13];
+        const n = -(me[2] * x + me[6] * y + me[10] * z + me[14]);
+        if (!Number.isFinite(e) || !Number.isFinite(n)) continue;
+        planPts.push([e, n]);
         if (e < minE) minE = e;
         if (e > maxE) maxE = e;
         if (n < minN) minN = n;
@@ -897,6 +902,9 @@ class IFCViewer {
         if (el > maxEl) maxEl = el;
       }
       if (!Number.isFinite(minE) || !Number.isFinite(maxE) || !Number.isFinite(minN) || !Number.isFinite(maxN)) return;
+      // Reduce to this mesh's hull now so per-element hulls stay cheap.
+      let meshHull = this._convexHull(planPts);
+      if (meshHull.length < 3) meshHull = [[minE, minN], [maxE, minN], [maxE, maxN], [minE, maxN]];
       // Fallback classification for generic IFC proxies: infer structure from elevation.
       if (bucket === "other" && Number.isFinite(minEl) && Number.isFinite(maxEl)) {
         const centerEl = (minEl + maxEl) / 2;
@@ -919,7 +927,7 @@ class IFCViewer {
         };
         groupMap.set(expressId, grp);
       }
-      grp.points.push([minE, minN], [maxE, minN], [maxE, maxN], [minE, maxN]);
+      for (const pt of meshHull) grp.points.push(pt);
       meshCounts.set(bucket, (meshCounts.get(bucket) || 0) + 1);
     });
 
