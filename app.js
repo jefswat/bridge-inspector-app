@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v182";
-const BUILD_STAMP = "2026-11-03 12:00:00";
+const BUILD_VERSION = "v183";
+const BUILD_STAMP = "2026-11-03 13:00:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -10624,14 +10624,15 @@ let arHudEl = null;
 function updateArDebugHud() {
   if (!arActive) { if (arHudEl) arHudEl.style.display = "none"; return; }
   if (!arHudEl) {
-    arHudEl = document.createElement("div");
-    arHudEl.id = "arDebugHud";
-    arHudEl.style.cssText =
-      "position:fixed;left:8px;top:8px;z-index:100000;padding:6px 8px;" +
-      "font:11px/1.35 monospace;color:#e2e8f0;background:rgba(2,6,23,0.72);" +
-      "border:1px solid rgba(148,163,184,0.4);border-radius:6px;white-space:pre;" +
-      "pointer-events:none;max-width:70vw;";
-    (arViewModal || document.body).appendChild(arHudEl);
+    // Static strip below the AR viewport (see index.html / .ar-debug-hud).
+    arHudEl = document.getElementById("arDebugHud");
+    if (!arHudEl) {
+      arHudEl = document.createElement("div");
+      arHudEl.id = "arDebugHud";
+      arHudEl.className = "ar-debug-hud";
+      const container = arViewModal && arViewModal.querySelector(".ar-view-container");
+      (container || arViewModal || document.body).appendChild(arHudEl);
+    }
   }
   arHudEl.style.display = "block";
   const azDeg = (arOrbitAz * 180 / Math.PI);
