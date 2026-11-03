@@ -1166,8 +1166,9 @@ story += [
         "connection descriptions by hand. The QR route is much faster than typing.",
         Body),
     steps([
-        "Both devices: open <b>Transfer</b> and set the role - tablet to Base, "
-        "phone to Rover.",
+        "Both devices: open <b>Transfer</b>. There is no role to set: the device "
+        "that taps Start pairing becomes the Base, and the one that scans its code "
+        "becomes the Rover. The badge at the top says which this device is.",
         "<b>Tablet (Base):</b> tap <b>Start pairing</b>. A code appears.",
         "<b>Phone (Rover):</b> tap <b>Scan code</b> and point it at the "
         "tablet. The phone then shows its own code.",
@@ -1200,9 +1201,11 @@ story += [
         "Every photo goes across as it is saved, with no extra tap. The choice is "
         "remembered between sessions.",
         "<b>Send undelivered</b> - everything in this bridge the tablet has not "
-        "confirmed: photos taken while the link was down, or ones that failed. "
-        "Shows the count when the link opens.",
-        "<b>Send from app photos</b> - pick particular stored photos.",
+        "confirmed: photos taken while the link was down, ones that failed, and "
+        "ones edited since they were sent. With auto-send on this runs by itself "
+        "when the link comes back.",
+        "<b>More sending options</b> - pick particular stored photos, or send "
+        "image files that were never captured in the app.",
         "<b>Select photos to send</b> - send files from the device that were never "
         "captured in the app.",
     ]),
@@ -1218,14 +1221,17 @@ story += [
             "tags, comment and AprilTag detections, and is filed under the bridge it "
             "was taken in - even if the tablet has a different bridge open. A report "
             "generated on the tablet gets location maps and \u201clooking North\u201d "
-            "captions for transferred photos. Annotations, sketches and depth/thermal "
-            "images still travel only by <b>Download ZIP</b> / <b>Import ZIP</b>.",
+            "captions for transferred photos. Sketches, annotations, element tags, "
+            "de-skewed views, and thermal / depth images and point clouds go with it; "
+            "edit a photo after sending and the tablet\u2019s copy is updated, not "
+            "duplicated.",
             "note"),
     callout("Keep the screens on",
             "While linked, the app holds the screen awake. If a screen does turn off "
-            "the link drops and the devices have to be paired again; the header dot "
-            "goes out and the status line says so. Nothing taken in the meantime is "
-            "lost: it waits under <b>Send undelivered</b>.",
+            "the link drops: the tablet immediately shows a fresh code, and the "
+            "phone\u2019s Transfer button shows \u26a0. Re-pairing is then one "
+            "<b>Scan code</b> on each side. Nothing taken in the meantime is lost - "
+            "it is sent as soon as the link is back.",
             "warn"),
     callout("It works with no signal",
             "The link is peer-to-peer. It tries a public STUN server while "

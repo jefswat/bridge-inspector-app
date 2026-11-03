@@ -25,14 +25,14 @@
   <!-- proj4 (map projection / georeferencing) -->
   <script src="vendor/proj4.js"></script>
   <!-- web-ifc (IFC parsing) loaded dynamically as ES module in ifc-viewer.js -->
-  <link rel="stylesheet" href="styles.css?v=20261103-220000" />
+  <link rel="stylesheet" href="styles.css?v=20261103-230000" />
 </head>
 <body>
 
 <header>
   <h1 class="app-title"><span class="app-title-text">📷 Photo Vault</span><span id="buildStamp" class="build-stamp">build …</span></h1>
   <div class="header-actions">
-    <a class="map-nav-link" href="map.html?v=20261103-220000" title="Map summary" aria-label="Map summary">🗺<span class="btn-label"> Map summary</span></a>
+    <a class="map-nav-link" href="map.html?v=20261103-230000" title="Map summary" aria-label="Map summary">🗺<span class="btn-label"> Map summary</span></a>
     <button id="openSettingsButton" class="secondary" hidden title="Settings" aria-label="Settings">⚙<span class="btn-label"> Settings</span></button>
     <button id="openPeerTransferViewTop" class="secondary" title="Transfer photos between devices" aria-label="Transfer">🔁<span class="btn-label"> Transfer</span></button>
     <button id="installButton" class="secondary" hidden title="Install app" aria-label="Install app">⬇<span class="btn-label"> Install</span></button>
@@ -304,9 +304,22 @@
 <section class="card peer-transfer-modal" id="peerTransferCard" hidden>
   <div class="scan-panel">
     <div class="peer-transfer-modal-head">
-      <span class="scan-title">🔁 Base / Rover transfer</span>
+      <span class="scan-title">🔁 Photo transfer</span>
       <button id="closePeerTransferView" type="button" class="secondary">✕ Close</button>
     </div>
+    <p id="peerRoleBadge" class="peer-role-badge">This device: Base (receives)</p>
+    <!-- Guided pairing. Scanning a code applies it for this device's role. -->
+    <ol class="peer-steps">
+      <li><b>Tablet</b> (receives the photos): tap <b>Start pairing</b>. A code appears.</li>
+      <li><b>Phone</b> (takes the photos): tap <b>Scan code</b> and point at the tablet. The phone then shows its own code.</li>
+      <li><b>Tablet</b>: tap <b>Scan code</b> and point at the phone. Connected.</li>
+    </ol>
+    <div class="peer-transfer-actions peer-quick-actions">
+      <button id="peerQuickStartBtn" type="button">▦ Start pairing</button>
+      <button id="peerQuickScanBtn" type="button" class="secondary">📷 Scan code</button>
+    </div>
+    <details class="peer-advanced">
+      <summary>Advanced: role, manual pairing &amp; reset</summary>
     <div class="scan-panel-head">
       <label class="peer-role-label" for="peerRoleSelect">This device is:</label>
       <select id="peerRoleSelect" class="meta-input peer-role-select">
@@ -314,18 +327,6 @@
         <option value="rover">Rover (sender)</option>
       </select>
     </div>
-    <!-- Guided pairing. Scanning a code applies it for this device's role. -->
-    <ol class="peer-steps">
-      <li><b>Base</b> (tablet, receives): tap <b>Start pairing</b>. A code appears.</li>
-      <li><b>Rover</b> (phone, sends): tap <b>Scan code</b> and point at the Base. The Rover then shows its own code.</li>
-      <li><b>Base</b>: tap <b>Scan code</b> and point at the Rover. Connected.</li>
-    </ol>
-    <div class="peer-transfer-actions peer-quick-actions">
-      <button id="peerQuickStartBtn" type="button" class="peer-base-only">▦ Start pairing</button>
-      <button id="peerQuickScanBtn" type="button" class="secondary">📷 Scan code</button>
-    </div>
-    <details class="peer-advanced">
-      <summary>Advanced: manual pairing &amp; reset</summary>
     <div class="peer-transfer-actions">
       <button id="peerCreateOfferBtn" type="button" class="secondary">1) Create offer</button>
       <button id="peerApplyOfferBtn" type="button" class="secondary">2) Apply offer + answer</button>
@@ -357,18 +358,25 @@
     <div class="peer-transfer-actions">
       <button id="peerSyncBridgeBtn" type="button" class="secondary peer-base-only" title="Send active bridge to rover so it opens automatically">📡 Sync bridge to rover</button>
     </div>
+    <!-- Sending (phone). Auto-send plus Send undelivered covers almost every
+         case; picking individual photos or outside files is under More. -->
     <div id="peerSendRow" class="peer-send-row">
-      <button id="peerPickSavedBtn" type="button" class="secondary">🖼 Send from app photos</button>
-      <label class="secondary peer-file-label">
-        📂 Select photos to send
-        <input id="peerFileInput" type="file" accept="image/*" multiple hidden />
-      </label>
-      <button id="peerSendFilesBtn" type="button">📤 Send selected photos</button>
-      <button id="peerSendUnsentBtn" type="button" class="secondary" title="Resend every photo in this bridge the base has not confirmed">⟳ Send undelivered</button>
       <label class="peer-auto-send-label">
         <input id="peerAutoSendCheck" type="checkbox" />
-        Auto-send new captures
+        Auto-send each photo as it's taken
       </label>
+      <button id="peerSendUnsentBtn" type="button" title="Send every photo in this bridge the tablet has not confirmed, including ones edited since">⟳ Send undelivered</button>
+      <details class="peer-more-send">
+        <summary>More sending options</summary>
+        <div class="peer-transfer-actions">
+          <button id="peerPickSavedBtn" type="button" class="secondary">🖼 Pick app photos…</button>
+          <label class="secondary peer-file-label">
+            📂 Choose files…
+            <input id="peerFileInput" type="file" accept="image/*" multiple hidden />
+          </label>
+          <button id="peerSendFilesBtn" type="button" class="secondary">📤 Send chosen files</button>
+        </div>
+      </details>
     </div>
     <p id="peerConnState" class="status-bar peer-conn-state">Transfer link: idle</p>
     <pre id="peerTransferLog" class="peer-transfer-log">Waiting for session setup…</pre>
@@ -664,9 +672,9 @@
 <script src="vendor/cv.js?v=20260716-211500"></script>
 <script src="vendor/aruco.js?v=20260716-211500"></script>
 <script src="vendor/apriltag_36h11.js?v=20260716-211500"></script>
-<script src="crs-us.js?v=20261103-220000"></script>
-<script src="ifc-viewer.js?v=20261103-220000"></script>
-<script src="ifc-export.js?v=20261103-220000"></script>
-<script src="app.js?v=20261103-220000"></script>
+<script src="crs-us.js?v=20261103-230000"></script>
+<script src="ifc-viewer.js?v=20261103-230000"></script>
+<script src="ifc-export.js?v=20261103-230000"></script>
+<script src="app.js?v=20261103-230000"></script>
 </body>
 </html>

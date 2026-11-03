@@ -2232,3 +2232,19 @@ select {
 .peer-advanced > summary { cursor: pointer; font-size: .85rem; font-weight: 600; color: var(--muted); padding: 4px 0; }
 .peer-advanced[open] > summary { margin-bottom: 8px; }
 .peer-transfer-actions button { white-space: normal; }
+
+/* v217 transfer */
+.peer-role-badge {
+  display: inline-block; margin: 2px 0 6px; padding: 3px 10px; border-radius: 999px;
+  font-size: .78rem; font-weight: 600; background: var(--accent-weak); color: var(--accent-dark);
+}
+#peerTransferCard[data-role="rover"] .peer-role-badge { background: #ecfdf5; color: var(--success); }
+.peer-send-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.peer-send-row > #peerSendUnsentBtn { flex: 1 1 160px; min-height: 44px; }
+.peer-more-send { flex-basis: 100%; }
+.peer-more-send > summary { cursor: pointer; font-size: .82rem; color: var(--muted); padding: 4px 0; }
+.drop-dot { color: var(--warn); }
+.peer-link-dropped { border-color: var(--warn) !important; }
+/* The button this device is most likely to need is the highlighted one. */
+#peerTransferCard[data-role="rover"] #peerQuickStartBtn { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+#peerTransferCard[data-role="rover"] #peerQuickScanBtn { background: var(--accent); color: #fff; border-color: var(--accent); }

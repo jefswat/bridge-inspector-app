@@ -1,5 +1,5 @@
-const BUILD_VERSION = "v216";
-const BUILD_STAMP = "2026-11-03 22:00:00";
+const BUILD_VERSION = "v217";
+const BUILD_STAMP = "2026-11-03 23:00:00";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DB_NAME    = "photo-vault-pwa";
 const STORE_NAME = "photos";
@@ -4029,7 +4029,9 @@ function setPeerConnState(text) {
   if (openPeerTransferViewTopBtn) {
     // "disconnected" also contains "connected"; match the word on its own.
     const connected = /(^|[^a-z])connected\b/i.test(text) && !/disconnected/i.test(text);
-    openPeerTransferViewTopBtn.innerHTML = '🔁<span class="btn-label"> Transfer</span>' + (connected ? ' <span class="live-dot" aria-label="connected">●</span>' : "");
+    openPeerTransferViewTopBtn.innerHTML = '🔁<span class="btn-label"> Transfer</span>'
+      + (connected ? ' <span class="live-dot" aria-label="connected">●</span>'
+        : (peerState.dropped ? ' <span class="drop-dot" aria-label="link dropped">⚠</span>' : ""));
     openPeerTransferViewTopBtn.classList.toggle("peer-link-active", connected);
   }
 }
@@ -4045,6 +4047,7 @@ function resetPeerSession(keepSdp = false) {
   peerState.dc = null;
   peerState.incoming = null;
   peerState.sending = false;
+  failPendingPeerAcks("Transfer session reset.");
   if (!keepSdp) {
     if (peerLocalSdp) peerLocalSdp.value = "";
     if (peerRemoteSdp) peerRemoteSdp.value = "";
@@ -4102,11 +4105,27 @@ function parseRemoteSdp() {
   return obj;
 }
 
-// Guided pairing: a scanned code is applied according to this device's role,
-// so pairing is "Base: start, Rover: scan, Base: scan" with no numbered steps.
+// Roles follow from what you tap: the device that taps Start pairing is the
+// Base (receiver); a device that scans a pairing offer becomes the Rover
+// (sender). Setting the role by hand first was the easiest step to get wrong.
+function setPeerRole(role) {
+  if (peerRoleSelect) peerRoleSelect.value = role;
+  peerState.role = role;
+  updatePeerTransferUi();
+}
+
+// Guided pairing: "Base: start, Rover: scan, Base: scan" with no numbered steps.
 async function afterPeerQrScanned() {
   let type = "";
   try { type = parseRemoteSdp().type; } catch (_) { /* fall through */ }
+  if (type === "offer" && peerState.role !== "rover") {
+    setPeerRole("rover");
+    appendPeerLog("Scanned a pairing offer: this device is now the Rover (sender).");
+  }
+  if (type === "answer" && peerState.role !== "base") {
+    setStatus("That is the phone's reply code; scan it on the tablet that tapped Start pairing.");
+    return;
+  }
   if (peerState.role === "rover" && type === "offer") {
     await peerApplyOffer();
     if (peerLocalSdp && peerLocalSdp.value) {
@@ -4123,7 +4142,10 @@ async function afterPeerQrScanned() {
 }
 
 async function peerQuickStart() {
-  if (peerState.role !== "base") { setStatus("Start pairing on the Base (receiving) device."); return; }
+  if (peerState.role !== "base") {
+    setPeerRole("base");
+    appendPeerLog("Start pairing: this device is now the Base (receiver).");
+  }
   await peerCreateOffer();
   if (peerLocalSdp && peerLocalSdp.value) {
     renderPeerLocalQr();
@@ -4134,6 +4156,10 @@ async function peerQuickStart() {
 function syncPeerQuickUi() {
   const card = document.getElementById("peerTransferCard");
   if (card && peerRoleSelect) card.dataset.role = peerRoleSelect.value;
+  const badge = document.getElementById("peerRoleBadge");
+  if (badge && peerRoleSelect) {
+    badge.textContent = peerRoleSelect.value === "rover" ? "This device: Rover (sends)" : "This device: Base (receives)";
+  }
 }
 
 async function peerCreateOffer() {
@@ -4488,7 +4514,15 @@ function attachPeerDataChannel(dc) {
         appendPeerLog(`Sent bridge sync: "${b.title || b.id}" to rover.`);
       }
     }
-    if (peerState.role === "rover") void reportUndeliveredPhotos();
+    if (peerState.role === "rover") {
+      peerState.dropped = false;
+      void reportUndeliveredPhotos().then((list) => {
+        // With auto-send on, catch the base up straight away after a reconnect.
+        if (list && list.length && peerState.autoSend) void peerSendUndelivered();
+      });
+    }
+    peerState.dropped = false;
+    setPeerHeaderAlert(false);
   };
   dc.onclose = () => {
     appendPeerLog("Data channel closed.");
@@ -4498,7 +4532,7 @@ function attachPeerDataChannel(dc) {
     peerState.incoming = null;
     failPendingPeerAcks("Transfer link closed.");
     releasePeerWakeLock();
-    setStatus("Transfer link closed (screen off or out of range). Re-pair: Base taps Start pairing, Rover taps Scan code. Undelivered photos can be resent after.");
+    void onPeerLinkDropped();
   };
   // Handle messages strictly in order. They used to run concurrently, so while
   // one photo was being saved the next file-start replaced peerState.incoming,
@@ -4630,7 +4664,7 @@ async function handlePeerMessage(data) {
       return;
     }
     if (msg.t === "file-start") {
-      const kind = ["bridge-ifc", "bridge-kml"].includes(msg.kind) ? msg.kind : "photo";
+      const kind = ["bridge-ifc", "bridge-kml", "photo-part"].includes(msg.kind) ? msg.kind : "photo";
       const size = Number(msg.size) || 0;
       const cap = kind === "photo" ? PEER_MAX_PHOTO_BYTES : PEER_MAX_ASSET_BYTES;
       if (!(size > 0) || size > cap) {
@@ -4668,7 +4702,7 @@ async function handlePeerMessage(data) {
         sendPeerAck(msg.id, false, (e && e.message) || "save failed");
         throw e;
       }
-      if (res) sendPeerAck(msg.id, res.ok, res.reason, res.dup);
+      if (res) sendPeerAck(msg.id, res.ok, res.reason, res.dup, res.hash);
       return;
     }
     return;
@@ -4700,6 +4734,7 @@ async function finalizeIncomingFile(fileId) {
     return { ok: false, reason: "incomplete" };
   }
   if (incoming.kind === "photo" && !/^image\//.test(incoming.mime || "")) incoming.mime = "image/jpeg";
+  if (incoming.kind === "photo-part" && !/^(image\/|text\/plain|application\/octet-stream)/.test(incoming.mime || "")) incoming.mime = "application/octet-stream";
   const blob = new Blob(incoming.chunks, { type: incoming.mime || "image/jpeg" });
   // Verify the bytes against the sender's checksum before keeping anything.
   let incomingHash = null;
@@ -4712,6 +4747,9 @@ async function finalizeIncomingFile(fileId) {
 
   if (incoming.kind === "bridge-ifc" || incoming.kind === "bridge-kml") {
     return finalizeIncomingBridgeAsset(incoming, blob);
+  }
+  if (incoming.kind === "photo-part") {
+    return finalizeIncomingPhotoPart(incoming, blob);
   }
 
   // File the photo under the bridge the Rover took it in, when this device has
@@ -4736,12 +4774,26 @@ async function finalizeIncomingFile(fileId) {
   const dup = incomingHash
     ? existing.find((r) => r && !r.isScanFrame && !r.isScanSession && r.transferHash === incomingHash)
     : null;
-  if (dup) {
-    appendPeerLog(`Already have ${incoming.name}; not saved twice.`);
-    setStatus(`Received photo already exists: ${incoming.name}`);
-    return { ok: true, dup: true };
-  }
   const meta = sanitizePeerPhotoMeta(incoming.meta);
+  if (dup) {
+    // Same image again: the rover edited it after delivery (comment, tags,
+    // annotation...). Apply the new metadata instead of storing a copy.
+    if (incoming.meta) {
+      Object.assign(dup, {
+        comment: meta.comment != null ? meta.comment : dup.comment,
+        location: meta.location || dup.location, heading: meta.heading ?? dup.heading,
+        facing: meta.facing || dup.facing, attitude: meta.attitude ?? dup.attitude,
+        tags: meta.tags ? normalizeTags(meta.tags) : dup.tags,
+        aprilTags: meta.aprilTags || dup.aprilTags, aprilTagDetections: meta.aprilTagDetections || dup.aprilTagDetections,
+        isSketch: meta.isSketch, deskewActive: meta.deskewActive,
+        ...meta.extra,
+      });
+      await runTransaction("readwrite", (store) => store.put(dup));
+      if (activeBridgeId === dup.bridgeId) await renderSavedPhotos();
+    }
+    appendPeerLog(`Updated ${incoming.name} (already had the image).`);
+    return { ok: true, dup: true, hash: incomingHash };
+  }
   const record = {
     id: createId(),
     bridgeId: targetBridgeId,
@@ -4758,6 +4810,9 @@ async function finalizeIncomingFile(fileId) {
     tags: normalizeTags(meta.tags),
     aprilTags: meta.aprilTags,
     aprilTagDetections: meta.aprilTagDetections,
+    isSketch: meta.isSketch,
+    deskewActive: meta.deskewActive,
+    ...meta.extra,
     transferredVia: "webrtc-local",
     transferHash: incomingHash,
   };
@@ -4768,7 +4823,7 @@ async function finalizeIncomingFile(fileId) {
   appendPeerLog(`Saved ${incoming.name}${where}${meta.location ? " with location" : ""}.`);
   setStatus(`Received photo: ${incoming.name}${where}`);
   setPeerConnState("Transfer link: connected (" + peerState.role + ")");
-  return { ok: true };
+  return { ok: true, hash: incomingHash };
 }
 
 const PEER_MAX_PHOTO_BYTES = 80 * 1024 * 1024;
@@ -4791,12 +4846,27 @@ function sanitizePeerPhotoMeta(m) {
   if (m.tags && typeof m.tags === "object") { try { out.tags = JSON.parse(JSON.stringify(m.tags)); } catch (_) {} }
   if (Array.isArray(m.aprilTags)) out.aprilTags = m.aprilTags.filter((x) => typeof x === "number").slice(0, 64);
   if (Array.isArray(m.aprilTagDetections)) { try { out.aprilTagDetections = JSON.parse(JSON.stringify(m.aprilTagDetections.slice(0, 64))); } catch (_) {} }
+  out.isSketch = !!m.isSketch;
+  out.deskewActive = !!m.deskewActive;
+  out.extra = {};
+  for (const k of PEER_JSON_FIELDS) {
+    if (m[k] == null) continue;
+    try {
+      const j = JSON.stringify(m[k]);
+      if (j.length <= 2 * 1024 * 1024) out.extra[k] = JSON.parse(j); // plain data only, bounded
+    } catch (_) {}
+  }
   return out;
 }
 
+// JSON fields that travel with a photo - the same set Download ZIP preserves.
+const PEER_JSON_FIELDS = ["aprilTagsDeskew", "aprilTagDetectionsDeskew", "annotationData", "annotationDataDeskew", "ifcTags", "ifcTag"];
+// Binary/text attachments sent after the main image, linked by its hash.
+const PEER_PART_FIELDS = ["thermalBlob", "depthBlob", "deskewBlob", "annotationOverlayBlob", "annotationOverlayBlobDeskew", "plyText"];
+
 function photoMetaForPeer(rec) {
   if (!rec) return null;
-  return {
+  const m = {
     comment: rec.comment || "",
     location: rec.location || null,
     heading: rec.heading ?? null,
@@ -4805,7 +4875,64 @@ function photoMetaForPeer(rec) {
     tags: rec.tags || null,
     aprilTags: rec.aprilTags || null,
     aprilTagDetections: rec.aprilTagDetections || null,
+    isSketch: !!rec.isSketch,
+    deskewActive: !!rec.deskewActive,
   };
+  for (const k of PEER_JSON_FIELDS) if (rec[k] != null) m[k] = rec[k];
+  return m;
+}
+
+// Signature of everything that would be sent, so a photo edited after it was
+// delivered (annotation, tags, comment, de-skew) counts as undelivered again
+// without every edit path having to remember to flag it.
+function peerRecordSignature(rec) {
+  let s = "";
+  try { s = JSON.stringify(photoMetaForPeer(rec)); } catch (_) {}
+  for (const k of PEER_PART_FIELDS) {
+    const v = rec[k];
+    s += "|" + k + ":" + (v instanceof Blob ? v.size : (typeof v === "string" ? v.length : 0));
+  }
+  s += "|main:" + (rec.blob instanceof Blob ? rec.blob.size : 0);
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+// Send one stored photo with its metadata and attachments; resolves true when
+// the receiver has confirmed all of it, and records the delivery.
+async function sendPhotoRecordToPeer(rec, dc) {
+  const stamp = String(rec.createdAt || "").replace(/[:.]/g, "-");
+  const mainName = `${rec.isSketch ? "sketch" : "photo"}-${stamp}-${String(rec.id).slice(0, 8)}.jpg`;
+  const ack = await sendBlobOverDataChannel(rec.blob, mainName, rec.blob.type || "image/jpeg", dc, rec.createdAt,
+    { recId: rec.id, bridgeId: rec.bridgeId, meta: photoMetaForPeer(rec) });
+  if (!ack || !ack.ok) return false;
+  for (const key of PEER_PART_FIELDS) {
+    const v = rec[key];
+    if (v == null) continue;
+    const blob = v instanceof Blob ? v : (typeof v === "string" ? new Blob([v], { type: "text/plain" }) : null);
+    if (!blob || !blob.size) continue;
+    const partAck = await sendBlobOverDataChannel(blob, `${key}-${String(rec.id).slice(0, 8)}`, blob.type || "application/octet-stream", dc, rec.createdAt,
+      { kind: "photo-part", bridgeId: rec.bridgeId, meta: { parentHash: ack.hash, key } });
+    if (!partAck || !partAck.ok) return false;
+  }
+  await markPhotoDelivered(rec.id, peerRecordSignature(rec));
+  return true;
+}
+
+// Attach a thermal / depth / de-skewed / overlay image or point cloud to the
+// photo it belongs to (sent just before it, linked by the main image's hash).
+async function finalizeIncomingPhotoPart(incoming, blob) {
+  const key = incoming.meta && incoming.meta.key;
+  const parentHash = incoming.meta && incoming.meta.parentHash;
+  if (!PEER_PART_FIELDS.includes(key) || !parentHash) return { ok: false, reason: "bad attachment" };
+  const all = await runTransaction("readonly", (store) => store.getAll());
+  const rec = all.find((r) => r && r.transferHash === parentHash);
+  if (!rec) return { ok: false, reason: "photo for attachment not found" };
+  rec[key] = key === "plyText" ? await blob.text() : blob;
+  await runTransaction("readwrite", (store) => store.put(rec));
+  if (activeBridgeId === rec.bridgeId) await renderSavedPhotos();
+  appendPeerLog(`Attached ${key.replace(/Blob$/, "")} to a received photo.`);
+  return { ok: true };
 }
 
 async function finalizeIncomingBridgeAsset(incoming, blob) {
@@ -4834,10 +4961,10 @@ async function finalizeIncomingBridgeAsset(incoming, blob) {
   return { ok: true };
 }
 
-function sendPeerAck(id, ok, reason, dup) {
+function sendPeerAck(id, ok, reason, dup, hash) {
   const dc = peerState.dc;
   if (!dc || dc.readyState !== "open") return;
-  try { dc.send(JSON.stringify({ t: "file-ack", id, ok: !!ok, reason: reason || null, dup: !!dup })); } catch (_) {}
+  try { dc.send(JSON.stringify({ t: "file-ack", id, ok: !!ok, reason: reason || null, dup: !!dup, hash: hash || null })); } catch (_) {}
 }
 
 function failPendingPeerAcks(reason) {
@@ -4858,12 +4985,13 @@ function waitForPeerAck(id, size) {
   });
 }
 
-async function markPhotoDelivered(recId) {
+async function markPhotoDelivered(recId, sig) {
   if (!recId) return;
   try {
     const rec = await runTransaction("readonly", (store) => store.get(recId));
     if (!rec) return;
     rec.peerDeliveredAt = new Date().toISOString();
+    rec.peerDeliveredSig = sig || peerRecordSignature(rec);
     await runTransaction("readwrite", (store) => store.put(rec));
   } catch (e) { console.warn("mark delivered:", e); }
 }
@@ -4872,7 +5000,8 @@ async function undeliveredPhotos(bridgeId) {
   if (!bridgeId) return [];
   const all = await runTransaction("readonly", (store) => store.getAll());
   return all.filter((r) => r && r.bridgeId === bridgeId && r.blob instanceof Blob
-    && !r.isScanFrame && !r.isScanSession && !r.peerDeliveredAt && r.transferredVia !== "webrtc-local")
+    && !r.isScanFrame && !r.isScanSession && r.transferredVia !== "webrtc-local"
+    && (!r.peerDeliveredAt || r.peerDeliveredSig !== peerRecordSignature(r)))
     .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
 }
 
@@ -4893,10 +5022,7 @@ async function peerSendUndelivered() {
   let ok = 0, failed = 0;
   for (const rec of list) {
     try {
-      const stamp = String(rec.createdAt || "").replace(/[:.]/g, "-");
-      const ack = await sendBlobOverDataChannel(rec.blob, `photo-${stamp}-${rec.id.slice(0, 8)}.jpg`, rec.blob.type || "image/jpeg", dc, rec.createdAt,
-        { recId: rec.id, bridgeId: rec.bridgeId, meta: photoMetaForPeer(rec) });
-      if (ack && ack.ok) ok++; else failed++;
+      if (await sendPhotoRecordToPeer(rec, dc)) ok++; else failed++;
     } catch (e) {
       failed++;
       if (!peerState.dc || peerState.dc.readyState !== "open") break;
@@ -4989,8 +5115,7 @@ async function sendBlobNow(blob, name, mime, dc, createdAt, opts = {}) {
     throw e;
   }
   if (ack.ok) {
-    appendPeerLog(`Delivered ${name || "photo.jpg"} (${blob.size} bytes)${ack.dup ? " (base already had it)" : ""} ✓`);
-    if (opts.recId) await markPhotoDelivered(opts.recId);
+    appendPeerLog(`Delivered ${name || "photo.jpg"} (${blob.size} bytes)${ack.dup ? " (updated on base)" : ""} ✓`);
   } else {
     appendPeerLog(`Base could not save ${name || "photo.jpg"}: ${ack.reason || "unknown error"}`);
   }
@@ -5012,14 +5137,41 @@ function queueAutoSendCapture(record) {
     // No "already sending" early return: that silently dropped any capture
     // taken while another send ran. The transmit queue serialises them.
     try {
-      const stamp = capturedAt.replace(/[:.]/g, "-");
-      const ack = await sendBlobOverDataChannel(blob, `capture-${stamp}.jpg`, "image/jpeg", dc, capturedAt,
-        { recId: record.id, bridgeId: record.bridgeId, meta: photoMetaForPeer(record) });
-      setStatus(ack && ack.ok ? "Photo saved and delivered to base ✓" : `Photo saved; base could not store it (${(ack && ack.reason) || "unknown"}).`);
+      const ok = await sendPhotoRecordToPeer({ ...record, createdAt: capturedAt }, dc);
+      setStatus(ok ? "Photo saved and delivered to base ✓" : "Photo saved; base could not store it. It stays under Send undelivered.");
     } catch (e) {
       setStatus("Photo saved, but auto-send failed: " + e.message);
     }
   }).catch((e) => console.warn("auto-send queue:", e));
+}
+
+// A link that drops (screen off, out of range) needs a new code exchange - there
+// is no server to reconnect through - so make that one tap on each side: the
+// Base immediately prepares and shows a fresh code; the Rover's header button
+// flags the drop and Transfer opens straight to Scan code.
+async function onPeerLinkDropped() {
+  if (peerState.dropped) return;
+  peerState.dropped = true;
+  setPeerHeaderAlert(true);
+  if (peerState.role === "base") {
+    setStatus("Transfer link dropped. A new code is ready: on the phone, open 🔁 Transfer and tap Scan code.");
+    try {
+      openPeerTransferView();
+      await peerQuickStart();
+    } catch (e) { console.warn("re-pair offer:", e); }
+  } else {
+    setStatus("Transfer link dropped. Photos you take are kept. Tap 🔁 Transfer ⚠ and Scan code on the tablet's new code to reconnect.");
+  }
+}
+
+function setPeerHeaderAlert(on) {
+  const btn = document.getElementById("openPeerTransferViewTop");
+  if (!btn) return;
+  btn.classList.toggle("peer-link-dropped", !!on);
+  const live = btn.querySelector(".live-dot");
+  if (on && !btn.querySelector(".drop-dot")) btn.insertAdjacentHTML("beforeend", ' <span class="drop-dot" aria-label="link dropped">⚠</span>');
+  if (!on) { const d = btn.querySelector(".drop-dot"); if (d) d.remove(); }
+  if (on && live) live.remove();
 }
 
 // Keep the screen on while linked: on a phone, the screen turning off suspends
@@ -5142,9 +5294,7 @@ async function openPeerSavedPickerModal() {
       for (const id of selected) {
         const rec = byId.get(id);
         if (!rec || !(rec.blob instanceof Blob)) continue;
-        const stamp = String(rec.createdAt || new Date().toISOString()).replace(/[:.]/g, "-");
-        await sendBlobOverDataChannel(rec.blob, `saved-${stamp}-${rec.id.slice(0, 8)}.jpg`, "image/jpeg", dcNow, rec.createdAt,
-          { recId: rec.id, bridgeId: rec.bridgeId, meta: photoMetaForPeer(rec) });
+        await sendPhotoRecordToPeer(rec, dcNow);
         sent++;
       }
       appendPeerLog(`Sent ${sent} saved app photo(s).`);
