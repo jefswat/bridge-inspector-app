@@ -709,8 +709,15 @@ class IFCViewer {
       const siteIds = ifc.GetLineIDsWithType(modelID, WebIFC.IFCSITE);
       if (siteIds && siteIds.size && siteIds.size() > 0) {
         const site = ifc.GetLine(modelID, siteIds.get(0));
-        const re = Number(val(site.RefElevation));
-        if (isFinite(re)) this.siteRefElevM = re;
+        // An unset RefElevation ($) comes back null, and Number(null) is 0 -
+        // which made a model with no authored ground level look like it stood
+        // at sea level, so every GPS altitude was rejected as a datum mismatch
+        // and the viewer was put ~200 m below a NAVD88 bridge. Unset means
+        // unknown. The value is in project length units (web-ifc converts
+        // geometry to metres, not attribute values).
+        const raw = val(site.RefElevation);
+        const re = (raw === null || raw === undefined || raw === '') ? NaN : Number(raw);
+        if (isFinite(re)) this.siteRefElevM = re * (this.projectLengthUnitMetres(ifc, modelID) || 1);
       }
     } catch (e) { /* no site, or no RefElevation on it */ }
 
